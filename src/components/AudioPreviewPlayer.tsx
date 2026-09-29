@@ -13,14 +13,19 @@ import {
   Radio,
   FileAudio,
   Save,
+  Sliders,
 } from 'lucide-react';
 import {
   base64ToArrayBuffer,
   getAudioContext,
+  generateAmbientAudioBuffer,
+  audioBufferToWav,
   mixAudioTracks,
-  exportAudioWithQuality
+  exportAudioWithQuality,
+  autoPlanPodcastCues,
 } from '../utils/audioUtils';
-import { AmbientSoundscape } from '../types/podcast';
+import { AmbientSoundscape, AudioSegmentCue, SoundCueType } from '../types/podcast';
+import { AMBIENT_SOUNDSCAPES } from '../data/ambientSoundscapes';
 
 interface AudioPreviewPlayerProps {
   rawAudioWavBase64: string;
@@ -28,6 +33,8 @@ interface AudioPreviewPlayerProps {
   voiceName: string;
   category: string;
   ambientSound: AmbientSoundscape;
+  ambientVolume?: number;
+  onChangeAmbientSound?: (sound: AmbientSoundscape) => void;
   durationSeconds: number;
   onSaveToCMS?: () => void;
   lang: 'uz' | 'ru';
@@ -39,6 +46,8 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
   voiceName,
   category,
   ambientSound,
+  ambientVolume = 20,
+  onChangeAmbientSound,
   durationSeconds,
   onSaveToCMS,
   lang,
@@ -50,14 +59,26 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
   const [isMuted, setIsMuted] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1.0);
   
-  // Ambient background mixer state (Default OFF for 100% clean pristine voice output without hum/noise)
-  const [ambientEnabled, setAmbientEnabled] = useState(false);
-  const [ambientVolume, setAmbientVolume] = useState(15); // gentle 15% if user turns it on
+  // Ambient background mixer state
+  const [currentAmbient, setCurrentAmbient] = useState<AmbientSoundscape>(ambientSound);
+  const [ambientEnabled, setAmbientEnabled] = useState(ambientSound !== 'none');
+  const [ambientVol, setAmbientVol] = useState(ambientVolume || 20);
+
+  // Dynamic Sound Director & Cue Timeline State
+  const [soundDirectorMode, setSoundDirectorMode] = useState<boolean>(true);
+  const [cues, setCues] = useState<AudioSegmentCue[]>(() =>
+    autoPlanPodcastCues(durationSeconds || 60, 5, ambientSound !== 'none' ? ambientSound : 'calm-piano')
+  );
+  const [isPlanningDirector, setIsPlanningDirector] = useState<boolean>(false);
+  const [directorStrategy, setDirectorStrategy] = useState<{ strategyUz: string; strategyRu: string } | null>({
+    strategyUz: "Dinamik saund-dizayn: Bitta uzluksiz fondan voz kechilib, kirishda 8 soniyalik jingle, asosiy qismda toza ovoz (silence), chuqur fikrda mayin fon va finalda outro qo'yildi.",
+    strategyRu: "Динамический саунд-дизайн: Вместо бесконечного лупа расставлены акценты — яркое интро, чистый голос без музыки в середине, акцент и финальное аутро.",
+  });
 
   // Export & Download settings
   const [exportFormat, setExportFormat] = useState<'wav' | 'mp3'>('wav');
   const [exportQuality, setExportQuality] = useState<'lossless' | '320k' | '192k' | '128k'>('lossless');
-  const [includeAmbientInExport, setIncludeAmbientInExport] = useState(false);
+  const [includeAmbientInExport, setIncludeAmbientInExport] = useState(ambientSound !== 'none');
   const [isExporting, setIsExporting] = useState(false);
   const [exportSuccess, setExportSuccess] = useState(false);
   const [isSavedToCMS, setIsSavedToCMS] = useState(false);
@@ -69,6 +90,59 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
   const audioSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const ambientAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Sync ambient sound if prop changes
+  useEffect(() => {
+    setCurrentAmbient(ambientSound);
+    if (ambientSound !== 'none') {
+      setAmbientEnabled(true);
+      setIncludeAmbientInExport(true);
+    }
+  }, [ambientSound]);
+
+  // Maintain ambient audio loop
+  useEffect(() => {
+    if (currentAmbient === 'none') {
+      if (ambientAudioRef.current) {
+        ambientAudioRef.current.pause();
+        ambientAudioRef.current.src = '';
+      }
+      return;
+    }
+
+    try {
+      const ctx = getAudioContext();
+      // Generate a 16-second seamless loop for ambient playback
+      const ambientBuf = generateAmbientAudioBuffer(ctx, 16.0, currentAmbient);
+      const wavBlob = audioBufferToWav(ambientBuf, ctx.sampleRate);
+      const url = URL.createObjectURL(wavBlob);
+
+      if (!ambientAudioRef.current) {
+        ambientAudioRef.current = new Audio(url);
+      } else {
+        ambientAudioRef.current.src = url;
+      }
+      ambientAudioRef.current.loop = true;
+      ambientAudioRef.current.volume = isMuted ? 0 : Math.max(0, Math.min(1, (ambientVol / 100) * 0.65));
+
+      if (isPlaying && ambientEnabled) {
+        ambientAudioRef.current.play().catch(() => {});
+      }
+
+      return () => {
+        URL.revokeObjectURL(url);
+      };
+    } catch (err) {
+      console.error('Failed to create ambient audio loop:', err);
+    }
+  }, [currentAmbient]);
+
+  // Sync ambient volume
+  useEffect(() => {
+    if (ambientAudioRef.current) {
+      ambientAudioRef.current.volume = isMuted ? 0 : Math.max(0, Math.min(1, (ambientVol / 100) * 0.65));
+    }
+  }, [ambientVol, isMuted]);
 
   // Initialize and load audio data
   const [audioUrl, setAudioUrl] = useState<string>('');
@@ -119,11 +193,39 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
     if (!audioRef.current) return;
     if (isPlaying) {
       audioRef.current.pause();
+      if (ambientAudioRef.current) {
+        ambientAudioRef.current.pause();
+      }
       setIsPlaying(false);
     } else {
       audioRef.current.play().catch(console.error);
+      if (ambientEnabled && currentAmbient !== 'none' && ambientAudioRef.current) {
+        ambientAudioRef.current.play().catch(console.error);
+      }
       setIsPlaying(true);
     }
+  };
+
+  const handleToggleAmbient = () => {
+    const next = !ambientEnabled;
+    setAmbientEnabled(next);
+    setIncludeAmbientInExport(next);
+    if (!next) {
+      ambientAudioRef.current?.pause();
+    } else {
+      if (isPlaying && ambientAudioRef.current && currentAmbient !== 'none') {
+        ambientAudioRef.current.play().catch(console.error);
+      }
+    }
+  };
+
+  const handleSelectAmbient = (sound: AmbientSoundscape) => {
+    setCurrentAmbient(sound);
+    if (sound !== 'none') {
+      setAmbientEnabled(true);
+      setIncludeAmbientInExport(true);
+    }
+    onChangeAmbientSound?.(sound);
   };
 
   // Setup Web Audio Analyser for Waveform
@@ -156,12 +258,30 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
     };
 
     const handleTimeUpdate = () => {
-      setCurrentTime(audio.currentTime);
+      const cur = audio.currentTime;
+      setCurrentTime(cur);
+
+      // Real-time sound director ducking & silence enforcement
+      if (soundDirectorMode && ambientAudioRef.current && ambientEnabled) {
+        const activeCue = cues.find((c) => (c.startTime ?? 0) <= cur && cur < (c.endTime ?? (totalDuration || 60)));
+        if (activeCue) {
+          if (activeCue.cueType === 'silence' || activeCue.soundscape === 'none' || activeCue.volumePercent <= 0) {
+            ambientAudioRef.current.volume = 0; // Pure dry silence!
+          } else {
+            const factor = (activeCue.volumePercent / 100) * 0.65;
+            ambientAudioRef.current.volume = isMuted ? 0 : Math.max(0, Math.min(1, factor));
+          }
+        }
+      }
     };
 
     const handleEnded = () => {
       setIsPlaying(false);
       setCurrentTime(0);
+      if (ambientAudioRef.current) {
+        ambientAudioRef.current.pause();
+        ambientAudioRef.current.currentTime = 0;
+      }
     };
 
     audio.addEventListener('loadedmetadata', handleLoadedMetadata);
@@ -173,7 +293,109 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
       audio.removeEventListener('timeupdate', handleTimeUpdate);
       audio.removeEventListener('ended', handleEnded);
     };
-  }, [audioUrl, durationSeconds]);
+  }, [audioUrl, durationSeconds, soundDirectorMode, cues, ambientEnabled, isMuted]);
+
+  // Sync cues to actual audio duration when totalDuration updates
+  useEffect(() => {
+    if (totalDuration > 0) {
+      setCues((prev) => {
+        if (!prev || prev.length === 0) {
+          return autoPlanPodcastCues(totalDuration, 5, currentAmbient !== 'none' ? currentAmbient : 'calm-piano');
+        }
+        const oldTotal = prev[prev.length - 1]?.endTime || totalDuration;
+        const scale = totalDuration / oldTotal;
+        return prev.map((c) => ({
+          ...c,
+          startTime: Math.round((c.startTime ?? 0) * scale * 10) / 10,
+          endTime: Math.round((c.endTime ?? totalDuration) * scale * 10) / 10,
+        }));
+      });
+    }
+  }, [totalDuration]);
+
+  // AI Sound Director request
+  const handleRunSoundDirector = async () => {
+    setIsPlanningDirector(true);
+    try {
+      const res = await fetch('/api/podcast/sound-director', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topic: title,
+          category,
+          preferredSoundscape: currentAmbient,
+          turns: [
+            { speakerName: voiceName, text: `Podkast boshlanishi: ${title}` },
+            { speakerName: voiceName, text: `Asosiy tahlil, faktlar va mulohazalar` },
+            { speakerName: voiceName, text: `Chuqur falsafiy ma'no va shaxsiy hikoya` },
+            { speakerName: voiceName, text: `Yangi xulosalar va taqqoslash` },
+            { speakerName: voiceName, text: `Epizod yakuni va tinglovchilarga minnatdorchilik` },
+          ],
+        }),
+      });
+
+      if (!res.ok) throw new Error('Sound director request failed');
+      const data = await res.json();
+      if (data.strategyUz) {
+        setDirectorStrategy({ strategyUz: data.strategyUz, strategyRu: data.strategyRu });
+      }
+      if (Array.isArray(data.cues) && data.cues.length > 0) {
+        const segDur = (totalDuration || 60) / data.cues.length;
+        const plannedCues: AudioSegmentCue[] = data.cues.map((c: any, i: number) => ({
+          id: `cue-${i}-${Date.now()}`,
+          turnIndex: i,
+          startTime: Math.round(i * segDur * 10) / 10,
+          endTime: Math.round((i + 1) * segDur * 10) / 10,
+          cueType: c.cueType,
+          soundscape: c.soundscape,
+          volumePercent: c.volumePercent,
+          labelUz: c.labelUz,
+          labelRu: c.labelRu,
+          reasoning: c.reasoning,
+        }));
+        setCues(plannedCues);
+      }
+    } catch (err) {
+      console.warn('Fallback to local sound director:', err);
+      setCues(autoPlanPodcastCues(totalDuration || 60, 5, currentAmbient));
+    } finally {
+      setIsPlanningDirector(false);
+    }
+  };
+
+  const handleToggleCueSilence = (cueId: string) => {
+    setCues((prev) =>
+      prev.map((c) => {
+        if (c.id !== cueId) return c;
+        const willBeSilence = c.cueType !== 'silence';
+        return {
+          ...c,
+          cueType: willBeSilence ? 'silence' : 'bed',
+          soundscape: willBeSilence ? 'none' : currentAmbient !== 'none' ? currentAmbient : 'calm-piano',
+          volumePercent: willBeSilence ? 0 : 15,
+          labelUz: willBeSilence ? 'Toza ovoz (Silence)' : 'Mayin fon (Bed)',
+          labelRu: willBeSilence ? 'Чистый голос (без музыки)' : 'Эмбиент',
+        };
+      })
+    );
+  };
+
+  const handleUpdateCueSound = (cueId: string, snd: AmbientSoundscape) => {
+    setCues((prev) =>
+      prev.map((c) => {
+        if (c.id !== cueId) return c;
+        const isNone = snd === 'none';
+        return {
+          ...c,
+          soundscape: snd,
+          cueType: isNone ? 'silence' : c.cueType === 'silence' ? 'bed' : c.cueType,
+          volumePercent: isNone ? 0 : c.volumePercent || 15,
+          labelUz: isNone ? 'Toza ovoz' : AMBIENT_SOUNDSCAPES.find((s) => s.id === snd)?.labelUz || 'Fon',
+          labelRu: isNone ? 'Чистый голос' : AMBIENT_SOUNDSCAPES.find((s) => s.id === snd)?.labelRu || 'Фон',
+        };
+      })
+    );
+  };
 
   // Canvas visualizer loop
   useEffect(() => {
@@ -249,6 +471,9 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
     const newTime = pos * totalDuration;
     audioRef.current.currentTime = newTime;
     setCurrentTime(newTime);
+    if (ambientAudioRef.current && ambientAudioRef.current.duration) {
+      ambientAudioRef.current.currentTime = newTime % ambientAudioRef.current.duration;
+    }
   };
 
   // Handle Playback Speed
@@ -276,12 +501,13 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
       const rawBuffer = base64ToArrayBuffer(rawAudioWavBase64);
       let finalWavBlob: Blob;
 
-      if (includeAmbientInExport && ambientEnabled && ambientSound !== 'none') {
+      if (includeAmbientInExport && ambientEnabled && currentAmbient !== 'none') {
         const { wavBlob } = await mixAudioTracks(
           rawBuffer,
-          ambientSound,
-          ambientVolume,
-          100
+          currentAmbient,
+          ambientVol,
+          100,
+          soundDirectorMode ? cues : undefined
         );
         finalWavBlob = wavBlob;
       } else {
@@ -385,6 +611,162 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
         </div>
       </div>
 
+      {/* Sound Director & Interactive Cue Timeline Track */}
+      <div className="mt-4 p-4 rounded-2xl bg-zinc-950/80 border border-purple-500/25 space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+          <div className="flex items-center gap-2">
+            <span className="p-1 rounded-lg bg-purple-500/20 text-purple-300 border border-purple-500/30">
+              <Sliders className="w-3.5 h-3.5" />
+            </span>
+            <div>
+              <h4 className="text-xs sm:text-sm font-bold text-white flex items-center gap-1.5">
+                {lang === 'uz' ? 'Ovoz Rejissyori: Dinamik Saund-Dizayn & Sukunat' : 'Звукорежиссура: Динамический саунд и тишина'}
+              </h4>
+              <p className="text-[11px] text-zinc-400">
+                {lang === 'uz'
+                  ? 'Bitta zerikarli uzluksiz fondan voz kechilgan: kirishda jingle, asosiy nutqda toza ovoz (silence), kerakli nuqtada mayin fon.'
+                  : 'Без монотонного длинного пианино: интро-джингл, кристально чистый голос без музыки в середине, акцент и аутро.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 self-start sm:self-auto">
+            {/* Mode switch */}
+            <div className="flex items-center bg-zinc-900 p-0.5 rounded-lg border border-zinc-800 text-[11px]">
+              <button
+                type="button"
+                onClick={() => setSoundDirectorMode(true)}
+                className={`px-2 py-1 rounded font-semibold transition-all cursor-pointer ${
+                  soundDirectorMode
+                    ? 'bg-purple-600 text-white shadow-sm'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                {lang === 'uz' ? 'Dinamik Rejissura' : 'Динамика'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSoundDirectorMode(false)}
+                className={`px-2 py-1 rounded font-semibold transition-all cursor-pointer ${
+                  !soundDirectorMode
+                    ? 'bg-zinc-800 text-zinc-200'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                {lang === 'uz' ? 'Statik Loop' : 'Статично'}
+              </button>
+            </div>
+
+            {/* AI Auto-plan button */}
+            <button
+              type="button"
+              onClick={handleRunSoundDirector}
+              disabled={isPlanningDirector}
+              className="px-3 py-1 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-sm transition-all cursor-pointer"
+            >
+              <Sparkles className={`w-3 h-3 ${isPlanningDirector ? 'animate-spin' : ''}`} />
+              <span>{isPlanningDirector ? (lang === 'uz' ? 'Reja tuzilmoqda...' : 'Анализ...') : (lang === 'uz' ? 'AI Taklif' : 'AI План')}</span>
+            </button>
+          </div>
+        </div>
+
+        {directorStrategy && (
+          <div className="p-2 rounded-xl bg-purple-950/30 border border-purple-500/20 text-[11px] text-purple-200 flex items-start gap-1.5">
+            <Sparkles className="w-3.5 h-3.5 text-purple-400 shrink-0 mt-0.5" />
+            <p>
+              <strong>{lang === 'uz' ? 'Strategiya:' : 'Стратегия:'}</strong>{' '}
+              {lang === 'uz' ? directorStrategy.strategyUz : directorStrategy.strategyRu}
+            </p>
+          </div>
+        )}
+
+        {/* Visual Cue Track blocks */}
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between text-[11px] text-zinc-400 px-0.5">
+            <span>{lang === 'uz' ? 'Musiqa va Sukunat xaritasi (bosib o\'zgartiring):' : 'Карта музыки и тишины (нажмите для переключения):'}</span>
+            <span className="text-[10px] text-zinc-500">
+              {lang === 'uz' ? '🔇 Bosganda toza ovoz / musiqa almashadi' : '🔇 Клик переключает звук/тишину'}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-5 gap-2">
+            {cues.map((cue, idx) => {
+              const isActive = currentTime >= (cue.startTime ?? 0) && currentTime < (cue.endTime ?? totalDuration);
+              const isSilence = cue.cueType === 'silence' || cue.soundscape === 'none' || cue.volumePercent <= 0;
+
+              return (
+                <div
+                  key={cue.id || idx}
+                  className={`p-2 rounded-xl border transition-all text-xs flex flex-col justify-between ${
+                    isActive
+                      ? 'border-yellow-400 bg-yellow-950/20 shadow-md shadow-yellow-500/10 ring-1 ring-yellow-400/50'
+                      : isSilence
+                      ? 'bg-zinc-900/60 border-zinc-800'
+                      : cue.cueType === 'intro'
+                      ? 'bg-purple-950/30 border-purple-500/30'
+                      : cue.cueType === 'stinger'
+                      ? 'bg-emerald-950/30 border-emerald-500/30'
+                      : cue.cueType === 'emotional'
+                      ? 'bg-cyan-950/30 border-cyan-500/30'
+                      : 'bg-rose-950/30 border-rose-500/30'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-1 mb-1">
+                    <span className="font-mono text-[10px] text-zinc-400">
+                      {formatTime(cue.startTime ?? 0)} - {formatTime(cue.endTime ?? totalDuration)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleToggleCueSilence(cue.id)}
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-bold cursor-pointer transition-colors ${
+                        isSilence
+                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                          : 'bg-zinc-800 text-zinc-300 hover:text-white'
+                      }`}
+                      title={isSilence ? 'Musiqani yoqish' : 'Sukunat (toza ovoz) qilish'}
+                    >
+                      {isSilence ? '🔇 Sukunat' : '🎵 Musiqa'}
+                    </button>
+                  </div>
+
+                  <div className="my-1">
+                    <div className="font-bold text-zinc-200 flex items-center gap-1 text-[11px] truncate">
+                      {isSilence ? (
+                        <span className="text-zinc-400">Toza ovoz (Silence)</span>
+                      ) : (
+                        <span>{lang === 'uz' ? cue.labelUz : cue.labelRu}</span>
+                      )}
+                    </div>
+                    {cue.reasoning && (
+                      <p className="text-[10px] text-zinc-500 line-clamp-2 mt-0.5 leading-tight" title={cue.reasoning}>
+                        {cue.reasoning}
+                      </p>
+                    )}
+                  </div>
+
+                  {!isSilence && (
+                    <div className="mt-1 pt-1 border-t border-zinc-800/60 flex items-center justify-between text-[10px]">
+                      <select
+                        value={cue.soundscape}
+                        onChange={(e) => handleUpdateCueSound(cue.id, e.target.value as AmbientSoundscape)}
+                        className="bg-zinc-950 border border-zinc-800 text-zinc-300 rounded px-1.5 py-0.5 text-[10px] max-w-[110px] truncate cursor-pointer"
+                      >
+                        {AMBIENT_SOUNDSCAPES.filter((s) => s.id !== 'none').map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.icon} {lang === 'uz' ? s.labelUz : s.labelRu}
+                          </option>
+                        ))}
+                      </select>
+                      <span className="font-mono text-zinc-400">{cue.volumePercent}%</span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
       {/* Transport Controls */}
       <div className="flex flex-wrap items-center justify-between gap-4 mt-4 pt-4 border-t border-zinc-800/70">
         <div className="flex items-center gap-3">
@@ -454,37 +836,60 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
         </div>
 
         {/* Ambient Soundscape Live Controls */}
-        <div className="flex items-center gap-2.5 bg-zinc-950/80 px-3 py-2 rounded-xl border border-zinc-800/80 text-xs">
+        <div className="flex flex-wrap items-center gap-2.5 bg-zinc-950/90 px-3 py-2 rounded-xl border border-zinc-800 text-xs">
           <div className="flex items-center gap-1.5 text-zinc-300">
-            <Music className="w-3.5 h-3.5 text-purple-400" />
-            <span>{lang === 'uz' ? 'Fon musiqasi:' : 'Фоновая музыка:'}</span>
+            <Music className={`w-3.5 h-3.5 ${isPlaying && ambientEnabled && currentAmbient !== 'none' ? 'text-purple-400 animate-spin' : 'text-purple-400'}`} />
+            <span className="font-semibold">{lang === 'uz' ? 'Fon musiqasi:' : 'Фоновая музыка:'}</span>
           </div>
 
+          {/* Soundscape Selector */}
+          <select
+            value={currentAmbient}
+            onChange={(e) => handleSelectAmbient(e.target.value as AmbientSoundscape)}
+            className="bg-zinc-900 border border-zinc-700/80 text-zinc-200 text-xs rounded-lg px-2.5 py-1 font-medium focus:outline-none focus:border-purple-500 cursor-pointer max-w-[170px] truncate"
+          >
+            {AMBIENT_SOUNDSCAPES.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.icon} {lang === 'uz' ? s.labelUz : s.labelRu}
+              </option>
+            ))}
+          </select>
+
           <button
-            onClick={() => setAmbientEnabled(!ambientEnabled)}
-            className={`px-2 py-0.5 rounded-md font-semibold transition-colors ${
-              ambientEnabled
-                ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
-                : 'bg-zinc-800 text-zinc-400'
+            onClick={handleToggleAmbient}
+            className={`px-2.5 py-1 rounded-lg font-semibold transition-all flex items-center gap-1 cursor-pointer ${
+              ambientEnabled && currentAmbient !== 'none'
+                ? 'bg-purple-500/25 text-purple-300 border border-purple-500/40 shadow-sm shadow-purple-500/20'
+                : 'bg-zinc-800/80 text-zinc-400 hover:text-zinc-200'
             }`}
           >
-            {ambientEnabled ? (lang === 'uz' ? 'Yoqilgan' : 'Вкл') : (lang === 'uz' ? 'O\'chirilgan' : 'Выкл')}
+            <span className={`w-1.5 h-1.5 rounded-full ${ambientEnabled && currentAmbient !== 'none' ? 'bg-purple-400 animate-pulse' : 'bg-zinc-600'}`} />
+            {ambientEnabled && currentAmbient !== 'none'
+              ? (lang === 'uz' ? 'Yoqilgan' : 'Вкл')
+              : (lang === 'uz' ? 'O\'chirilgan' : 'Выкл')}
           </button>
 
-          {ambientEnabled && (
-            <div className="flex items-center gap-1.5 pl-2 border-l border-zinc-800">
-              <span className="text-[10px] text-zinc-400">{ambientVolume}%</span>
+          {ambientEnabled && currentAmbient !== 'none' && (
+            <div className="flex items-center gap-2 pl-2 border-l border-zinc-800">
+              <span className="text-[10px] text-zinc-400 font-mono">{ambientVol}%</span>
               <input
                 type="range"
                 min="5"
                 max="50"
                 step="5"
-                value={ambientVolume}
-                onChange={(e) => setAmbientVolume(parseInt(e.target.value))}
-                className="w-14 accent-purple-400 h-1 bg-zinc-800 rounded-lg cursor-pointer"
+                value={ambientVol}
+                onChange={(e) => setAmbientVol(parseInt(e.target.value))}
+                className="w-16 accent-purple-400 h-1 bg-zinc-800 rounded-lg cursor-pointer"
                 title={lang === 'uz' ? 'Fon ovozi balandligi' : 'Громкость фона'}
               />
             </div>
+          )}
+
+          {isPlaying && ambientEnabled && currentAmbient !== 'none' && (
+            <span className="text-[10px] px-2 py-0.5 rounded-md bg-purple-950/60 border border-purple-500/30 text-purple-300 flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+              {lang === 'uz' ? 'Efirda yangramoqda' : 'Звучит в эфире'}
+            </span>
           )}
         </div>
       </div>
@@ -547,8 +952,8 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
             <label className="flex items-center gap-1.5 text-xs text-zinc-300 cursor-pointer bg-zinc-900 px-3 py-2 rounded-xl border border-zinc-800 hover:border-zinc-700">
               <input
                 type="checkbox"
-                checked={includeAmbientInExport && ambientEnabled}
-                disabled={!ambientEnabled}
+                checked={includeAmbientInExport && ambientEnabled && currentAmbient !== 'none'}
+                disabled={!ambientEnabled || currentAmbient === 'none'}
                 onChange={(e) => setIncludeAmbientInExport(e.target.checked)}
                 className="accent-cyan-400 rounded"
               />

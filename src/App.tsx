@@ -16,7 +16,8 @@ import { DocumentSourceModal } from './components/DocumentSourceModal';
 import { PODCAST_CATEGORIES } from './data/categories';
 import { PREBUILT_VOICE_PROFILES, USER_REPLICATED_VOICE, DEFAULT_USER_VOICE } from './data/voices';
 import { VoiceProfile, PodcastCategory, AmbientSoundscape } from './types/podcast';
-import { Sparkles, Radio, HelpCircle, Layers, CheckCircle, ShieldCheck } from 'lucide-react';
+import { getAllPodcastsFromDb, savePodcastToDb, deletePodcastFromDb } from './utils/db';
+import { Sparkles, Radio, HelpCircle, Layers, CheckCircle, ShieldCheck, Mic2, Users2, Film } from 'lucide-react';
 
 const LOCAL_STORAGE_VOICES_KEY = 'podkast_uz_voices_v2';
 const LOCAL_STORAGE_PODCASTS_KEY = 'podkast_uz_library_v2';
@@ -24,6 +25,7 @@ const LOCAL_STORAGE_PODCASTS_KEY = 'podkast_uz_library_v2';
 export default function App() {
   // Navigation & Language
   const [activeTab, setActiveTab] = useState<AppTab>('studio');
+  const [studioMode, setStudioMode] = useState<'solo' | 'interview' | 'voiceover'>('solo');
   const [lang, setLang] = useState<'uz' | 'ru'>('uz');
 
   // Voices State: initialize with default user replicated voice
@@ -69,6 +71,7 @@ export default function App() {
     voiceName: string;
     category: string;
     ambientSound: AmbientSoundscape;
+    ambientVolume?: number;
   } | null>(null);
 
   // Modals & Document Analyzer
@@ -158,7 +161,7 @@ export default function App() {
         style: 'Hujjatli & Epik',
         ambientSound: 'dutor-acoustic',
         ambientVolume: 20,
-        durationSeconds: 110,
+        durationSeconds: 1800, // 30 daqiqa
         rawAudioWavBase64: '',
         createdAt: new Date().toISOString(),
       },
@@ -166,8 +169,8 @@ export default function App() {
         id: 'seed-comedy-1',
         title: 'O\'zbek to\'ylari: 500 kishi va adashib kelgan mehmonlar',
         category: 'Komedik & Hayotiy Hazillar',
-        description: 'To\'ylarimizdagi eng kulgili, hayotiy va barchaga tanish voqealar haqida yengil hazil podkast.',
-        tags: ['Komedik', 'Osh', 'Toylar', 'Hazil', 'Toshkent'],
+        description: 'To\'ylarimizdagi eng kulgili, hayotiy va barchaga tanish voqealar haqida yengil hazil podkast (Katta son).',
+        tags: ['Komedik', 'Osh', 'Toylar', 'Hazil', 'Toshkent', '30Daqiqa'],
         status: 'published',
         episodeNumber: 2,
         script: PODCAST_CATEGORIES[1].topics[0].sampleScriptUz,
@@ -178,12 +181,23 @@ export default function App() {
         style: 'Quvnoq & Hazilomuz',
         ambientSound: 'comedy-jingle',
         ambientVolume: 25,
-        durationSeconds: 95,
+        durationSeconds: 2700, // 45 daqiqa
         rawAudioWavBase64: '',
         createdAt: new Date(Date.now() - 86400000).toISOString(),
       },
     ];
   });
+
+  // Load podcasts from IndexedDB on startup
+  useEffect(() => {
+    getAllPodcastsFromDb()
+      .then((items) => {
+        if (items && items.length > 0) {
+          setPodcasts(items);
+        }
+      })
+      .catch((err) => console.warn('IndexedDB initial load error:', err));
+  }, []);
 
   // Save voices to local storage
   useEffect(() => {
@@ -194,12 +208,16 @@ export default function App() {
     }
   }, [voices]);
 
-  // Save podcasts to local storage
+  // Keep lightweight metadata in local storage (without heavy binary audio to prevent QuotaExceededError)
   useEffect(() => {
     try {
-      localStorage.setItem(LOCAL_STORAGE_PODCASTS_KEY, JSON.stringify(podcasts));
+      const lightweight = podcasts.map((p) => ({
+        ...p,
+        rawAudioWavBase64: '', // strip heavy audio from localStorage, kept in IndexedDB
+      }));
+      localStorage.setItem(LOCAL_STORAGE_PODCASTS_KEY, JSON.stringify(lightweight));
     } catch (e) {
-      console.error(e);
+      console.warn('LocalStorage quota warning:', e);
     }
   }, [podcasts]);
 
@@ -260,6 +278,7 @@ export default function App() {
           voiceName: activeVoice.name,
           category: selectedCategory.nameUz,
           ambientSound,
+          ambientVolume,
         };
 
         setCurrentAudio(audioItem);
@@ -286,6 +305,7 @@ export default function App() {
           createdAt: new Date().toISOString(),
         };
 
+        savePodcastToDb(newCmsItem);
         setPodcasts((prev) => [newCmsItem, ...prev]);
 
         // Smooth scroll to audio preview player
@@ -326,7 +346,10 @@ export default function App() {
         voiceName: item.voiceName,
         category: item.category,
         ambientSound: item.ambientSound,
+        ambientVolume: item.ambientVolume || 20,
       });
+      setAmbientSound(item.ambientSound);
+      if (item.ambientVolume) setAmbientVolume(item.ambientVolume);
     }
 
     setActiveTab('studio');
@@ -407,9 +430,52 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 1: STUDIO (Podcast Creator & Synthesis) */}
-        {activeTab === 'studio' && (
-          <div className="space-y-8">
+        {/* UNIFIED STUDIO: Solo Podcast, 2-Voice Interview, Video Dubbing */}
+        {(activeTab === 'studio' || activeTab === 'voiceover' || activeTab === 'dialogue') && (
+          <div className="space-y-6">
+            {/* Studio Mode Selector (Pill Switcher) */}
+            <div className="flex items-center justify-center p-1.5 bg-zinc-900/90 border border-zinc-800 rounded-2xl max-w-2xl mx-auto shadow-xl backdrop-blur-xl">
+              <button
+                type="button"
+                onClick={() => setStudioMode('solo')}
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 sm:px-5 rounded-xl text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
+                  studioMode === 'solo'
+                    ? 'bg-cyan-500 text-zinc-950 font-bold shadow-md shadow-cyan-500/25'
+                    : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'
+                }`}
+              >
+                <Mic2 className="w-4 h-4" />
+                <span>{lang === 'uz' ? 'Yakkaxon Podkast (1 Ovoz)' : 'Соло-Подкаст (1 Голос)'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setStudioMode('interview')}
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 sm:px-5 rounded-xl text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
+                  studioMode === 'interview'
+                    ? 'bg-emerald-500 text-zinc-950 font-bold shadow-md shadow-emerald-500/25'
+                    : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'
+                }`}
+              >
+                <Users2 className="w-4 h-4" />
+                <span>{lang === 'uz' ? 'Intervyu (2 Ovoz)' : 'Интервью (2 Голоса)'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setStudioMode('voiceover')}
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 sm:px-5 rounded-xl text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
+                  studioMode === 'voiceover'
+                    ? 'bg-purple-500 text-zinc-950 font-bold shadow-md shadow-purple-500/25'
+                    : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'
+                }`}
+              >
+                <Film className="w-4 h-4" />
+                <span>{lang === 'uz' ? 'Video Dublyaj' : 'Озвучка Видео'}</span>
+              </button>
+            </div>
+
+            {/* MODE 1: SOLO PODCAST */}
+            {studioMode === 'solo' && (
+              <div className="space-y-8">
             {/* Hero / Studio Intro */}
             <div className="relative overflow-hidden rounded-3xl bg-gradient-to-r from-zinc-900 via-zinc-900/90 to-zinc-950 border border-zinc-800/90 p-6 sm:p-8 shadow-2xl">
               <div className="absolute top-0 right-0 w-96 h-96 bg-cyan-500/10 rounded-full blur-3xl -z-10 pointer-events-none" />
@@ -438,18 +504,11 @@ export default function App() {
                 </h1>
                 <p className="text-xs sm:text-sm text-zinc-400 leading-relaxed">
                   {lang === 'uz'
-                    ? 'Kategoriyani tanlang (Tarixiy, Komedik va boshqalar), Google AI Studio orqali yaratilgan haqiqiy ovozingizda matnni ovozlashtiring, temp va tembrni moslang, so\'ngra tinglab MP3/WAV formatida yuklab oling.'
-                    : 'Выберите категорию (исторические, комедийные и др.), озвучивайте текст своей настоящей голосовой копией из Google AI Studio, настройте темп и тембр, прослушайте и скачайте в MP3/WAV.'}
+                    ? 'Mavzuni kiriting yoki PDF/hujjat yuklang, Google AI Studio haqiqiy ovozingizda matnni ovozlashtiring va professional MP3/WAV formatida yuklab oling.'
+                    : 'Введите тему или загрузите PDF/документ, озвучивайте текст своим голосом из Google AI Studio и скачивайте в MP3/WAV.'}
                 </p>
               </div>
             </div>
-
-            {/* Step 1: Category Selector */}
-            <CategorySelector
-              selectedCategoryId={selectedCategory.id}
-              onSelectCategory={handleSelectCategory}
-              lang={lang}
-            />
 
             {/* Studio Workspace: Left = Script Editor, Right = Voice & Audio Settings */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 sm:gap-8 items-start">
@@ -457,6 +516,7 @@ export default function App() {
               <div className="lg:col-span-7 space-y-6">
                 <ScriptEditor
                   category={selectedCategory}
+                  onSelectCategory={handleSelectCategory}
                   title={title}
                   onChangeTitle={setTitle}
                   description={description}
@@ -540,6 +600,11 @@ export default function App() {
                   voiceName={currentAudio.voiceName}
                   category={currentAudio.category}
                   ambientSound={currentAudio.ambientSound}
+                  ambientVolume={currentAudio.ambientVolume ?? ambientVolume}
+                  onChangeAmbientSound={(sound) => {
+                    setAmbientSound(sound);
+                    setCurrentAudio((prev) => prev ? { ...prev, ambientSound: sound } : null);
+                  }}
                   durationSeconds={currentAudio.durationSeconds}
                   onSaveToCMS={() => {
                     const activeVoice = voices.find((v) => v.name === currentAudio.voiceName) || voices[0];
@@ -578,87 +643,91 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB: VOICEOVER & DUBBING STUDIO */}
-        {activeTab === 'voiceover' && (
-          <VoiceoverStudio
-            voices={voices}
-            selectedVoiceId={selectedVoiceId}
-            onSelectVoiceId={setSelectedVoiceId}
-            onSaveToCMS={(item: any) => {
-              const newCmsItem: CMSPodcastItem = {
-                id: `voiceover-${Date.now()}`,
-                title: item.title,
-                category: 'Dublyaj & Ovozlashtirish',
-                description: item.format,
-                tags: ['Voiceover', 'Dublyaj', 'Reels'],
-                status: 'published',
-                episodeNumber: podcasts.length + 1,
-                script: item.script,
-                voiceName: item.voiceName || 'SHOKHRUKH',
-                baseVoice: 'Charon',
-                timbre: 'Studio Voiceover Master',
-                tempo: '1.0x',
-                style: 'Professional dublyaj',
-                ambientSound: 'none',
-                ambientVolume: 0,
-                durationSeconds: item.durationSeconds || 30,
-                rawAudioWavBase64: item.rawAudioWavBase64,
-                createdAt: new Date().toISOString(),
-              };
-              setPodcasts((prev) => [newCmsItem, ...prev]);
-              setSaveSuccessNotification(
-                lang === 'uz'
-                  ? '✅ Dublyaj CMS kutubxonasiga saqlandi!'
-                  : '✅ Озвучка успешно сохранена в CMS!'
-              );
-              setTimeout(() => setSaveSuccessNotification(null), 3500);
-            }}
-            lang={lang}
-          />
-        )}
+            {/* MODE 2: INTERVIEW (2 VOICES) */}
+            {studioMode === 'interview' && (
+              <DialogueStudio
+                voices={voices}
+                userClonedVoiceId={selectedVoiceId}
+                initialTurns={interviewTurns}
+                initialTopic={interviewTopic}
+                onOpenDocumentModal={() => {
+                  setDocumentModalFormat('interview');
+                  setIsDocumentModalOpen(true);
+                }}
+                onSaveToCMS={(item: any) => {
+                  const newCmsItem: CMSPodcastItem = {
+                    id: `interview-${Date.now()}`,
+                    title: item.title,
+                    category: item.category || 'Intervyu & Muloqot',
+                    description: item.description,
+                    tags: item.tags || ['Intervyu', 'MultiSpeaker', 'DualVoice'],
+                    status: 'published',
+                    episodeNumber: podcasts.length + 1,
+                    script: item.script,
+                    voiceName: item.voiceName,
+                    baseVoice: 'Charon',
+                    timbre: 'Dual Voice Studio Master',
+                    tempo: '1.0x',
+                    style: 'Jonli intervyu',
+                    ambientSound: 'none',
+                    ambientVolume: 0,
+                    durationSeconds: item.durationSeconds || 60,
+                    rawAudioWavBase64: item.rawAudioWavBase64,
+                    createdAt: new Date().toISOString(),
+                  };
+                  savePodcastToDb(newCmsItem);
+                  setPodcasts((prev) => [newCmsItem, ...prev]);
+                  setSaveSuccessNotification(
+                    lang === 'uz'
+                      ? '✅ Intervyu dialogi CMS kutubxonasiga saqlandi!'
+                      : '✅ Диалог интервью успешно сохранен в CMS!'
+                  );
+                  setTimeout(() => setSaveSuccessNotification(null), 3500);
+                }}
+                lang={lang}
+              />
+            )}
 
-        {/* TAB: MULTI-SPEAKER & INTERVIEW STUDIO */}
-        {activeTab === 'dialogue' && (
-          <DialogueStudio
-            voices={voices}
-            userClonedVoiceId={selectedVoiceId}
-            initialTurns={interviewTurns}
-            initialTopic={interviewTopic}
-            onOpenDocumentModal={() => {
-              setDocumentModalFormat('interview');
-              setIsDocumentModalOpen(true);
-            }}
-            onSaveToCMS={(item: any) => {
-              const newCmsItem: CMSPodcastItem = {
-                id: `interview-${Date.now()}`,
-                title: item.title,
-                category: item.category || 'Intervyu & Muloqot',
-                description: item.description,
-                tags: item.tags || ['Intervyu', 'MultiSpeaker', 'DualVoice'],
-                status: 'published',
-                episodeNumber: podcasts.length + 1,
-                script: item.script,
-                voiceName: item.voiceName,
-                baseVoice: 'Charon',
-                timbre: 'Dual Voice Studio Master',
-                tempo: '1.0x',
-                style: 'Jonli intervyu',
-                ambientSound: 'none',
-                ambientVolume: 0,
-                durationSeconds: item.durationSeconds || 60,
-                rawAudioWavBase64: item.rawAudioWavBase64,
-                createdAt: new Date().toISOString(),
-              };
-              setPodcasts((prev) => [newCmsItem, ...prev]);
-              setSaveSuccessNotification(
-                lang === 'uz'
-                  ? '✅ Intervyu dialogi CMS kutubxonasiga saqlandi!'
-                  : '✅ Диалог интервью успешно сохранен в CMS!'
-              );
-              setTimeout(() => setSaveSuccessNotification(null), 3500);
-            }}
-            lang={lang}
-          />
+            {/* MODE 3: VOICEOVER & DUBBING */}
+            {studioMode === 'voiceover' && (
+              <VoiceoverStudio
+                voices={voices}
+                selectedVoiceId={selectedVoiceId}
+                onSelectVoiceId={setSelectedVoiceId}
+                onSaveToCMS={(item: any) => {
+                  const newCmsItem: CMSPodcastItem = {
+                    id: `voiceover-${Date.now()}`,
+                    title: item.title,
+                    category: 'Dublyaj & Ovozlashtirish',
+                    description: item.format,
+                    tags: ['Voiceover', 'Dublyaj', 'Reels'],
+                    status: 'published',
+                    episodeNumber: podcasts.length + 1,
+                    script: item.script,
+                    voiceName: item.voiceName || 'SHOKHRUKH',
+                    baseVoice: 'Charon',
+                    timbre: 'Studio Voiceover Master',
+                    tempo: '1.0x',
+                    style: 'Professional dublyaj',
+                    ambientSound: 'none',
+                    ambientVolume: 0,
+                    durationSeconds: item.durationSeconds || 30,
+                    rawAudioWavBase64: item.rawAudioWavBase64,
+                    createdAt: new Date().toISOString(),
+                  };
+                  savePodcastToDb(newCmsItem);
+                  setPodcasts((prev) => [newCmsItem, ...prev]);
+                  setSaveSuccessNotification(
+                    lang === 'uz'
+                      ? '✅ Dublyaj CMS kutubxonasiga saqlandi!'
+                      : '✅ Озвучка успешно сохранена в CMS!'
+                  );
+                  setTimeout(() => setSaveSuccessNotification(null), 3500);
+                }}
+                lang={lang}
+              />
+            )}
+          </div>
         )}
 
         {/* TAB: LIVE VOICE AI AGENT & CALLS */}
@@ -684,9 +753,11 @@ export default function App() {
           <PodcastCMS
             podcasts={podcasts}
             onUpdatePodcast={(updated) => {
+              savePodcastToDb(updated);
               setPodcasts((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
             }}
             onDeletePodcast={(id) => {
+              deletePodcastFromDb(id);
               setPodcasts((prev) => prev.filter((p) => p.id !== id));
             }}
             onOpenInStudio={handleOpenInStudio}
@@ -740,6 +811,7 @@ export default function App() {
             if (data.tags) setTags(data.tags);
             if (data.script) setScriptText(data.script);
             setActiveTab('studio');
+            setStudioMode('solo');
             setSaveSuccessNotification(
               lang === 'uz'
                 ? '✅ Hujjatdan podkast ssenariysi muvaffaqiyatli shakllantirildi!'
@@ -748,14 +820,16 @@ export default function App() {
           } else if (data.targetFormat === 'interview') {
             if (data.title) setInterviewTopic(data.title);
             if (data.turns && Array.isArray(data.turns)) setInterviewTurns(data.turns);
-            setActiveTab('dialogue');
+            setActiveTab('studio');
+            setStudioMode('interview');
             setSaveSuccessNotification(
               lang === 'uz'
                 ? '✅ Hujjatdan 2 kishilik intervyu muvaffaqiyatli shakllantirildi!'
                 : '✅ 2-голосый диалог интервью успешно создан из документа!'
             );
           } else if (data.targetFormat === 'voiceover') {
-            setActiveTab('voiceover');
+            setActiveTab('studio');
+            setStudioMode('voiceover');
             setSaveSuccessNotification(
               lang === 'uz'
                 ? '✅ Hujjatdan video dublyaj ssenariysi shakllantirildi!'

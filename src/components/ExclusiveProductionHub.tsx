@@ -34,33 +34,33 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
   const [isGeneratingCover, setIsGeneratingCover] = useState(false);
   const [generatedSvg, setGeneratedSvg] = useState<string | null>(null);
 
-  // Default Exclusive Episodes List
+  // Default Exclusive Episodes List (Full 30-min to 60-min longform master episodes)
   const [exclusiveEpisodes, setExclusiveEpisodes] = useState<ExclusiveEpisode[]>([
     {
       id: 'ex-1',
       title: 'Buyuk Ipak Yo\'li: Yo\'qolgan Karvonlar va Maxfiy Xazinalar',
       tier: 'vip',
-      description: 'Samarqand va Buxoro o\'rtasidagi sirli karvonsaroylar arxeologiyasi haqida 3D audio-ekskursiya.',
-      tags: ['Tarix', 'Sirli', 'VIP', 'Arxeologiya'],
-      durationSeconds: 180,
+      description: 'Samarqand va Buxoro o\'rtasidagi sirli karvonsaroylar arxeologiyasi haqida 30 daqiqalik 3D audio-ekskursiya.',
+      tags: ['Tarix', 'Sirli', 'VIP', 'Arxeologiya', '30Daqiqa'],
+      durationSeconds: 1800,
       createdAt: 'Bugun',
     },
     {
       id: 'ex-2',
       title: 'O\'zbekistonda AI Startaplar: 0 dan 100,000$ gacha bo\'lgan yo\'l',
       tier: 'masterclass',
-      description: 'Mahalliy muhandislar tomonidan yaratilgan muvaffaqiyatli loyihalar va amaliy audio-keyslar.',
-      tags: ['Biznes', 'Masterclass', 'AI', 'Startap'],
-      durationSeconds: 240,
+      description: 'Mahalliy muhandislar tomonidan yaratilgan muvaffaqiyatli loyihalar va amaliy audio-keyslar (45 daqiqalik to\'liq son).',
+      tags: ['Biznes', 'Masterclass', 'AI', 'Startap', '45Daqiqa'],
+      durationSeconds: 2700,
       createdAt: 'Kecha',
     },
     {
       id: 'ex-3',
       title: 'Miyaning Yashirin Zaxiralari: Daho Allomalar Qanday Fikrlagan?',
       tier: 'vip',
-      description: 'Ibn Sino va Beruniyning xotirani charxlash va diqqatni jamlash bo\'yicha qadimiy tavsiyalari.',
-      tags: ['Ilm-fan', 'Psixologiya', 'IbnSino', 'VIP'],
-      durationSeconds: 150,
+      description: 'Ibn Sino va Beruniyning xotirani charxlash va diqqatni jamlash bo\'yicha 1 soatlik fundamental podkast tahlili.',
+      tags: ['Ilm-fan', 'Psixologiya', 'IbnSino', 'VIP', '1Soat'],
+      durationSeconds: 3600,
       createdAt: '2 kun oldin',
     },
   ]);
@@ -260,7 +260,9 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
                           >
                             {isMasterclass ? 'MASTERCLASS' : 'VIP EKSKLYUZIV'}
                           </span>
-                          <span className="text-[10px] text-zinc-500">{ep.durationSeconds}s</span>
+                          <span className="text-[10px] text-zinc-400 font-mono bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800">
+                            {ep.durationSeconds ? `${Math.floor(ep.durationSeconds / 60)} daqiqa` : '30 daqiqa'}
+                          </span>
                         </div>
                         <h4 className="text-xs sm:text-sm font-bold text-white leading-snug">
                           {ep.title}

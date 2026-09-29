@@ -6,6 +6,7 @@ export interface VoiceProfile {
   id: string;
   name: string;
   baseVoice: BaseVoiceModel;
+  gender?: 'female' | 'male';
   voiceId?: string; // Google AI Studio Voice ID (e.g. "voice_17raj9ewke3g")
   voiceKey?: string; // Client-managed voice key
   voiceType?: VoiceType;
@@ -28,6 +29,16 @@ export interface VoiceProfile {
 // ----------------------------------------------------
 export type VoiceoverFormat = 'reels_shorts' | 'commercial_ad' | 'audiobook' | 'video_dubbing';
 
+export type VideoSourceMode = 'file_upload' | 'video_url' | 'script_text';
+
+export interface DubbingTimelineSegment {
+  id?: string;
+  start: string; // e.g. "00:00"
+  end: string;   // e.g. "00:05"
+  originalText: string;
+  uzbekText: string;
+}
+
 export interface VoiceoverProject {
   id: string;
   title: string;
@@ -44,6 +55,31 @@ export interface VoiceoverProject {
   createdAt: string;
 }
 
+export type SoundCueType = 'intro' | 'bed' | 'emotional' | 'stinger' | 'silence' | 'outro';
+
+export interface TurnMusicCue {
+  enabled: boolean;
+  cueType: SoundCueType;
+  soundscape: AmbientSoundscape;
+  volumePercent: number; // 0 for silence, 10-25 for bed, 35-50 for intro/stinger/outro
+  labelUz?: string;
+  labelRu?: string;
+  reasoning?: string;
+}
+
+export interface AudioSegmentCue {
+  id: string;
+  turnIndex?: number;
+  startTime?: number; // seconds
+  endTime?: number;   // seconds
+  cueType: SoundCueType;
+  soundscape: AmbientSoundscape;
+  volumePercent: number;
+  labelUz: string;
+  labelRu: string;
+  reasoning?: string;
+}
+
 // ----------------------------------------------------
 // 2. Multi-Speaker & Interview Studio Types
 // ----------------------------------------------------
@@ -57,6 +93,7 @@ export interface DialogueTurn {
   durationSeconds?: number;
   startTime?: number;
   endTime?: number;
+  musicCue?: TurnMusicCue;
 }
 
 export interface MultiSpeakerProject {
@@ -77,6 +114,7 @@ export interface MultiSpeakerProject {
   turns: DialogueTurn[];
   masterAudioBase64?: string;
   totalDurationSeconds?: number;
+  cues?: AudioSegmentCue[];
   createdAt: string;
 }
 
@@ -84,10 +122,21 @@ export interface MultiSpeakerProject {
 // 3. Live Voice AI Agent Types
 // ----------------------------------------------------
 export type AgentPersonaType = 
+  | 'tashkent_real_estate' // Toshkent Ko'chmas Mulk Eksperti (Rieltor)
   | 'live_cohost'          // Podkast Hamkor-boshlovchisi
   | 'caller_in_air'        // Efirga qo'ng'iroq qiluvchi muxlis
   | 'exclusive_mentor'     // Eksklyuziv ekspert / Mentor
   | 'business_consultant'; // Biznes va audio-marketing bo'yicha assistent
+
+export interface RealEstateLeadCard {
+  clientIntent: 'buy' | 'rent' | 'sell' | 'invest';
+  district?: string;
+  budgetRange?: string;
+  propertyType?: 'novostroyka' | 'vtorichka' | 'commercial' | 'cottage';
+  roomsCount?: string;
+  urgency?: 'immediate' | 'this_month' | 'exploring';
+  keyNotes?: string;
+}
 
 export interface AgentPersonaConfig {
   id: AgentPersonaType;
@@ -164,11 +213,20 @@ export interface PodcastCategory {
 export type AmbientSoundscape = 
   | 'none'
   | 'dutor-acoustic'
+  | 'oriental-ney'
   | 'lofi-beats'
-  | 'comedy-jingle'
-  | 'cinematic-dark'
   | 'calm-piano'
-  | 'tech-ambient';
+  | 'comedy-jingle'
+  | 'tech-ambient'
+  | 'cinematic-dark'
+  | 'business-uplifting'
+  | 'midnight-jazz'
+  | 'epic-orchestral'
+  | 'nature-ambient'
+  | 'deep-focus'
+  | 'synthwave-retro'
+  | 'news-broadcast'
+  | 'acoustic-guitar';
 
 export interface GeneratedPodcast {
   id: string;
@@ -184,6 +242,7 @@ export interface GeneratedPodcast {
   ambientSound: AmbientSoundscape;
   ambientVolume: number; // 0 to 100
   durationSeconds: number;
+  cues?: AudioSegmentCue[];
   rawAudioWavBase64: string;
   mixedAudioWavBase64?: string;
   createdAt: string;

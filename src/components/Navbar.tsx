@@ -53,49 +53,23 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         {/* Navigation Tabs (Scrollable on mobile) */}
         <nav className="flex items-center gap-1 overflow-x-auto no-scrollbar py-1">
-          {/* 1. Studio */}
+          {/* 1. Unified Studio (Solo, Dialogue, Dubbing) */}
           <button
             onClick={() => setActiveTab('studio')}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 sm:px-3 sm:py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${
-              activeTab === 'studio'
-                ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 shadow-sm shadow-cyan-500/10'
+            className={`flex items-center gap-1.5 px-3 py-1.5 sm:px-3.5 sm:py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${
+              activeTab === 'studio' || activeTab === 'voiceover' || activeTab === 'dialogue'
+                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm shadow-cyan-500/10'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60'
             }`}
           >
             <Mic2 className="w-3.5 h-3.5 text-cyan-400" />
-            <span>{lang === 'uz' ? 'Podkast' : 'Подкаст'}</span>
+            <span>{lang === 'uz' ? 'Studiyada Yaratish' : 'Студия Создания'}</span>
           </button>
 
-          {/* 2. Voiceover & Dubbing */}
-          <button
-            onClick={() => setActiveTab('voiceover')}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 sm:px-3 sm:py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${
-              activeTab === 'voiceover'
-                ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-sm shadow-purple-500/10'
-                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60'
-            }`}
-          >
-            <Film className="w-3.5 h-3.5 text-purple-400" />
-            <span>{lang === 'uz' ? 'Ovozlashtirish' : 'Озвучка'}</span>
-          </button>
-
-          {/* 3. Dialogue & Interview */}
-          <button
-            onClick={() => setActiveTab('dialogue')}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 sm:px-3 sm:py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${
-              activeTab === 'dialogue'
-                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm shadow-emerald-500/10'
-                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60'
-            }`}
-          >
-            <Users2 className="w-3.5 h-3.5 text-emerald-400" />
-            <span>{lang === 'uz' ? 'Intervyu (2 Ovoz)' : 'Интервью (2 Голоса)'}</span>
-          </button>
-
-          {/* 4. Live Voice Agent & Phone Calls */}
+          {/* 2. Live Voice Agent & Phone Calls */}
           <button
             onClick={() => setActiveTab('agent')}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 sm:px-3 sm:py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${
               activeTab === 'agent'
                 ? 'bg-blue-500/20 text-blue-300 border border-blue-500/40 shadow-sm shadow-blue-500/10'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60'
@@ -105,10 +79,10 @@ export const Navbar: React.FC<NavbarProps> = ({
             <span>{lang === 'uz' ? 'AI Qo\'ng\'iroq' : 'AI Звонок'}</span>
           </button>
 
-          {/* 5. Exclusive Hub */}
+          {/* 3. Exclusive Hub */}
           <button
             onClick={() => setActiveTab('exclusive')}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 sm:px-3 sm:py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${
               activeTab === 'exclusive'
                 ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm shadow-amber-500/10'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60'
@@ -118,42 +92,42 @@ export const Navbar: React.FC<NavbarProps> = ({
             <span>{lang === 'uz' ? 'Eksklyuziv' : 'Эксклюзив'}</span>
           </button>
 
-          {/* 6. CMS */}
+          {/* 4. CMS Library */}
           <button
             onClick={() => setActiveTab('cms')}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 sm:px-3 sm:py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${
               activeTab === 'cms'
                 ? 'bg-zinc-800 text-white border border-zinc-700'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60'
             }`}
           >
             <FolderKanban className="w-3.5 h-3.5 text-zinc-400" />
-            <span className="hidden sm:inline">CMS</span>
+            <span>{lang === 'uz' ? 'Kutubxona' : 'Медиатека'}</span>
             {totalPodcastsCount > 0 && (
-              <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-zinc-800 text-zinc-300 border border-zinc-700">
+              <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-zinc-800 text-cyan-400 border border-cyan-800/50 font-mono">
                 {totalPodcastsCount}
               </span>
             )}
           </button>
 
-          {/* 7. Voices */}
+          {/* 5. Voices */}
           <button
             onClick={() => setActiveTab('voices')}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 sm:px-3 sm:py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${
               activeTab === 'voices'
                 ? 'bg-zinc-800 text-white border border-zinc-700'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60'
             }`}
           >
             <Sliders className="w-3.5 h-3.5 text-zinc-400" />
-            <span className="hidden md:inline">{lang === 'uz' ? 'Ovozlarim' : 'Голоса'}</span>
+            <span>{lang === 'uz' ? 'Ovozlarim' : 'Голоса'}</span>
           </button>
 
-          {/* 8. Guide */}
+          {/* 6. Guide */}
           <button
             onClick={() => setActiveTab('guide')}
-            className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900 rounded-lg transition-colors"
-            title="Qo'llanma"
+            className="p-2 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900 rounded-xl transition-colors"
+            title={lang === 'uz' ? "Qo'llanma" : 'Руководство'}
           >
             <BookOpen className="w-4 h-4" />
           </button>

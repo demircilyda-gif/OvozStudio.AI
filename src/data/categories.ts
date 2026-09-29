@@ -236,7 +236,7 @@ Biz tabiatning barcha sirlarini bilamiz deb o'ylaymiz, ammo sahro va dengiz tubi
     suggestedTimbre: 'Ishonchli, qat\'iy, dinamik va biznesga xos professional ohang',
     suggestedTempo: 'Dinamik (1.05x)',
     suggestedStyle: 'Biznes & Amaliy tavsiyalar',
-    ambientSound: 'lofi-beats',
+    ambientSound: 'business-uplifting',
     topics: [
       {
         id: 'startap-strategiya',

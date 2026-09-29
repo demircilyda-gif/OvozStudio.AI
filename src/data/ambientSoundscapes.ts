@@ -1,0 +1,158 @@
+import { AmbientSoundscape } from '../types/podcast';
+
+export interface SoundscapeOption {
+  id: AmbientSoundscape;
+  labelUz: string;
+  labelRu: string;
+  descUz: string;
+  descRu: string;
+  icon: string;
+  badge: string;
+}
+
+export const AMBIENT_SOUNDSCAPES: SoundscapeOption[] = [
+  {
+    id: 'dutor-acoustic',
+    labelUz: 'Milliy Dutor & Tanbur',
+    labelRu: 'Узбекский дутар и танбур',
+    descUz: 'An\'anaviy o\'zbek jonli torlari va mayin tanbur droni',
+    descRu: 'Традиционные щипковые узбекские струнные и теплый гул',
+    icon: '🪕',
+    badge: 'Milliy',
+  },
+  {
+    id: 'oriental-ney',
+    labelUz: 'Sharqona Nay & Meditatsiya',
+    labelRu: 'Восточный най и медитация',
+    descUz: 'Sokin bambuk nay sadosi va chuqur sharqona osoyishtalik',
+    descRu: 'Медитативный восточный най, глубокое спокойствие и релакс',
+    icon: '🎋',
+    badge: 'Meditatsiya',
+  },
+  {
+    id: 'lofi-beats',
+    labelUz: 'Lo-Fi Chillhop & Qahva',
+    labelRu: 'Lo-Fi Chillhop биты',
+    descUz: 'Issiq vintage pianino akkordlari va sokin yumshoq ritm',
+    descRu: 'Теплые джазовые гармонии Rhodes и расслабленный винил',
+    icon: '🎧',
+    badge: 'Chillhop',
+  },
+  {
+    id: 'calm-piano',
+    labelUz: 'Sokin Neoklassik Pianino',
+    labelRu: 'Неоклассическое пианино',
+    descUz: 'Mayin fortepiano akkordlari, qalbga yaqin chuqur xotirjamlik',
+    descRu: 'Нежное бархатное фортепиано для глубоких душевных историй',
+    icon: '🎹',
+    badge: 'Neoklassika',
+  },
+  {
+    id: 'comedy-jingle',
+    labelUz: 'Quvnoq Marimba & Jingle',
+    labelRu: 'Комедийный джингл',
+    descUz: 'Yengil yog\'och marimba, sakrovchi ritm va quvnoq kayfiyat',
+    descRu: 'Задорная пиццикато-маримба для юмора и легких разговоров',
+    icon: '🎺',
+    badge: 'Hazil & Shou',
+  },
+  {
+    id: 'tech-ambient',
+    labelUz: 'Texno & Kiberpank Arp',
+    labelRu: 'Техно и киберпанк арп',
+    descUz: 'Kelajak sintezatorlari, kiber arpedjio va IT muhiti',
+    descRu: 'Футуристические синтезаторы и электронный пульс для IT и науки',
+    icon: '⚡',
+    badge: 'IT & Texno',
+  },
+  {
+    id: 'cinematic-dark',
+    labelUz: 'Sirli Detektiv & True Crime',
+    labelRu: 'Мрачный детектив и саспенс',
+    descUz: 'Chuqur sirli bas droni, yurak urishi va kuchli intizorlik',
+    descRu: 'Кинематографический саспенс для расследований и криминала',
+    icon: '🕯️',
+    badge: 'Detektiv',
+  },
+  {
+    id: 'business-uplifting',
+    labelUz: 'Biznes & Motivatsiya Akustik',
+    labelRu: 'Бизнес и корпоративный подъем',
+    descUz: 'Yorqin akustik ritm, nekbin kayfiyat va startap ruhi',
+    descRu: 'Вдохновляющий светлый акустический ритм для бизнеса и успеха',
+    icon: '💼',
+    badge: 'Biznes',
+  },
+  {
+    id: 'midnight-jazz',
+    labelUz: 'Kechki Jazz & Blues Bar',
+    labelRu: 'Ночной джаз и блюз',
+    descUz: 'Past akustik kontrabas va mayin vibrafon sadosi',
+    descRu: 'Атмосферный вечерний бар: шагающий бас и бархатные клавиши',
+    icon: '🎷',
+    badge: 'Jazz',
+  },
+  {
+    id: 'epic-orchestral',
+    labelUz: 'Epik Kinematik Orkestr',
+    labelRu: 'Эпический оркестр',
+    descUz: 'Vazmin orkestr torli asboblari va tantanavor g\'alaba sadosi',
+    descRu: 'Торжественный струнный оркестр и кинематографический взлет',
+    icon: '🎻',
+    badge: 'Epik',
+  },
+  {
+    id: 'nature-ambient',
+    labelUz: 'Tabiat & Mayin Yomg\'ir ASMR',
+    labelRu: 'Звуки природы и дождь ASMR',
+    descUz: 'Mayin yomg\'ir shiviri, sokin shabboda va olis qushlar sadosi',
+    descRu: 'Успокаивающий шелест теплого дождя, ветер и пение птиц',
+    icon: '🌧️',
+    badge: 'ASMR Tabiat',
+  },
+  {
+    id: 'deep-focus',
+    labelUz: 'Chuqur Diqqat (Binaural Focus)',
+    labelRu: 'Глубокий фокус (Альфа-волны)',
+    descUz: 'Miyani jamlovchi 10Hz alfa-to\'lqinli sokin konsentratsiya foni',
+    descRu: 'Низкочастотные бинауральные волны для максимальной концентрации',
+    icon: '🧠',
+    badge: 'Fokus & Fan',
+  },
+  {
+    id: 'synthwave-retro',
+    labelUz: '80-yillar Retro Synthwave',
+    labelRu: 'Ретровейв 80-х',
+    descUz: 'Vintage analog bas, neon ritmlar va nostalgiya nafasi',
+    descRu: 'Аналоговые синты 80-х, неоновый драйв и ностальгия',
+    icon: '🕹️',
+    badge: 'Retro 80s',
+  },
+  {
+    id: 'news-broadcast',
+    labelUz: 'Yangiliklar & Radio Puls',
+    labelRu: 'Новости и радио-пульс',
+    descUz: 'Tezkor axborot ritmi, dinamik stingerlar va radio jingle',
+    descRu: 'Динамичный радио-бит и новостной эфирный телеграф',
+    icon: '📻',
+    badge: 'Yangiliklar',
+  },
+  {
+    id: 'acoustic-guitar',
+    labelUz: 'Samimiy Akustik Gitara',
+    labelRu: 'Уютная акустическая гитара',
+    descUz: 'Gultxan atrofidagi samimiy jonli gitara ohanglari',
+    descRu: 'Теплые гитарные переборы у костра для душевных бесед',
+    icon: '🎸',
+    badge: 'Akustika',
+  },
+  {
+    id: 'none',
+    labelUz: 'Musiqasiz (Toza ovoz)',
+    labelRu: 'Без музыки (чистый голос)',
+    descUz: 'Faqatgina toza studiya ovozi, shovqin va fon musiqasisiz',
+    descRu: 'Кристально чистый голос без фоновой музыки',
+    icon: '🔇',
+    badge: 'Toza ovoz',
+  },
+];
