@@ -1,4 +1,5 @@
 import { VoiceProfile } from '../types/podcast';
+import { getVoicePreviewUrl } from './voicePreviews';
 
 export const USER_REPLICATED_VOICE: VoiceProfile = {
   id: 'voice_17raj9ewke3g',
@@ -15,12 +16,13 @@ export const USER_REPLICATED_VOICE: VoiceProfile = {
   customPersonaPrompt: "Google AI Studio Voice Replication orqali yaratilgan haqiqiy individual ovoz nusxasi.",
   isUserCustomVoice: true,
   isReplicatedVoice: true,
+  sampleAudioUrl: getVoicePreviewUrl('voice_17raj9ewke3g'),
   sampleNotes: 'Google AI Studio Voice ID: voice_17raj9ewke3g (Replicated Voice)',
 };
 
 export const DEFAULT_USER_VOICE: VoiceProfile = USER_REPLICATED_VOICE;
 
-export const PREBUILT_VOICE_PROFILES: VoiceProfile[] = [
+const RAW_PREBUILT_VOICES: VoiceProfile[] = [
   USER_REPLICATED_VOICE,
 
   // --- AYOL OVOZLARI (FEMALE UZBEK VOICES) ---
@@ -267,3 +269,8 @@ export const PREBUILT_VOICE_PROFILES: VoiceProfile[] = [
     isReplicatedVoice: false,
   },
 ];
+
+export const PREBUILT_VOICE_PROFILES: VoiceProfile[] = RAW_PREBUILT_VOICES.map((v) => ({
+  ...v,
+  sampleAudioUrl: v.sampleAudioUrl || getVoicePreviewUrl(v.id),
+}));

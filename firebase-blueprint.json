@@ -1,0 +1,102 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Registered user profile with role, subscription tier and generation quota",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "User email address"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name"
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Avatar URL"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "user"],
+          "description": "Role of user: admin or user"
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["free", "pro", "unlimited"],
+          "description": "Subscription tier"
+        },
+        "creditsRemaining": {
+          "type": "number",
+          "description": "Remaining generation credits"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Account creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update timestamp"
+        }
+      },
+      "required": ["email", "role", "tier", "createdAt"]
+    },
+    "Generation": {
+      "title": "Generation",
+      "description": "Log of generated audio, podcast, voiceover or dubbing",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "UID of owner user"
+        },
+        "userEmail": {
+          "type": "string",
+          "description": "Email of owner user"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["podcast", "voiceover", "tts", "dubbing", "agent_call"],
+          "description": "Type of generation"
+        },
+        "title": {
+          "type": "string",
+          "description": "Title or topic of generation"
+        },
+        "creditsCost": {
+          "type": "number",
+          "description": "Credits consumed"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["completed", "failed"],
+          "description": "Execution status"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp"
+        }
+      },
+      "required": ["userId", "type", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/User"
+      },
+      "description": "User profile collection indexed by Firebase Auth UID"
+    },
+    "/users/{userId}/generations/{generationId}": {
+      "schema": {
+        "$ref": "#/entities/Generation"
+      },
+      "description": "Generations history belonging to user"
+    }
+  }
+}

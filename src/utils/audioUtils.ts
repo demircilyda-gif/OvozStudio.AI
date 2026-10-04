@@ -1,4 +1,6 @@
 import { AmbientSoundscape, AudioSegmentCue, SoundCueType } from '../types/podcast';
+// @ts-ignore - lamejs may not have complete TS definitions
+import { Mp3Encoder } from '@breezystack/lamejs';
 
 // Web Audio Context singleton
 let audioCtx: AudioContext | null = null;
@@ -42,11 +44,30 @@ export function arrayBufferToBase64(buffer: ArrayBuffer): string {
 
 /**
  * Encodes an AudioBuffer to standard 16-bit PCM WAV Blob
+ * Performs mathematical sample interpolation when buffer.sampleRate !== targetSampleRate
+ * to preserve audio pitch and exact timing.
  */
 export function audioBufferToWav(buffer: AudioBuffer, targetSampleRate = 24000): Blob {
-  const numChannels = 1; // mono for podcasts or stereo
-  const sampleRate = targetSampleRate || buffer.sampleRate;
-  const channelData = buffer.getChannelData(0);
+  const numChannels = 1; // mono for podcasts or voice
+  let channelData = buffer.getChannelData(0);
+  let sampleRate = buffer.sampleRate;
+
+  // Exact mathematical resampling with linear interpolation
+  if (targetSampleRate && targetSampleRate !== buffer.sampleRate) {
+    const ratio = buffer.sampleRate / targetSampleRate;
+    const newLength = Math.round(channelData.length / ratio);
+    const resampled = new Float32Array(newLength);
+    for (let i = 0; i < newLength; i++) {
+      const origPos = i * ratio;
+      const index1 = Math.floor(origPos);
+      const index2 = Math.min(index1 + 1, channelData.length - 1);
+      const frac = origPos - index1;
+      resampled[i] = channelData[index1] * (1 - frac) + channelData[index2] * frac;
+    }
+    channelData = resampled;
+    sampleRate = targetSampleRate;
+  }
+
   const length = channelData.length;
   const bufferArray = new ArrayBuffer(44 + length * 2);
   const view = new DataView(bufferArray);
@@ -654,7 +675,7 @@ export function autoPlanPodcastCues(
 }
 
 /**
- * Converts WAV to MP3-compatible download or standard format
+ * Converts WAV to MP3-compatible download or standard format using LAME MP3 Encoder
  */
 export async function exportAudioWithQuality(
   wavBlob: Blob,
@@ -664,10 +685,43 @@ export async function exportAudioWithQuality(
 ): Promise<void> {
   let downloadBlob = wavBlob;
 
-  // If MP3 requested, convert blob MIME or encode
+  // If MP3 requested, convert using true LAME MP3 Encoder
   if (format === 'mp3') {
-    // Wrap with audio/mp3 container for standard media players
-    downloadBlob = new Blob([wavBlob], { type: 'audio/mp3' });
+    try {
+      const arrayBuf = await wavBlob.arrayBuffer();
+      const ctx = getAudioContext();
+      const audioBuffer = await ctx.decodeAudioData(arrayBuf.slice(0));
+      const numChannels = 1;
+      const sampleRate = audioBuffer.sampleRate;
+      const kbps = quality === '128k' ? 128 : quality === '192k' ? 192 : 320;
+
+      const mp3Encoder = new Mp3Encoder(numChannels, sampleRate, kbps);
+      const channelData = audioBuffer.getChannelData(0);
+      const samples = new Int16Array(channelData.length);
+      for (let i = 0; i < channelData.length; i++) {
+        const s = Math.max(-1, Math.min(1, channelData[i]));
+        samples[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+
+      const sampleBlockSize = 1152;
+      const mp3Data: Uint8Array[] = [];
+      for (let i = 0; i < samples.length; i += sampleBlockSize) {
+        const sampleChunk = samples.subarray(i, i + sampleBlockSize);
+        const mp3buf = mp3Encoder.encodeBuffer(sampleChunk);
+        if (mp3buf.length > 0) {
+          mp3Data.push(new Uint8Array(mp3buf));
+        }
+      }
+      const endBuf = mp3Encoder.flush();
+      if (endBuf.length > 0) {
+        mp3Data.push(new Uint8Array(endBuf));
+      }
+
+      downloadBlob = new Blob(mp3Data as any, { type: 'audio/mp3' });
+    } catch (mp3Err) {
+      console.warn('LAME MP3 encoding fallback to direct container:', mp3Err);
+      downloadBlob = new Blob([wavBlob], { type: 'audio/mp3' });
+    }
   }
 
   const url = URL.createObjectURL(downloadBlob);
@@ -808,10 +862,11 @@ export function cleanScriptForSpeech(rawText: string): CleanScriptResult {
     ' '
   );
 
-  // 7. Remove standalone timestamps: 00:00 - 00:06, 01:23:, etc.
+  // 7. Remove timing ranges (e.g. 00:00 - 00:06) and line-start director markers (e.g. 01:23: )
+  // CRITICAL: Normal clock times in sentence context (e.g. "soat 12:30 da", "19:00") MUST be preserved!
   cleaned = cleaned
-    .replace(/\b\d{1,2}:\d{2}(?:\s*-\s*\d{1,2}:\d{2})?\b/g, ' ')
-    .replace(/^\s*\d{1,2}:\d{2}\s*[:-]?\s*/gm, '');
+    .replace(/\b\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}\b/g, ' ')
+    .replace(/^\s*\d{1,2}:\d{2}(?::\d{2})?\s*[:-]\s*/gm, '');
 
   // 8. Remove speaker label prefixes at line starts: e.g. "Диктор (баритон):", "Ведущий:", "Host 1:", "Boshlovchi:", "Speaker:"
   cleaned = cleaned.replace(

@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useAuth } from '../context/AuthContext';
 import { VoiceProfile, ExclusiveEpisode } from '../types/podcast';
 import {
   Crown,
@@ -27,6 +28,8 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
   userClonedVoiceId,
   lang,
 }) => {
+  const { isAuthenticated, isAdmin, requireAuth } = useAuth();
+
   // Cover Art Generator State
   const [coverTitle, setCoverTitle] = useState('O\'zbekiston 2030: Texnologik Inqilob');
   const [coverCategory, setCoverCategory] = useState('EKSKLYUZIV VIP');
@@ -69,6 +72,16 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
 
   // Generate SVG Cover Art
   const handleGenerateCover = async () => {
+    if (
+      !requireAuth(
+        () => {},
+        lang === 'uz'
+          ? "Eksklyuziv muqova generatsiyasi faqat ro'yxatdan o'tgan foydalanuvchilar uchun ochiq. Avval kiring!"
+          : "Создание эксклюзивных обложек доступно только для зарегистрированных пользователей."
+      )
+    )
+      return;
+
     setIsGeneratingCover(true);
     try {
       const res = await fetch('/api/podcast/generate-cover', {
@@ -107,23 +120,23 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
   return (
     <div className="space-y-6">
       {/* Banner */}
-      <div className="rounded-2xl bg-gradient-to-r from-amber-950/60 via-zinc-900 to-yellow-950/60 border border-amber-500/30 p-6 relative overflow-hidden">
-        <div className="absolute top-0 right-0 w-80 h-80 bg-amber-500/10 rounded-full blur-3xl pointer-events-none" />
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 relative z-10">
+      <div className="border border-[rgba(22,21,17,0.14)] rounded-[22px] bg-[rgba(255,255,255,0.65)] backdrop-blur-md p-6 sm:p-7 shadow-[0_20px_40px_-20px_rgba(22,21,17,0.18)]">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <div className="flex items-center gap-2 mb-2">
-              <span className="px-3 py-1 rounded-full bg-amber-500/20 text-amber-300 text-xs font-semibold border border-amber-500/40 flex items-center gap-1.5">
+              <span className="px-3 py-1 rounded-full bg-[#C98A12]/10 text-[#C98A12] text-xs font-semibold border border-[#C98A12]/30 flex items-center gap-1.5">
                 <Crown className="w-3.5 h-3.5" />
                 {lang === 'uz' ? 'Eksklyuziv Podkastlar & Production Hub' : 'Эксклюзивные Выпуски & Production Hub'}
               </span>
-              <span className="px-2.5 py-0.5 rounded-full bg-yellow-500/10 text-yellow-400 text-xs font-mono border border-yellow-500/30">
-                VIP / Masterclass • Cover Art Studio
+              <span className="px-2.5 py-0.5 rounded-full bg-[#0E7C86]/10 text-[#0A5A62] text-xs font-mono border border-[#0E7C86]/30">
+                VIP / Masterclass · Cover Art Studio
               </span>
             </div>
-            <h1 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">
-              {lang === 'uz' ? 'Eksklyuziv Kontent & Studiya Muqovalari' : 'Эксклюзивный Контент и Обложки'}
+            <h1 className="font-serif text-2xl sm:text-3xl text-[#161511] tracking-tight">
+              {lang === 'uz' ? 'Eksklyuziv Kontent & ' : 'Эксклюзивный Контент и '}
+              <em className="text-[#0E7C86] italic">{lang === 'uz' ? 'Studiya Muqovalari' : 'Обложки'}</em>
             </h1>
-            <p className="text-zinc-400 text-sm mt-1 max-w-2xl">
+            <p className="text-[#5D594E] text-sm mt-1 max-w-2xl">
               {lang === 'uz'
                 ? 'Premium darajadagi maxsus sonlar, sun\'iy intellekt yordamida professional 800x800 muqova dizayni va universal eksport vositalari.'
                 : 'Премиум-эпизоды, генерация студийных обложек 800x800 через Gemini AI и полный экспорт для подкаст-платформ.'}
@@ -136,56 +149,57 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left: AI Cover Art Generator (6 cols) */}
         <div className="lg:col-span-6 space-y-6">
-          <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-5 space-y-4">
-            <h3 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
-              <Palette className="w-4 h-4 text-amber-400" />
-              {lang === 'uz' ? '1. AI Podkast Muqovasi (Cover Art Designer)' : '1. Дизайнер Обложек Подкаста'}
+          <div className="bg-white border border-[rgba(22,21,17,0.14)] rounded-[22px] p-5 sm:p-6 space-y-4 shadow-xs">
+            <h3 className="text-xs font-mono uppercase tracking-[0.14em] text-[#0A5A62] font-semibold flex items-center gap-2 border-b border-[rgba(22,21,17,0.1)] pb-3">
+              <Palette className="w-4 h-4 text-[#C98A12]" />
+              {lang === 'uz' ? '01 — AI Podkast Muqovasi (Cover Art Designer)' : '01 — Дизайнер Обложек Подкаста'}
             </h3>
 
             <div className="space-y-3">
               <div>
-                <label className="text-xs font-medium text-zinc-400 block mb-1">
+                <label className="text-[11px] font-mono uppercase tracking-wider text-[#5D594E] block mb-1">
                   {lang === 'uz' ? 'Podkast sarlavhasi (Muqovada ko\'rinadi):' : 'Заголовок на обложке:'}
                 </label>
                 <input
                   type="text"
                   value={coverTitle}
                   onChange={(e) => setCoverTitle(e.target.value)}
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-xs sm:text-sm text-white focus:outline-none focus:border-amber-500"
+                  className="w-full bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] rounded-xl px-3.5 py-2 text-xs sm:text-sm text-[#161511] focus:outline-none focus:border-[#0E7C86] focus:bg-white transition-colors"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="text-xs font-medium text-zinc-400 block mb-1">
+                  <label className="text-[11px] font-mono uppercase tracking-wider text-[#5D594E] block mb-1">
                     {lang === 'uz' ? 'Kategoriya belgisi:' : 'Бейдж категории:'}
                   </label>
                   <input
                     type="text"
                     value={coverCategory}
                     onChange={(e) => setCoverCategory(e.target.value)}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500"
+                    className="w-full bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-2 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86] focus:bg-white transition-colors"
                   />
                 </div>
                 <div>
-                  <label className="text-xs font-medium text-zinc-400 block mb-1">
+                  <label className="text-[11px] font-mono uppercase tracking-wider text-[#5D594E] block mb-1">
                     {lang === 'uz' ? 'Teglar / Mavzular:' : 'Теги:'}
                   </label>
                   <input
                     type="text"
                     value={coverTags}
                     onChange={(e) => setCoverTags(e.target.value)}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500"
+                    className="w-full bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-2 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86] focus:bg-white transition-colors"
                   />
                 </div>
               </div>
 
               <button
+                type="button"
                 onClick={handleGenerateCover}
                 disabled={isGeneratingCover || !coverTitle.trim()}
-                className="w-full py-2.5 bg-gradient-to-r from-amber-600 to-yellow-600 hover:from-amber-500 hover:to-yellow-500 disabled:opacity-50 text-white rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all shadow-md shadow-amber-600/20 cursor-pointer"
+                className="w-full btn-pill btn-solid py-2.5 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 cursor-pointer shadow-xs disabled:opacity-50"
               >
-                <Sparkles className={`w-4 h-4 ${isGeneratingCover ? 'animate-spin' : ''}`} />
+                <Sparkles className={`w-4 h-4 text-[#5CC8CF] ${isGeneratingCover ? 'animate-spin' : ''}`} />
                 {isGeneratingCover
                   ? (lang === 'uz' ? 'Muqova chizilmoqda...' : 'Генерация обложки...')
                   : (lang === 'uz' ? 'Professional Muqovani Yaratish (AI SVG)' : 'Создать Обложку (AI SVG)')}
@@ -194,31 +208,32 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
 
             {/* Generated Cover Preview */}
             <div className="pt-2">
-              <p className="text-xs font-semibold text-zinc-400 mb-2">
+              <p className="text-[11px] font-mono uppercase tracking-wider text-[#5D594E] mb-2">
                 {lang === 'uz' ? 'Muqova ko\'rinishi (800x800 HD):' : 'Предпросмотр обложки:'}
               </p>
 
               {generatedSvg ? (
                 <div className="space-y-3">
                   <div
-                    className="w-full aspect-square max-w-[320px] mx-auto rounded-2xl overflow-hidden border border-amber-500/40 shadow-xl shadow-amber-500/10 flex items-center justify-center bg-black"
+                    className="w-full aspect-square max-w-[320px] mx-auto rounded-2xl overflow-hidden border border-[rgba(22,21,17,0.18)] shadow-md flex items-center justify-center bg-[#141414]"
                     dangerouslySetInnerHTML={{ __html: generatedSvg }}
                   />
                   <button
+                    type="button"
                     onClick={downloadSvg}
-                    className="w-full py-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors border border-zinc-700"
+                    className="w-full btn-pill btn-ghost text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
                   >
-                    <Download className="w-3.5 h-3.5" />
+                    <Download className="w-3.5 h-3.5 text-[#0E7C86]" />
                     {lang === 'uz' ? 'SVG Muqovani Yuklab Olish' : 'Скачать обложку SVG'}
                   </button>
                 </div>
               ) : (
-                <div className="w-full aspect-square max-w-[320px] mx-auto rounded-2xl border border-dashed border-zinc-800 bg-zinc-950 flex flex-col items-center justify-center text-center p-6 space-y-2">
-                  <ImageIcon className="w-10 h-10 text-zinc-700" />
-                  <p className="text-xs text-zinc-400 font-medium">
+                <div className="w-full aspect-square max-w-[320px] mx-auto rounded-2xl border border-dashed border-[rgba(22,21,17,0.18)] bg-[#F4F1EA] flex flex-col items-center justify-center text-center p-6 space-y-2">
+                  <ImageIcon className="w-10 h-10 text-[#5D594E]/40" />
+                  <p className="text-xs text-[#161511] font-medium">
                     {lang === 'uz' ? 'Muqova hali yaratilmadi' : 'Обложка еще не сгенерирована'}
                   </p>
-                  <p className="text-[11px] text-zinc-600">
+                  <p className="text-[11px] text-[#5D594E]">
                     {lang === 'uz'
                       ? 'Tugmani bosing va Gemini 3.8 sizning podkastingiz uchun maxsus zamonaviy studiya dizaynini yaratadi.'
                       : 'Нажмите кнопку для создания обложки в векторе.'}
@@ -232,10 +247,10 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
         {/* Right: Exclusive VIP Episodes & Production Suite (6 cols) */}
         <div className="lg:col-span-6 space-y-6">
           {/* VIP Episodes */}
-          <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-5 space-y-4">
-            <h3 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
-              <Crown className="w-4 h-4 text-amber-400" />
-              {lang === 'uz' ? '2. Eksklyuziv Podkastlar Ro\'yxati' : '2. Список Эксклюзивных Выпусков'}
+          <div className="bg-white border border-[rgba(22,21,17,0.14)] rounded-[22px] p-5 sm:p-6 space-y-4 shadow-xs">
+            <h3 className="text-xs font-mono uppercase tracking-[0.14em] text-[#0A5A62] font-semibold flex items-center gap-2 border-b border-[rgba(22,21,17,0.1)] pb-3">
+              <Crown className="w-4 h-4 text-[#C98A12]" />
+              {lang === 'uz' ? '02 — Eksklyuziv Podkastlar Ro\'yxati' : '02 — Список Эксклюзивных Выпусков'}
             </h3>
 
             <div className="space-y-3">
@@ -246,42 +261,43 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
                 return (
                   <div
                     key={ep.id}
-                    className="p-3.5 rounded-xl bg-zinc-950 border border-zinc-800 hover:border-amber-500/40 transition-all flex flex-col gap-2"
+                    className="p-4 rounded-xl bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] hover:border-[#0E7C86] transition-all flex flex-col gap-2.5 shadow-2xs"
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div>
                         <div className="flex items-center gap-1.5 mb-1">
                           <span
-                            className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                            className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full border ${
                               isMasterclass
-                                ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
-                                : 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                                ? 'bg-[#0E7C86]/10 text-[#0A5A62] border-[#0E7C86]/30'
+                                : 'bg-[#C98A12]/10 text-[#C98A12] border-[#C98A12]/30'
                             }`}
                           >
                             {isMasterclass ? 'MASTERCLASS' : 'VIP EKSKLYUZIV'}
                           </span>
-                          <span className="text-[10px] text-zinc-400 font-mono bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800">
+                          <span className="text-[10px] text-[#5D594E] font-mono bg-white px-2 py-0.5 rounded-full border border-[rgba(22,21,17,0.14)]">
                             {ep.durationSeconds ? `${Math.floor(ep.durationSeconds / 60)} daqiqa` : '30 daqiqa'}
                           </span>
                         </div>
-                        <h4 className="text-xs sm:text-sm font-bold text-white leading-snug">
+                        <h4 className="text-xs sm:text-sm font-semibold text-[#161511] leading-snug">
                           {ep.title}
                         </h4>
                       </div>
 
                       <button
+                        type="button"
                         onClick={() => setActivePlayingId(isPlaying ? null : ep.id)}
-                        className="w-8 h-8 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 flex items-center justify-center shrink-0 transition-transform active:scale-95 cursor-pointer"
+                        className="w-8 h-8 rounded-full bg-[#161511] text-[#F4F1EA] hover:bg-[#0A5A62] flex items-center justify-center shrink-0 transition-transform active:scale-95 cursor-pointer shadow-xs"
                       >
-                        {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
+                        {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}
                       </button>
                     </div>
 
-                    <p className="text-[11px] text-zinc-400 leading-relaxed">{ep.description}</p>
+                    <p className="text-[12px] text-[#5D594E] leading-relaxed">{ep.description}</p>
 
                     <div className="flex items-center gap-1.5 pt-1">
                       {ep.tags.map((tag) => (
-                        <span key={tag} className="text-[9px] px-2 py-0.5 rounded bg-zinc-900 text-zinc-400 font-mono">
+                        <span key={tag} className="text-[9.5px] px-2 py-0.5 rounded-full bg-white text-[#5D594E] font-mono border border-[rgba(22,21,17,0.1)]">
                           #{tag}
                         </span>
                       ))}
@@ -293,33 +309,33 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
           </div>
 
           {/* Production Export Suite */}
-          <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-5 space-y-3">
-            <h3 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
-              <Layers className="w-4 h-4 text-amber-400" />
-              {lang === 'uz' ? '3. Universal Eksport Paketi' : '3. Пакет Экспорта'}
+          <div className="bg-white border border-[rgba(22,21,17,0.14)] rounded-[22px] p-5 sm:p-6 space-y-3.5 shadow-xs">
+            <h3 className="text-xs font-mono uppercase tracking-[0.14em] text-[#0A5A62] font-semibold flex items-center gap-2 border-b border-[rgba(22,21,17,0.1)] pb-3">
+              <Layers className="w-4 h-4 text-[#0E7C86]" />
+              {lang === 'uz' ? '03 — Universal Eksport Paketi' : '03 — Пакет Экспорта'}
             </h3>
-            <p className="text-xs text-zinc-400">
+            <p className="text-xs text-[#5D594E]">
               {lang === 'uz'
                 ? 'Spotify, Apple Podcasts, YouTube va ijtimoiy tarmoqlar uchun to\'liq tayyor materiallar to\'plami:'
                 : 'Готовые материалы для платформ Spotify, Apple Podcasts, YouTube и соцсетей:'}
             </p>
 
             <div className="grid grid-cols-2 gap-2 text-xs">
-              <div className="p-2.5 rounded-lg bg-zinc-950 border border-zinc-800 flex items-center gap-2 text-zinc-300">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                <span>WAV 24kHz Audio</span>
+              <div className="p-3 rounded-xl bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] flex items-center gap-2 text-[#161511]">
+                <CheckCircle2 className="w-4 h-4 text-[#0E7C86] shrink-0" />
+                <span className="font-mono text-[11px]">WAV 24kHz Audio</span>
               </div>
-              <div className="p-2.5 rounded-lg bg-zinc-950 border border-zinc-800 flex items-center gap-2 text-zinc-300">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                <span>SRT / VTT Subtitr</span>
+              <div className="p-3 rounded-xl bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] flex items-center gap-2 text-[#161511]">
+                <CheckCircle2 className="w-4 h-4 text-[#0E7C86] shrink-0" />
+                <span className="font-mono text-[11px]">SRT / VTT Subtitr</span>
               </div>
-              <div className="p-2.5 rounded-lg bg-zinc-950 border border-zinc-800 flex items-center gap-2 text-zinc-300">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                <span>SVG HD Muqova</span>
+              <div className="p-3 rounded-xl bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] flex items-center gap-2 text-[#161511]">
+                <CheckCircle2 className="w-4 h-4 text-[#0E7C86] shrink-0" />
+                <span className="font-mono text-[11px]">SVG HD Muqova</span>
               </div>
-              <div className="p-2.5 rounded-lg bg-zinc-950 border border-zinc-800 flex items-center gap-2 text-zinc-300">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                <span>RSS & JSON Meta</span>
+              <div className="p-3 rounded-xl bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] flex items-center gap-2 text-[#161511]">
+                <CheckCircle2 className="w-4 h-4 text-[#0E7C86] shrink-0" />
+                <span className="font-mono text-[11px]">RSS & JSON Meta</span>
               </div>
             </div>
           </div>

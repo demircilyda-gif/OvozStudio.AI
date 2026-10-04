@@ -15,6 +15,8 @@ import {
   Fingerprint,
 } from 'lucide-react';
 import { VoiceProfile } from '../types/podcast';
+import { getVoicePreviewUrl } from '../data/voicePreviews';
+import { VoiceGallery3D } from './VoiceGallery3D';
 
 interface VoicesManagerTabProps {
   voices: VoiceProfile[];
@@ -43,48 +45,31 @@ export const VoicesManagerTab: React.FC<VoicesManagerTabProps> = ({
       return;
     }
 
+    if (audioInstance) {
+      audioInstance.pause();
+    }
+
     setTestingVoiceId(voice.id);
     try {
-      const sampleText =
-        lang === 'uz'
-          ? `Salom! Men ${voice.name}man. O'zbek tilida sifatli va qiziqarli podkast yaratishga tayyorman.`
-          : `Здравствуйте! Это ${voice.name} в Gemini 3.8 Flash TTS.`;
+      const previewUrl =
+        voice.sampleAudioUrl ||
+        getVoicePreviewUrl(voice.id) ||
+        `/api/voices/preview/${voice.id}`;
 
-      const res = await fetch('/api/podcast/synthesize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: sampleText,
-          voiceProfile: {
-            voiceName: voice.name,
-            voiceId: voice.voiceId || voice.id,
-            baseVoice: voice.baseVoice,
-            timbre: voice.timbre,
-            tempo: voice.tempo,
-            customPersonaPrompt: voice.customPersonaPrompt,
-          },
-          speechStyle: voice.style,
-        }),
-      });
-
-      if (!res.ok) throw new Error('Test sintez xatosi');
-      const data = await res.json();
-      if (data.audioBase64) {
-        const binary = window.atob(data.audioBase64);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) {
-          bytes[i] = binary.charCodeAt(i);
+      const audio = new Audio(previewUrl);
+      setAudioInstance(audio);
+      audio.onended = () => setTestingVoiceId(null);
+      audio.onerror = () => {
+        // Fallback to API if static preview is missing
+        if (previewUrl !== `/api/voices/preview/${voice.id}`) {
+          audio.src = `/api/voices/preview/${voice.id}`;
+          audio.play().catch(() => setTestingVoiceId(null));
+        } else {
+          setTestingVoiceId(null);
         }
-        const blob = new Blob([bytes], { type: 'audio/wav' });
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        setAudioInstance(audio);
-        audio.onended = () => setTestingVoiceId(null);
-        audio.onerror = () => setTestingVoiceId(null);
-        await audio.play();
-      }
-    } catch (err: any) {
-      alert(`Ovoz testida xatolik: ${err.message}`);
+      };
+      await audio.play();
+    } catch {
       setTestingVoiceId(null);
     }
   };
@@ -95,20 +80,24 @@ export const VoicesManagerTab: React.FC<VoicesManagerTabProps> = ({
   return (
     <div className="space-y-8">
       {/* Banner */}
-      <div className="bg-gradient-to-r from-zinc-900 via-zinc-900/90 to-zinc-950 border border-zinc-800 rounded-3xl p-5 sm:p-7 shadow-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="border border-[rgba(22,21,17,0.14)] rounded-[22px] bg-[rgba(255,255,255,0.65)] backdrop-blur-md p-6 sm:p-7 shadow-[0_20px_40px_-20px_rgba(22,21,17,0.18)] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
-            <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 flex items-center gap-1.5">
-              <Mic2 className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="px-2.5 py-0.5 rounded-full text-xs font-mono uppercase tracking-wider bg-[#0E7C86]/10 text-[#0E7C86] border border-[#0E7C86]/25 flex items-center gap-1.5">
+              <Mic2 className="w-3.5 h-3.5 text-[#0E7C86]" />
               Gemini 3.8 TTS Live • Voice Replication
             </span>
-            <span className="text-xs text-zinc-500">•</span>
-            <span className="text-xs text-zinc-400">{voices.length} {lang === 'uz' ? 'ta ovoz profili' : 'голосов'}</span>
+            <span className="text-xs text-[#7D7A70]">•</span>
+            <span className="text-xs font-mono text-[#5D594E]">{voices.length} {lang === 'uz' ? 'ta ovoz profili' : 'голосов'}</span>
           </div>
-          <h2 className="text-xl sm:text-2xl font-bold text-white mt-1">
-            {lang === 'uz' ? 'Ovozlar Boshqaruvi & Voice Replication' : 'Управление Голосами & Voice Replication'}
+          <h2 className="font-serif text-2xl sm:text-3xl text-[#161511] mt-2">
+            {lang === 'uz' ? (
+              <>Ovozlar Boshqaruvi & <em>Voice Replication</em></>
+            ) : (
+              <>Управление Голосами & <em>Voice Replication</em></>
+            )}
           </h2>
-          <p className="text-xs sm:text-sm text-zinc-400 mt-1 max-w-xl">
+          <p className="text-xs sm:text-sm text-[#5D594E] mt-1 max-w-xl">
             {lang === 'uz'
               ? 'Google AI Studio-da yaratilgan shaxsiy ovozingizni ulang, sinab ko\'ring va podkastlaringiz uchun tanlang.'
               : 'Подключайте свою голосовую копию из Google AI Studio, тестируйте звучание и используйте для озвучивания.'}
@@ -117,21 +106,31 @@ export const VoicesManagerTab: React.FC<VoicesManagerTabProps> = ({
 
         <button
           onClick={() => onAddOrEditVoice()}
-          className="flex items-center gap-2 px-5 py-3 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-zinc-950 font-bold text-sm shadow-lg shadow-cyan-500/20 transition-all hover:scale-105 active:scale-95 self-start sm:self-center"
+          className="flex items-center gap-2 px-5 py-3 rounded-full bg-[#161511] hover:bg-[#0A5A62] text-[#F4F1EA] font-medium text-sm shadow-[0_10px_20px_-10px_rgba(22,21,17,0.3)] transition-all cursor-pointer self-start sm:self-center"
         >
-          <Plus className="w-4 h-4 stroke-[3]" />
+          <Plus className="w-4 h-4 stroke-[2.5]" />
           <span>{lang === 'uz' ? 'Ovoz Qo\'shish / Import' : 'Добавить Голос'}</span>
         </button>
       </div>
 
+      {/* 3D Voice Gallery (React Three Fiber + Drei) */}
+      <VoiceGallery3D
+        voices={voices}
+        selectedVoiceId={selectedVoiceId}
+        onSelectVoice={onSelectVoice}
+        lang={lang}
+        title={lang === 'uz' ? '3D Ovozlar Galereyasi' : '3D Галерея Голосов'}
+        subtitle={lang === 'uz' ? '8 TA SHISHA SHAR · REACT-THREE-FIBER + DREI' : '8 СТЕКЛЯННЫХ СФЕР'}
+      />
+
       {/* Section 1: User Replicated & Custom Voices */}
       <div className="space-y-4">
         <div className="flex items-center gap-2">
-          <Fingerprint className="w-5 h-5 text-emerald-400" />
-          <h3 className="text-base sm:text-lg font-bold text-white">
+          <Fingerprint className="w-5 h-5 text-[#0E7C86]" />
+          <h3 className="font-serif text-xl text-[#161511]">
             {lang === 'uz' ? 'Sizning Shaxsiy Ovoz Nusxalaringiz (Voice Replication)' : 'Ваши Персональные Голоса (Voice Replication)'}
           </h3>
-          <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+          <span className="px-2 py-0.5 rounded-full text-xs font-mono bg-[#0E7C86]/10 text-[#0E7C86] border border-[#0E7C86]/25">
             {userCustomVoices.length}
           </span>
         </div>
@@ -144,22 +143,22 @@ export const VoicesManagerTab: React.FC<VoicesManagerTabProps> = ({
             return (
               <div
                 key={voice.id}
-                className={`rounded-2xl p-5 border flex flex-col justify-between transition-all ${
+                className={`rounded-[20px] p-5 border flex flex-col justify-between transition-all ${
                   isSelected
-                    ? 'bg-gradient-to-b from-zinc-900 to-zinc-950 border-cyan-500 ring-2 ring-cyan-500/20 shadow-xl'
-                    : 'bg-zinc-900/60 border-zinc-800 hover:border-zinc-700'
+                    ? 'bg-white border-[#161511] ring-2 ring-[#0E7C86]/30 shadow-[0_20px_40px_-20px_rgba(22,21,17,0.2)]'
+                    : 'bg-white/70 border-[rgba(22,21,17,0.12)] hover:border-[rgba(22,21,17,0.3)]'
                 }`}
               >
                 <div className="space-y-3">
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex items-center gap-2.5">
-                      <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-500 to-emerald-500 text-zinc-950 flex items-center justify-center font-bold text-sm shadow-md shadow-cyan-500/20">
-                        <Fingerprint className="w-5 h-5 stroke-[2.5]" />
+                      <div className="w-10 h-10 rounded-xl bg-[#0E7C86] text-white flex items-center justify-center font-bold text-sm shadow-sm">
+                        <Fingerprint className="w-5 h-5 stroke-[2]" />
                       </div>
                       <div>
-                        <h4 className="font-bold text-white text-sm sm:text-base">{voice.name}</h4>
+                        <h4 className="font-serif text-base text-[#161511]">{voice.name}</h4>
                         <div className="flex items-center gap-1.5 mt-0.5">
-                          <span className="text-[10px] font-bold px-2 py-0.2 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                          <span className="font-mono text-[10px] uppercase tracking-wider px-2 py-0.2 rounded-full bg-[#0E7C86]/10 text-[#0E7C86] border border-[#0E7C86]/25">
                             Replicated Voice
                           </span>
                         </div>
@@ -168,34 +167,34 @@ export const VoicesManagerTab: React.FC<VoicesManagerTabProps> = ({
                   </div>
 
                   {voice.voiceId && (
-                    <div className="text-[11px] font-mono text-cyan-300 bg-zinc-950 px-2.5 py-1 rounded-lg border border-zinc-800 flex items-center justify-between">
+                    <div className="text-[11px] font-mono text-[#0A5A62] bg-[#ECE7DB]/60 px-2.5 py-1 rounded-lg border border-[rgba(22,21,17,0.08)] flex items-center justify-between">
                       <span>ID:</span>
                       <span className="font-bold">{voice.voiceId}</span>
                     </div>
                   )}
 
                   {/* Timbre & Tempo */}
-                  <div className="space-y-1 text-xs text-zinc-300">
-                    <div className="flex items-center gap-1.5 text-zinc-400">
-                      <span className="font-semibold text-zinc-300">{lang === 'uz' ? 'Tembr:' : 'Тембр:'}</span>
+                  <div className="space-y-1 text-xs text-[#5D594E]">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-semibold text-[#161511]">{lang === 'uz' ? 'Tembr:' : 'Тембр:'}</span>
                       <span className="truncate">{voice.timbre}</span>
                     </div>
-                    <div className="flex items-center gap-1.5 text-zinc-400">
-                      <span className="font-semibold text-zinc-300">{lang === 'uz' ? 'Uslub:' : 'Стиль:'}</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-semibold text-[#161511]">{lang === 'uz' ? 'Uslub:' : 'Стиль:'}</span>
                       <span className="truncate">{voice.style}</span>
                     </div>
                   </div>
                 </div>
 
                 {/* Actions */}
-                <div className="pt-4 mt-4 border-t border-zinc-800/80 flex items-center justify-between gap-2">
+                <div className="pt-4 mt-4 border-t border-[rgba(22,21,17,0.08)] flex items-center justify-between gap-2">
                   <button
                     onClick={() => handleTestVoice(voice)}
                     disabled={isTesting}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all cursor-pointer ${
                       isTesting
-                        ? 'bg-amber-500 text-zinc-950 animate-pulse'
-                        : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700'
+                        ? 'bg-[#0E7C86] text-white animate-pulse'
+                        : 'bg-[#ECE7DB] hover:bg-[#161511] hover:text-[#F4F1EA] text-[#161511] border border-[rgba(22,21,17,0.12)]'
                     }`}
                   >
                     {isTesting ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 fill-current" />}
@@ -205,7 +204,7 @@ export const VoicesManagerTab: React.FC<VoicesManagerTabProps> = ({
                   <div className="flex items-center gap-1.5">
                     <button
                       onClick={() => onAddOrEditVoice(voice)}
-                      className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors"
+                      className="p-1.5 rounded-full bg-[#ECE7DB] hover:bg-[#161511] hover:text-[#F4F1EA] text-[#5D594E] transition-colors cursor-pointer"
                       title="Tahrirlash"
                     >
                       <Edit2 className="w-3.5 h-3.5" />
@@ -213,13 +212,13 @@ export const VoicesManagerTab: React.FC<VoicesManagerTabProps> = ({
 
                     <button
                       onClick={() => onSelectVoice(voice.id)}
-                      className={`flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                      className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-medium transition-all cursor-pointer ${
                         isSelected
-                          ? 'bg-emerald-500 text-zinc-950 shadow-md shadow-emerald-500/20'
-                          : 'bg-cyan-500 hover:bg-cyan-400 text-zinc-950'
+                          ? 'bg-[#0E7C86] text-white shadow-sm'
+                          : 'bg-[#161511] hover:bg-[#0A5A62] text-[#F4F1EA]'
                       }`}
                     >
-                      <Check className="w-3.5 h-3.5 stroke-[3]" />
+                      <Check className="w-3.5 h-3.5 stroke-[2.5]" />
                       <span>{isSelected ? (lang === 'uz' ? 'Faol Ovoz' : 'Активен') : (lang === 'uz' ? 'Tanlash' : 'Выбрать')}</span>
                     </button>
                   </div>
@@ -231,13 +230,13 @@ export const VoicesManagerTab: React.FC<VoicesManagerTabProps> = ({
       </div>
 
       {/* Section 2: Catalog Voices */}
-      <div className="space-y-4 pt-4 border-t border-zinc-900">
+      <div className="space-y-4 pt-4 border-t border-[rgba(22,21,17,0.1)]">
         <div className="flex items-center gap-2">
-          <Mic2 className="w-5 h-5 text-cyan-400" />
-          <h3 className="text-base sm:text-lg font-bold text-white">
+          <Mic2 className="w-5 h-5 text-[#C98A12]" />
+          <h3 className="font-serif text-xl text-[#161511]">
             {lang === 'uz' ? 'Standart Gemini 3.8 Ovozlar Katalogi' : 'Стандартный Каталог Голосов Gemini 3.8'}
           </h3>
-          <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-zinc-800 text-zinc-400">
+          <span className="px-2 py-0.5 rounded-full text-xs font-mono bg-[#ECE7DB] text-[#5D594E]">
             {catalogVoices.length}
           </span>
         </div>
@@ -250,21 +249,21 @@ export const VoicesManagerTab: React.FC<VoicesManagerTabProps> = ({
             return (
               <div
                 key={voice.id}
-                className={`rounded-2xl p-5 border flex flex-col justify-between transition-all ${
+                className={`rounded-[20px] p-5 border flex flex-col justify-between transition-all ${
                   isSelected
-                    ? 'bg-zinc-900 border-cyan-500 ring-2 ring-cyan-500/20 shadow-xl'
-                    : 'bg-zinc-900/60 border-zinc-800 hover:border-zinc-700'
+                    ? 'bg-white border-[#161511] ring-2 ring-[#0E7C86]/30 shadow-[0_20px_40px_-20px_rgba(22,21,17,0.2)]'
+                    : 'bg-white/70 border-[rgba(22,21,17,0.12)] hover:border-[rgba(22,21,17,0.3)]'
                 }`}
               >
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      <div className="w-9 h-9 rounded-xl bg-zinc-800 text-zinc-300 flex items-center justify-center font-bold text-sm">
+                      <div className="w-9 h-9 rounded-xl bg-[#ECE7DB] text-[#161511] flex items-center justify-center font-bold text-sm">
                         🎙️
                       </div>
                       <div>
-                        <h4 className="font-bold text-white text-sm sm:text-base">{voice.name}</h4>
-                        <p className="text-[11px] text-zinc-400">
+                        <h4 className="font-serif text-base text-[#161511]">{voice.name}</h4>
+                        <p className="font-mono text-[11px] text-[#7D7A70]">
                           {voice.baseVoice} • {voice.pitchLevel}
                         </p>
                       </div>
@@ -272,27 +271,27 @@ export const VoicesManagerTab: React.FC<VoicesManagerTabProps> = ({
                   </div>
 
                   {/* Timbre & Tempo */}
-                  <div className="space-y-1 text-xs text-zinc-300">
-                    <div className="flex items-center gap-1.5 text-zinc-400">
-                      <span className="font-semibold text-zinc-300">{lang === 'uz' ? 'Tembr:' : 'Тембр:'}</span>
+                  <div className="space-y-1 text-xs text-[#5D594E]">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-semibold text-[#161511]">{lang === 'uz' ? 'Tembr:' : 'Тембр:'}</span>
                       <span className="truncate">{voice.timbre}</span>
                     </div>
-                    <div className="flex items-center gap-1.5 text-zinc-400">
-                      <span className="font-semibold text-zinc-300">{lang === 'uz' ? 'Uslub:' : 'Стиль:'}</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-semibold text-[#161511]">{lang === 'uz' ? 'Uslub:' : 'Стиль:'}</span>
                       <span className="truncate">{voice.style}</span>
                     </div>
                   </div>
                 </div>
 
                 {/* Actions */}
-                <div className="pt-4 mt-4 border-t border-zinc-800/80 flex items-center justify-between gap-2">
+                <div className="pt-4 mt-4 border-t border-[rgba(22,21,17,0.08)] flex items-center justify-between gap-2">
                   <button
                     onClick={() => handleTestVoice(voice)}
                     disabled={isTesting}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all cursor-pointer ${
                       isTesting
-                        ? 'bg-amber-500 text-zinc-950 animate-pulse'
-                        : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700'
+                        ? 'bg-[#0E7C86] text-white animate-pulse'
+                        : 'bg-[#ECE7DB] hover:bg-[#161511] hover:text-[#F4F1EA] text-[#161511] border border-[rgba(22,21,17,0.12)]'
                     }`}
                   >
                     {isTesting ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 fill-current" />}
@@ -301,13 +300,13 @@ export const VoicesManagerTab: React.FC<VoicesManagerTabProps> = ({
 
                   <button
                     onClick={() => onSelectVoice(voice.id)}
-                    className={`flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                    className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-medium transition-all cursor-pointer ${
                       isSelected
-                        ? 'bg-cyan-500 text-zinc-950 shadow-md shadow-cyan-500/20'
-                        : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200'
+                        ? 'bg-[#0E7C86] text-white shadow-sm'
+                        : 'bg-[#161511] hover:bg-[#0A5A62] text-[#F4F1EA]'
                     }`}
                   >
-                    <Check className="w-3.5 h-3.5 stroke-[3]" />
+                    <Check className="w-3.5 h-3.5 stroke-[2.5]" />
                     <span>{isSelected ? (lang === 'uz' ? 'Faol Ovoz' : 'Активен') : (lang === 'uz' ? 'Tanlash' : 'Выбрать')}</span>
                   </button>
                 </div>

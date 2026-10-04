@@ -20,6 +20,7 @@ export interface VoiceProfile {
   isUserCustomVoice: boolean;
   isReplicatedVoice?: boolean;
   sampleAudioBase64?: string;
+  sampleAudioUrl?: string;
   consentAudioBase64?: string;
   sampleNotes?: string;
 }
@@ -35,6 +36,7 @@ export interface DubbingTimelineSegment {
   id?: string;
   start: string; // e.g. "00:00"
   end: string;   // e.g. "00:05"
+  speaker?: string; // e.g. "Speaker 1"
   originalText: string;
   uzbekText: string;
 }
@@ -128,6 +130,18 @@ export type AgentPersonaType =
   | 'exclusive_mentor'     // Eksklyuziv ekspert / Mentor
   | 'business_consultant'; // Biznes va audio-marketing bo'yicha assistent
 
+export interface MatchedProperty {
+  id: string;
+  title: string;
+  district: string;
+  price: string;
+  area: string;
+  rooms: string;
+  roi?: string;
+  badge?: string;
+  developer?: string;
+}
+
 export interface RealEstateLeadCard {
   clientIntent: 'buy' | 'rent' | 'sell' | 'invest';
   district?: string;
@@ -135,7 +149,14 @@ export interface RealEstateLeadCard {
   propertyType?: 'novostroyka' | 'vtorichka' | 'commercial' | 'cottage';
   roomsCount?: string;
   urgency?: 'immediate' | 'this_month' | 'exploring';
+  paymentMethod?: 'cash' | 'mortgage' | 'installments';
+  leadTemperature?: 'hot' | 'warm' | 'cold';
   keyNotes?: string;
+  nextStep?: string;
+  offTopicAttempts?: number;
+  clarificationsCount?: number;
+  callSummary?: string;
+  matchedProperties?: MatchedProperty[];
 }
 
 export interface AgentPersonaConfig {
@@ -246,5 +267,13 @@ export interface GeneratedPodcast {
   rawAudioWavBase64: string;
   mixedAudioWavBase64?: string;
   createdAt: string;
+}
+
+export interface TranscriptLine {
+  id: string;
+  sender?: 'user' | 'agent';
+  speaker?: 'agent' | 'user';
+  text: string;
+  timestamp?: string;
 }
 

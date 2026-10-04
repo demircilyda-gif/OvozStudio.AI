@@ -1,1 +1,275 @@
+@import "./tokens.css";
 @import "tailwindcss";
+
+@theme {
+  --color-paper: #F4F1EA;
+  --color-paper-2: #ECE7DB;
+  --color-paper-3: #E2DDD0;
+  --color-ink: #161511;
+  --color-ink-soft: #5D594E;
+  --color-teal: #0E7C86;
+  --color-teal-deep: #0A5A62;
+  --color-teal-light: #5CC8CF;
+  --color-terra: #C4552D;
+  --color-saffron: #C98A12;
+  --color-line: rgba(22, 21, 17, 0.14);
+  --color-card: rgba(255, 255, 255, 0.72);
+
+  --color-dark: #ECE7DB;
+  --color-dark-2: #F4F1EA;
+  --color-dark-text: #161511;
+  --color-dark-muted: #5D594E;
+  --color-dark-line: rgba(22, 21, 17, 0.14);
+  --color-dark-chip: #E2DDD0;
+
+  --font-serif: "Instrument Serif", Georgia, "Segoe UI", serif;
+  --font-sans: "Inter Tight", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", Consolas, monospace;
+
+  --ease-brand: cubic-bezier(.22, 1, .36, 1);
+}
+
+@layer base {
+  body {
+    font-family: var(--sans);
+    background-color: var(--paper);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, .font-heading {
+    font-family: var(--serif);
+    font-weight: 400;
+    letter-spacing: -0.015em;
+  }
+
+  h1 em, h2 em, h3 em, .font-heading em {
+    font-style: italic;
+    color: var(--teal);
+  }
+
+  code, pre, .font-mono, .tabular-nums {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Custom Sleek Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(22, 21, 17, 0.18);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(22, 21, 17, 0.32);
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Global Light Ivory System for all panels & legacy studio classes */
+.surface-0, .bg-\[\#1E1E2C\] {
+  background-color: #F4F1EA !important;
+}
+
+.surface-1, .bg-\[\#252538\] {
+  background-color: #ECE7DB !important;
+}
+
+.surface-2, .bg-\[\#2D2D42\] {
+  background-color: #FFFFFF !important;
+}
+
+.surface-3, .bg-\[\#363650\] {
+  background-color: #ECE7DB !important;
+}
+
+.surface-4, .bg-\[\#404060\] {
+  background-color: #E2DDD0 !important;
+}
+
+/* Ensure zinc dark backgrounds fall back to warm ivory paper & clean cards */
+.bg-zinc-950, .bg-zinc-950\/80, .bg-zinc-950\/85, .bg-zinc-950\/70 {
+  background-color: rgba(244, 241, 234, 0.95) !important;
+}
+.bg-zinc-900, .bg-zinc-900\/80, .bg-zinc-900\/60, .bg-zinc-900\/30 {
+  background-color: #FFFFFF !important;
+}
+.border-zinc-800, .border-zinc-800\/80, .border-zinc-700, .border-zinc-700\/80 {
+  border-color: rgba(22, 21, 17, 0.14) !important;
+}
+
+/* Ensure text on converted light surfaces has crisp ink contrast */
+.bg-\[\#1E1E2C\] > *, .bg-\[\#252538\] > * {
+  color: inherit;
+}
+.text-zinc-100 {
+  color: #161511 !important;
+}
+.text-zinc-200 {
+  color: #2D2B24 !important;
+}
+.text-zinc-300 {
+  color: #3A382F !important;
+}
+.text-zinc-400 {
+  color: #5D594E !important;
+}
+.text-zinc-500 {
+  color: #7D7A70 !important;
+}
+
+/* Studio & Card Helpers */
+.markaz-card {
+  background: var(--card);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+}
+
+.markaz-dark-screen {
+  background: var(--paper-2);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  box-shadow: 0 25px 50px -25px rgba(22, 21, 17, 0.18);
+}
+
+.mono-kicker {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--teal-deep);
+}
+
+.pulse-teal-dot {
+  animation: pulse-teal 2.4s cubic-bezier(.22, 1, .36, 1) infinite;
+}
+
+@keyframes pulse-teal {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(0.7); opacity: 0.6; }
+}
+
+@keyframes marquee {
+  0% { transform: translateX(0%); }
+  100% { transform: translateX(-50%); }
+}
+
+.animate-marquee {
+  display: flex;
+  width: max-content;
+  animation: marquee 30s linear infinite;
+}
+
+/* Generation Show Keyframes & Utilities */
+@keyframes blinkBlockCaret {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+.animate-block-caret {
+  animation: blinkBlockCaret 1s steps(1) infinite;
+}
+
+@keyframes audioBarWave {
+  0%, 100% {
+    height: 18%;
+  }
+  50% {
+    height: 95%;
+  }
+}
+
+.audio-bar-animated {
+  animation: audioBarWave var(--bar-dur, 0.9s) ease-in-out infinite alternate;
+  animation-delay: var(--bar-delay, 0s);
+}
+
+.audio-bar-flat {
+  height: 18% !important;
+  animation: none !important;
+}
+
+/* Live Call Card Animations */
+@keyframes concentricPulse {
+  0% {
+    transform: scale(0.7);
+    opacity: 0.7;
+  }
+  100% {
+    transform: scale(1.5);
+    opacity: 0;
+  }
+}
+
+.animate-pulse-ring-1 {
+  animation: concentricPulse 2.2s cubic-bezier(0, 0, 0.2, 1) infinite;
+  animation-delay: 0s;
+}
+.animate-pulse-ring-2 {
+  animation: concentricPulse 2.2s cubic-bezier(0, 0, 0.2, 1) infinite;
+  animation-delay: 0.7s;
+}
+.animate-pulse-ring-3 {
+  animation: concentricPulse 2.2s cubic-bezier(0, 0, 0.2, 1) infinite;
+  animation-delay: 1.4s;
+}
+
+@keyframes drawCheckStroke {
+  0% {
+    stroke-dashoffset: 24;
+  }
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+.animate-draw-check {
+  stroke-dasharray: 24;
+  stroke-dashoffset: 24;
+  animation: drawCheckStroke 0.5s cubic-bezier(0.65, 0, 0.45, 1) forwards;
+}
+
+@keyframes typingDot {
+  0%, 80%, 100% {
+    opacity: 0.2;
+    transform: scale(0.8);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1.2);
+  }
+}
+
+.animate-dot-1 {
+  animation: typingDot 1.4s infinite ease-in-out;
+  animation-delay: 0s;
+}
+.animate-dot-2 {
+  animation: typingDot 1.4s infinite ease-in-out;
+  animation-delay: 0.2s;
+}
+.animate-dot-3 {
+  animation: typingDot 1.4s infinite ease-in-out;
+  animation-delay: 0.4s;
+}

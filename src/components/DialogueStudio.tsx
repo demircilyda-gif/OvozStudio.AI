@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { VoiceProfile, DialogueTurn, AmbientSoundscape, SoundCueType, AudioSegmentCue } from '../types/podcast';
+import { getVoicePreviewUrl } from '../data/voicePreviews';
 import { AMBIENT_SOUNDSCAPES } from '../data/ambientSoundscapes';
 import {
   generateAmbientAudioBuffer,
@@ -35,7 +36,9 @@ import {
   Gauge,
   ShieldCheck,
   Eraser,
+  Lock,
 } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 
 interface DialogueStudioProps {
   voices: VoiceProfile[];
@@ -56,6 +59,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   onOpenDocumentModal,
   lang,
 }) => {
+  const { isAuthenticated, requireAuth, useCredit, logGeneration } = useAuth();
+
   // Speaker 1 (User's cloned voice)
   const [speaker1VoiceId, setSpeaker1VoiceId] = useState<string>(() => {
     return userClonedVoiceId || 'voice_17raj9ewke3g';
@@ -155,14 +160,28 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       setPreviewingSpeaker(speaker);
       const isH1 = speaker === 'host1';
       const prof = isH1 ? speaker1Profile : speaker2Profile;
-      const name = isH1 ? speaker1Name : speaker2Name;
-      const isFemale = !isH1 && speaker2Gender === 'female';
+      const previewUrl =
+        prof?.sampleAudioUrl ||
+        (prof?.id ? getVoicePreviewUrl(prof.id) : undefined) ||
+        (prof?.id ? `/api/voices/preview/${prof.id}` : undefined);
+
+      if (previewUrl) {
+        const audio = new Audio(previewUrl);
+        speakerPreviewAudioRef.current = audio;
+        audio.onended = () => setPreviewingSpeaker(null);
+        audio.onerror = () => setPreviewingSpeaker(null);
+        await audio.play();
+        return;
+      }
+
+      const spkName = prof?.name || (isH1 ? speaker1Name : speaker2Name);
+      const isFemaleSpeaker = prof?.gender === 'female' || prof?.baseVoice === 'Kore' || prof?.baseVoice === 'Aoede';
 
       const sampleText = isH1
-        ? `Assalomu alaykum! Men ${name}man. Bugungi intervyu podkastimizga xush kelibsiz.`
-        : isFemale
-        ? `Salom! Men ${name} bo'laman. Bugungi qiziqarli suhbatda qatnashishdan judayam mamnunman.`
-        : `Assalomu alaykum! Men ${name}man. Bugungi intervyuda dolzarb savollarga javob berishga tayyorman.`;
+        ? `Assalomu alaykum! Men ${spkName}man. Bugungi intervyu podkastimizga xush kelibsiz.`
+        : isFemaleSpeaker
+        ? `Salom! Men ${spkName} bo'laman. Bugungi qiziqarli suhbatda qatnashishdan judayam mamnunman.`
+        : `Assalomu alaykum! Men ${spkName}man. Bugungi intervyuda dolzarb savollarga javob berishga tayyorman.`;
 
       const res = await fetch('/api/podcast/synthesize', {
         method: 'POST',
@@ -170,9 +189,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         body: JSON.stringify({
           text: sampleText,
           voiceProfile: {
-            voiceName: name,
+            voiceName: spkName,
             voiceId: prof?.voiceId || prof?.id,
-            baseVoice: prof?.baseVoice || (isFemale ? 'Kore' : 'Charon'),
+            baseVoice: prof?.baseVoice || (isFemaleSpeaker ? 'Kore' : 'Charon'),
             timbre: isH1 ? prof?.timbre : speaker2Timbre || prof?.timbre,
             tempo: isH1 ? speaker1Tempo : speaker2Tempo,
             customPersonaPrompt: prof?.customPersonaPrompt,
@@ -365,6 +384,16 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
   // Generate dialogue script
   const handleGenerateInterview = async () => {
+    if (
+      !requireAuth(
+        () => {},
+        lang === 'uz'
+          ? "2 kishilik intervyu ssenariysini yaratish faqat ro'yxatdan o'tgan foydalanuvchilar uchun ochiq. Avval tizimga kiring!"
+          : "Генерация диалога доступна только для зарегистрированных пользователей."
+      )
+    )
+      return;
+
     setIsGeneratingScript(true);
     try {
       const res = await fetch('/api/podcast/generate-interview', {
@@ -504,6 +533,16 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
   // Synthesize Dialogue
   const handleSynthesizeDialogue = async () => {
+    if (
+      !requireAuth(
+        () => {},
+        lang === 'uz'
+          ? "2 kishilik intervyu ovozini yaratish faqat ro'yxatdan o'tgan foydalanuvchilar uchun ochiq. Begonalar bepul API limitlarini sarflay olmaydi. Avval kiring!"
+          : "Синтез диалога доступен только для зарегистрированных пользователей."
+      )
+    )
+      return;
+
     const invalidTurn = turns.find((t) => !t.text.trim());
     if (invalidTurn) {
       alert('Barcha replikalar uchun matn kiritilishi lozim!');
@@ -546,6 +585,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       setSynthesizedTurns(data.turns || []);
       setIsPlaying(false);
       setActiveTurnIndex(-1);
+
+      // Deduct credit & record generation
+      await useCredit(1);
+      await logGeneration('podcast', topic || '2 Ovozli Intervyu', 1);
     } catch (e: any) {
       alert(`Xatolik: ${e.message}`);
     } finally {
@@ -807,43 +850,46 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Banner */}
-      <div className="rounded-2xl bg-gradient-to-r from-emerald-950/60 via-zinc-900 to-cyan-950/60 border border-emerald-500/30 p-6 relative overflow-hidden">
-        <div className="absolute top-0 right-0 w-80 h-80 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none" />
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 relative z-10">
+      {/* Banner: Warm Paper & Glass Card */}
+      <div className="border border-[rgba(22,21,17,0.14)] rounded-[22px] bg-[rgba(255,255,255,0.52)] backdrop-blur-md p-6 sm:p-7 relative overflow-hidden shadow-[0_30px_50px_-30px_rgba(22,21,17,0.15)]">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-5 relative z-10">
           <div>
-            <div className="flex items-center gap-2 mb-2">
-              <span className="px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 text-xs font-semibold border border-emerald-500/40 flex items-center gap-1.5">
-                <Users2 className="w-3.5 h-3.5" />
-                {lang === 'uz' ? 'Multi-Speaker Intervyu Studiyasi' : 'Мультиспикер & Интервью Студия'}
+            <div className="flex flex-wrap items-center gap-2 mb-2.5">
+              <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-[#0A5A62] border border-[rgba(14,124,134,0.35)] rounded-full px-3 py-1 bg-white/60 flex items-center gap-1.5">
+                <Users2 className="w-3.5 h-3.5 text-[#0E7C86]" />
+                {lang === 'uz' ? 'Multi-Speaker Studiyasi' : 'Мультиспикер Студия'}
               </span>
-              <span className="px-2.5 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 text-xs font-mono border border-cyan-500/30">
-                2 Mustaqil Ovoz (Dual-Voice TTS)
+              <span className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-[#C4552D] border border-[rgba(196,85,45,0.35)] rounded-full px-2.5 py-0.5 bg-[#C4552D]/5">
+                Dual-Voice TTS · Gemini 3.8
               </span>
             </div>
-            <h1 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">
-              {lang === 'uz' ? '2 Boshlovchi va Mehmon Dialogi' : 'Диалог 2-х Ведущих и Экспертов'}
+            <h1 className="font-serif text-3xl sm:text-4xl text-[#161511] font-normal tracking-tight leading-tight">
+              {lang === 'uz' ? (
+                <>2 Boshlovchi va Mehmon <em>Dialogi</em></>
+              ) : (
+                <>Диалог 2-х Ведущих и <em>Экспертов</em></>
+              )}
             </h1>
-            <p className="text-zinc-400 text-sm mt-1 max-w-2xl">
+            <p className="text-[#5D594E] text-sm mt-1.5 max-w-2xl leading-relaxed">
               {lang === 'uz'
-                ? 'O\'z ovozingizni (SHOKHRUKH) boshlovchi sifatida, ikkinchi taklif qilingan ovozni esa mehmon sifatida ulab, to\'liq ketma-ketlikda jonli dialog yarating.'
+                ? 'Oʻz ovozingizni (SHOKHRUKH) boshlovchi sifatida, ikkinchi taklif qilingan ovozni esa mehmon sifatida ulab, toʻliq ketma-ketlikda jonli dialog yarating.'
                 : 'Используйте свой голос как ведущего и выберите второй голос для гостя, создавая живой многоголосый диалог.'}
             </p>
           </div>
 
           {/* Speakers summary pill */}
-          <div className="flex items-center gap-2 bg-zinc-950/80 border border-emerald-500/30 p-2.5 rounded-xl">
-            <div className="px-3 py-1.5 bg-emerald-950/60 rounded-lg border border-emerald-500/30 text-xs">
-              <span className="text-[10px] text-zinc-400 block">1-Spiker (Siz):</span>
-              <span className="font-bold text-emerald-300 flex items-center gap-1">
+          <div className="flex items-center gap-2 bg-white/90 border border-[rgba(22,21,17,0.14)] p-2.5 rounded-2xl shadow-xs shrink-0">
+            <div className="px-3 py-1.5 bg-[#F4F1EA] rounded-xl border border-[rgba(22,21,17,0.1)] text-xs">
+              <span className="text-[10px] text-[#5D594E] block font-mono uppercase tracking-wider">1-Spiker (Siz):</span>
+              <span className="font-bold text-[#0A5A62] flex items-center gap-1">
                 {speaker1Profile?.name}
-                <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                <CheckCircle2 className="w-3 h-3 text-[#0E7C86]" />
               </span>
             </div>
-            <span className="text-zinc-500 font-bold">&</span>
-            <div className="px-3 py-1.5 bg-cyan-950/60 rounded-lg border border-cyan-500/30 text-xs">
-              <span className="text-[10px] text-zinc-400 block">2-Spiker (Mehmon):</span>
-              <span className="font-bold text-cyan-300">{speaker2Profile?.name}</span>
+            <span className="text-[#161511]/30 font-bold">&</span>
+            <div className="px-3 py-1.5 bg-[#FAF8F3] rounded-xl border border-[rgba(196,85,45,0.25)] text-xs">
+              <span className="text-[10px] text-[#5D594E] block font-mono uppercase tracking-wider">2-Spiker (Mehmon):</span>
+              <span className="font-bold text-[#C4552D]">{speaker2Profile?.name}</span>
             </div>
           </div>
         </div>
@@ -854,34 +900,34 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         {/* Left: Speaker Configuration & Script Builder (8 cols) */}
         <div className="lg:col-span-8 space-y-6">
           {/* STEP 1: Dialogue Topic & AI Script Generator + Document Upload */}
-          <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-5 space-y-4">
+          <div className="border border-[rgba(22,21,17,0.14)] rounded-[20px] bg-[rgba(255,255,255,0.52)] backdrop-blur-sm p-6 space-y-4 shadow-[0_30px_50px_-30px_rgba(22,21,17,0.15)]">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
-                <MessageSquare className="w-4 h-4 text-emerald-400" />
-                {lang === 'uz' ? '1. Dialog Mavzusi & Ssenariy Yaratish' : '1. Тема Диалога и Создание Сценария'}
-              </h3>
+              <div className="flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.14em] text-[#0A5A62] flex-1">
+                <span>01 — Dialog mavzusi va ssenariy</span>
+                <span className="h-[1px] flex-1 bg-[rgba(22,21,17,0.14)] mr-3" />
+              </div>
 
               {onOpenDocumentModal && (
                 <button
                   type="button"
                   onClick={onOpenDocumentModal}
-                  className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-cyan-300 border border-cyan-500/40 text-xs font-semibold flex items-center gap-1.5 transition-all hover:scale-105 cursor-pointer"
+                  className="btn-pill btn-ghost text-xs px-3.5 py-1.5 flex items-center gap-1.5 shrink-0"
                 >
-                  <Upload className="w-3.5 h-3.5" />
-                  <span>{lang === 'uz' ? 'PDF / Maqoladan Dialog Yaratish' : 'Из PDF/Статьи'}</span>
+                  <Upload className="w-3.5 h-3.5 text-[#0E7C86]" />
+                  <span>{lang === 'uz' ? 'PDF / Maqoladan' : 'Из PDF/Статьи'}</span>
                 </button>
               )}
             </div>
 
             {/* Duration Selector & Timing Info */}
-            <div className="p-3 bg-zinc-950/70 border border-zinc-800 rounded-xl space-y-2">
+            <div className="p-3.5 bg-white border border-[rgba(22,21,17,0.14)] rounded-xl space-y-2.5 shadow-xs">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-zinc-300 flex items-center gap-1.5">
-                  <Clock className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="text-xs font-semibold text-[#161511] flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-[#0E7C86]" />
                   {lang === 'uz' ? 'Intervyu Davomiyligi:' : 'Длительность интервью:'}
                 </span>
-                <span className="text-[11px] font-mono text-zinc-400">
-                  {turns.length} {lang === 'uz' ? 'replika' : 'реплик'} • ~{Math.max(1, Math.round(turns.reduce((acc, t) => acc + t.text.trim().split(/\s+/).filter(Boolean).length, 0) / 125))} {lang === 'uz' ? 'daqiqa' : 'мин'}
+                <span className="text-[11px] font-mono text-[#5D594E]">
+                  {turns.length} {lang === 'uz' ? 'replika' : 'реплик'} · ~{Math.max(1, Math.round(turns.reduce((acc, t) => acc + t.text.trim().split(/\s+/).filter(Boolean).length, 0) / 125))} {lang === 'uz' ? 'daqiqa' : 'мин'}
                 </span>
               </div>
               <div className="flex flex-wrap gap-1.5">
@@ -895,10 +941,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                     key={d.id}
                     type="button"
                     onClick={() => setTargetDuration(d.id)}
-                    className={`flex-1 py-1.5 px-2.5 rounded-lg border text-xs font-semibold transition-all cursor-pointer ${
+                    className={`btn-pill text-xs py-1.5 px-3.5 transition-all cursor-pointer ${
                       targetDuration === d.id
-                        ? 'bg-emerald-500/20 border-emerald-400 text-emerald-300 font-bold'
-                        : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700'
+                        ? 'bg-[#161511] text-[#F4F1EA] font-semibold border-[#161511]'
+                        : 'bg-transparent border-[rgba(22,21,17,0.14)] text-[#5D594E] hover:border-[#161511] hover:text-[#161511]'
                     }`}
                   >
                     <div>{d.label}</div>
@@ -912,80 +958,81 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 type="text"
                 value={topic}
                 onChange={(e) => setTopic(e.target.value)}
-                placeholder="Intervyu mavzusi..."
-                className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-xs sm:text-sm text-zinc-200 focus:outline-none focus:border-emerald-500"
+                placeholder={lang === 'uz' ? "Intervyu mavzusi (masalan: Sun'iy intellekt kelajagi va O'zbekiston)..." : "Тема интервью..."}
+                className="flex-1 bg-white border border-[rgba(22,21,17,0.14)] rounded-xl px-4 py-2.5 text-xs sm:text-sm text-[#161511] placeholder:text-[#5D594E]/60 focus:outline-none focus:border-[#0E7C86]"
               />
               <button
                 onClick={handleGenerateInterview}
                 disabled={isGeneratingScript || !topic.trim()}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-xl text-xs sm:text-sm font-semibold flex items-center justify-center gap-1.5 transition-all shadow-md shadow-emerald-600/20 whitespace-nowrap cursor-pointer"
+                className="btn-pill btn-solid text-xs py-2.5 px-4 flex items-center justify-center gap-1.5 shrink-0"
               >
-                <Sparkles className={`w-3.5 h-3.5 ${isGeneratingScript ? 'animate-spin' : ''}`} />
+                <Sparkles className={`w-3.5 h-3.5 text-[#5CC8CF] ${isGeneratingScript ? 'animate-spin' : ''}`} />
                 {isGeneratingScript ? (lang === 'uz' ? 'Yozilmoqda...' : 'Генерация...') : (lang === 'uz' ? `AI Intervyu Matni (${targetDuration})` : `AI Диалог (${targetDuration})`)}
               </button>
               <button
                 onClick={handleExpandInterview}
                 disabled={isExpandingDialogue || turns.length === 0}
-                className="px-3.5 py-2 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-amber-300 border border-amber-500/40 rounded-xl text-xs sm:text-sm font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer whitespace-nowrap"
+                className="btn-pill btn-ghost text-xs py-2.5 px-3.5 flex items-center justify-center gap-1.5 shrink-0 text-[#C4552D] border-[rgba(196,85,45,0.4)]"
                 title="Suhbatni yana 15 daqiqaga kengaytirish"
               >
                 <Sparkles className={`w-3.5 h-3.5 ${isExpandingDialogue ? 'animate-spin' : ''}`} />
-                {isExpandingDialogue ? (lang === 'uz' ? 'Kengaytirilmoqda...' : 'Расширение...') : (lang === 'uz' ? '+15 daqiqa qo\'shish' : '+15 минут')}
+                {isExpandingDialogue ? (lang === 'uz' ? 'Kengaytirilmoqda...' : 'Расширение...') : (lang === 'uz' ? '+15 daq' : '+15 мин')}
               </button>
             </div>
           </div>
 
           {/* STEP 2: Speakers Selector Card */}
-          <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-5 space-y-4">
-            <h3 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
-              <Users2 className="w-4 h-4 text-emerald-400" />
-              {lang === 'uz' ? '2. Ishtirokchilar va Ularning Ovozlari' : '2. Участники и Их Голоса'}
-            </h3>
+          <div className="border border-[rgba(22,21,17,0.14)] rounded-[20px] bg-[rgba(255,255,255,0.52)] backdrop-blur-sm p-6 space-y-4 shadow-[0_30px_50px_-30px_rgba(22,21,17,0.15)]">
+            <div className="flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.14em] text-[#0A5A62]">
+              <span>02 — Ishtirokchilar va ularning ovozlari</span>
+              <span className="h-[1px] flex-1 bg-[rgba(22,21,17,0.14)]" />
+            </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {/* Speaker 1 (Host - User's Voice) */}
-              <div className="p-4 rounded-xl bg-zinc-950 border border-emerald-500/30 space-y-3">
+              <div className="p-4 rounded-2xl bg-white border border-[rgba(22,21,17,0.14)] space-y-3 shadow-xs">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
-                    <User className="w-3.5 h-3.5" /> 1-Boshlovchi (O'zingiz)
+                  <span className="text-xs font-bold text-[#0A5A62] flex items-center gap-1.5">
+                    <User className="w-3.5 h-3.5" /> 1-Boshlovchi (Oʻzingiz)
                   </span>
-                  <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded-full border border-emerald-500/40">
+                  <span className="text-[10px] font-mono text-[#0E7C86] border border-[#0E7C86]/30 px-2 py-0.5 rounded-full bg-[#0E7C86]/5">
                     Haqiqiy Klon Ovoz
                   </span>
                 </div>
 
                 <div>
-                  <label className="text-[10px] uppercase font-mono text-zinc-400 block mb-1">
+                  <label className="text-[10px] uppercase font-mono text-[#5D594E] block mb-1">
                     {lang === 'uz' ? 'Spiker Ismi:' : 'Имя спикера:'}
                   </label>
                   <input
                     type="text"
                     value={speaker1Name}
                     onChange={(e) => setSpeaker1Name(e.target.value)}
-                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-emerald-500"
+                    className="w-full bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-1.5 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86]"
                     placeholder="Masalan: Shokhrukh"
                   />
                 </div>
 
                 <div>
                   <div className="flex items-center justify-between mb-1">
-                    <label className="text-[10px] uppercase font-mono text-zinc-400">
+                    <label className="text-[10px] uppercase font-mono text-[#5D594E]">
                       {lang === 'uz' ? 'Tanlangan Ovoz:' : 'Выбранный голос:'}
                     </label>
                     <button
                       type="button"
                       onClick={() => handleTestSpeakerVoice('host1')}
-                      className="text-[11px] text-emerald-400 hover:text-emerald-300 flex items-center gap-1 cursor-pointer transition-colors"
+                      className="text-[11px] text-[#0E7C86] hover:underline flex items-center gap-1 cursor-pointer transition-colors"
+                      title={lang === 'uz' ? 'Ovoz namunasini tinglash (0s kutish, tekin)' : 'Прослушать голос'}
                     >
                       {previewingSpeaker === 'host1' ? (
                         <>
                           <Pause className="w-3 h-3 animate-spin" />
-                          <span>To'xtatish</span>
+                          <span>{lang === 'uz' ? "To'xtatish" : 'Стоп'}</span>
                         </>
                       ) : (
                         <>
-                          <Play className="w-3 h-3" />
-                          <span>Eshittirish</span>
+                          <Play className="w-3 h-3 fill-current" />
+                          <span>{lang === 'uz' ? 'Namuna (0s)' : 'Прослушать'}</span>
                         </>
                       )}
                     </button>
@@ -993,7 +1040,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   <select
                     value={speaker1VoiceId}
                     onChange={(e) => setSpeaker1VoiceId(e.target.value)}
-                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-emerald-500"
+                    className="w-full bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-1.5 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86] cursor-pointer"
                   >
                     {voices.map((v) => (
                       <option key={v.id} value={v.id}>
@@ -1005,7 +1052,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
                 {/* Speaker 1 Tempo */}
                 <div>
-                  <label className="text-[10px] uppercase font-mono text-zinc-400 block mb-1.5">
+                  <label className="text-[10px] uppercase font-mono text-[#5D594E] block mb-1.5">
                     {lang === 'uz' ? 'Nutq Tempi (Tezligi):' : 'Темп речи:'}
                   </label>
                   <div className="grid grid-cols-4 gap-1">
@@ -1014,10 +1061,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                         key={tVal}
                         type="button"
                         onClick={() => setSpeaker1Tempo(tVal)}
-                        className={`py-1 px-1.5 text-[11px] rounded font-mono transition-all text-center ${
+                        className={`py-1 px-1.5 text-[11px] rounded-lg font-mono transition-all text-center cursor-pointer ${
                           speaker1Tempo === tVal
-                            ? 'bg-emerald-600 text-white font-bold'
-                            : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800'
+                            ? 'bg-[#161511] text-[#F4F1EA] font-bold'
+                            : 'bg-[#F4F1EA]/60 text-[#5D594E] hover:text-[#161511] border border-[rgba(22,21,17,0.1)]'
                         }`}
                       >
                         {tVal}
@@ -1028,19 +1075,19 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
               </div>
 
               {/* Speaker 2 (Guest / Aziza) */}
-              <div className="p-4 rounded-xl bg-zinc-950 border border-cyan-500/30 space-y-3">
+              <div className="p-4 rounded-2xl bg-white border border-[rgba(196,85,45,0.3)] space-y-3 shadow-xs">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-cyan-400 flex items-center gap-1.5">
+                  <span className="text-xs font-bold text-[#C4552D] flex items-center gap-1.5">
                     <Bot className="w-3.5 h-3.5" /> 2-Mehmon / Ekspert
                   </span>
-                  <div className="flex items-center gap-1 bg-zinc-900 p-0.5 rounded-lg border border-zinc-800">
+                  <div className="flex items-center gap-1 bg-[#F4F1EA] p-0.5 rounded-lg border border-[rgba(22,21,17,0.1)]">
                     <button
                       type="button"
                       onClick={() => setSpeaker2GenderFilter('all')}
                       className={`px-1.5 py-0.5 text-[10px] rounded transition-colors ${
                         speaker2GenderFilter === 'all'
-                          ? 'bg-zinc-700 text-white font-bold'
-                          : 'text-zinc-400 hover:text-zinc-200'
+                          ? 'bg-[#161511] text-[#F4F1EA] font-bold'
+                          : 'text-[#5D594E] hover:text-[#161511]'
                       }`}
                     >
                       Barchasi
@@ -1050,8 +1097,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                       onClick={() => setSpeaker2GenderFilter('female')}
                       className={`px-1.5 py-0.5 text-[10px] rounded transition-colors ${
                         speaker2GenderFilter === 'female'
-                          ? 'bg-cyan-500 text-black font-bold'
-                          : 'text-zinc-400 hover:text-zinc-200'
+                          ? 'bg-[#C4552D] text-white font-bold'
+                          : 'text-[#5D594E] hover:text-[#161511]'
                       }`}
                     >
                       Ayollar (Kore)
@@ -1061,8 +1108,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                       onClick={() => setSpeaker2GenderFilter('male')}
                       className={`px-1.5 py-0.5 text-[10px] rounded transition-colors ${
                         speaker2GenderFilter === 'male'
-                          ? 'bg-cyan-500 text-black font-bold'
-                          : 'text-zinc-400 hover:text-zinc-200'
+                          ? 'bg-[#0E7C86] text-white font-bold'
+                          : 'text-[#5D594E] hover:text-[#161511]'
                       }`}
                     >
                       Erkaklar
@@ -1072,26 +1119,26 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="text-[10px] uppercase font-mono text-zinc-400 block mb-1">
+                    <label className="text-[10px] uppercase font-mono text-[#5D594E] block mb-1">
                       {lang === 'uz' ? 'Ismi:' : 'Имя:'}
                     </label>
                     <input
                       type="text"
                       value={speaker2Name}
                       onChange={(e) => setSpeaker2Name(e.target.value)}
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500"
+                      className="w-full bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-xl px-2.5 py-1.5 text-xs text-[#161511] focus:outline-none focus:border-[#C4552D]"
                       placeholder="Aziza"
                     />
                   </div>
                   <div>
-                    <label className="text-[10px] uppercase font-mono text-zinc-400 block mb-1">
+                    <label className="text-[10px] uppercase font-mono text-[#5D594E] block mb-1">
                       {lang === 'uz' ? 'Roli / Kasbi:' : 'Роль / Профессия:'}
                     </label>
                     <input
                       type="text"
                       value={speaker2Role}
                       onChange={(e) => setSpeaker2Role(e.target.value)}
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-cyan-500"
+                      className="w-full bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-xl px-2.5 py-1.5 text-xs text-[#161511] focus:outline-none focus:border-[#C4552D]"
                       placeholder="AI & Fan Eksperti"
                     />
                   </div>
@@ -1100,23 +1147,24 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 {/* Speaker 2 Voice Select & Preview Button */}
                 <div>
                   <div className="flex items-center justify-between mb-1">
-                    <label className="text-[10px] uppercase font-mono text-zinc-400">
-                      {lang === 'uz' ? 'Mehmon Ovozi (O\'zbekcha):' : 'Голос гостя:'}
+                    <label className="text-[10px] uppercase font-mono text-[#5D594E]">
+                      {lang === 'uz' ? "Mehmon Ovozi (O'zbekcha):" : 'Голос гостя:'}
                     </label>
                     <button
                       type="button"
                       onClick={() => handleTestSpeakerVoice('host2')}
-                      className="text-[11px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1 cursor-pointer transition-colors"
+                      className="text-[11px] text-[#FACC15] hover:underline flex items-center gap-1 cursor-pointer transition-colors"
+                      title={lang === 'uz' ? 'Ovoz namunasini tinglash (0s kutish, tekin)' : 'Прослушать голос (встроено)'}
                     >
                       {previewingSpeaker === 'host2' ? (
                         <>
                           <Pause className="w-3 h-3 animate-spin" />
-                          <span>To'xtatish</span>
+                          <span>{lang === 'uz' ? "To'xtatish" : 'Стоп'}</span>
                         </>
                       ) : (
                         <>
-                          <Play className="w-3 h-3" />
-                          <span>Eshittirish (Namuna)</span>
+                          <Play className="w-3 h-3 fill-current" />
+                          <span>{lang === 'uz' ? 'Namuna (0s)' : 'Прослушать'}</span>
                         </>
                       )}
                     </button>
@@ -1124,7 +1172,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   <select
                     value={speaker2VoiceId}
                     onChange={(e) => handleSelectSpeaker2Voice(e.target.value)}
-                    className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-cyan-500"
+                    className="w-full bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-1.5 text-xs text-[#161511] focus:outline-none focus:border-[#C4552D] cursor-pointer"
                   >
                     {voices
                       .filter((v) => {
@@ -1144,9 +1192,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 </div>
 
                 {/* Speaker 2 Tempo & Timbre Controls */}
-                <div className="grid grid-cols-2 gap-2 pt-1 border-t border-zinc-800/80">
+                <div className="grid grid-cols-2 gap-2 pt-1 border-t border-[rgba(22,21,17,0.08)]">
                   <div>
-                    <label className="text-[10px] uppercase font-mono text-zinc-400 block mb-1">
+                    <label className="text-[10px] uppercase font-mono text-[#5D594E] block mb-1">
                       {lang === 'uz' ? 'Tempi (Tezlik):' : 'Темп речи:'}
                     </label>
                     <div className="grid grid-cols-4 gap-1">
@@ -1155,10 +1203,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           key={tVal}
                           type="button"
                           onClick={() => setSpeaker2Tempo(tVal)}
-                          className={`py-1 text-[10px] rounded font-mono transition-all text-center ${
+                          className={`py-1 text-[10px] rounded-lg font-mono transition-all text-center cursor-pointer ${
                             speaker2Tempo === tVal
-                              ? 'bg-cyan-600 text-white font-bold'
-                              : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-zinc-800'
+                              ? 'bg-[#161511] text-[#F4F1EA] font-bold'
+                              : 'bg-[#F4F1EA]/60 text-[#5D594E] hover:text-[#161511] border border-[rgba(22,21,17,0.1)]'
                           }`}
                         >
                           {tVal}
@@ -1168,13 +1216,13 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   </div>
 
                   <div>
-                    <label className="text-[10px] uppercase font-mono text-zinc-400 block mb-1">
+                    <label className="text-[10px] uppercase font-mono text-[#5D594E] block mb-1">
                       {lang === 'uz' ? 'Tembr & Ohang:' : 'Тембр / Интонация:'}
                     </label>
                     <select
                       value={speaker2Timbre}
                       onChange={(e) => setSpeaker2Timbre(e.target.value)}
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-[11px] text-zinc-300 focus:outline-none focus:border-cyan-500"
+                      className="w-full bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-lg px-2 py-1 text-[11px] text-[#161511] focus:outline-none focus:border-[#C4552D] cursor-pointer"
                     >
                       <option value="Mayin & Intellektual">Mayin & Intellektual (Aziza)</option>
                       <option value="Yorqin & Jurnalistik">Yorqin & Jurnalistik (Madina)</option>
@@ -1191,81 +1239,39 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           </div>
 
           {/* STEP 3: Dialogue Turns & AI Sound Director */}
-          <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-5 space-y-4">
+          <div className="border border-[rgba(22,21,17,0.14)] rounded-[20px] bg-[rgba(255,255,255,0.52)] backdrop-blur-sm p-6 space-y-4 shadow-[0_30px_50px_-30px_rgba(22,21,17,0.15)]">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
-                <MessageSquare className="w-4 h-4 text-emerald-400" />
-                {lang === 'uz' ? '3. Suhbat Replikalari & AI Ovoz Rejissyori' : '3. Реплики Беседы и AI Звукорежиссер'}
-              </h3>
-              <span className="text-xs font-mono text-zinc-400">
+              <div className="flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.14em] text-[#0A5A62] flex-1">
+                <span>03 — Suhbat replikalari va ovoz rejissyori</span>
+                <span className="h-[1px] flex-1 bg-[rgba(22,21,17,0.14)] mr-3" />
+              </div>
+              <span className="text-xs font-mono text-[#5D594E]">
                 {turns.length} {lang === 'uz' ? 'ta replika' : 'реплик'}
               </span>
             </div>
 
-            {/* AI Sound Director Banner & Auto-Planner */}
-            <div className="bg-gradient-to-r from-purple-950/40 via-zinc-900 to-indigo-950/40 border border-purple-500/30 rounded-2xl p-4 space-y-3">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="p-1.5 rounded-lg bg-purple-500/20 text-purple-300 border border-purple-500/30">
-                      <Sliders className="w-4 h-4" />
-                    </span>
-                    <h4 className="text-sm font-bold text-white flex items-center gap-1.5">
-                      {lang === 'uz' ? 'AI Ovoz Rejissyori (Dinamik Saund-Dizayn)' : 'AI Звукорежиссер (Динамический саунд-дизайн)'}
-                    </h4>
-                  </div>
-                  <p className="text-xs text-zinc-400 mt-1">
-                    {lang === 'uz'
-                      ? "Bitta monoton musiqadan voz kechib, har bir replika uchun alohida reja: kirish jingle'i, suhbatda toza ovoz (musiqasiz), chuqur fikrlarda mayin fon va o'tish stingerlari."
-                      : 'Динамическая расстановка музыки: интро-джингл, кристально чистый голос без музыки в середине, акценты и эмоциональный фон.'}
-                  </p>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={handleCleanAllTurns}
-                    className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-amber-300 border border-amber-500/40 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all hover:scale-105 cursor-pointer whitespace-nowrap"
-                    title="Barcha replikalardan skobkalar va ovoz shartlarini tozalash"
-                  >
-                    <Eraser className="w-3.5 h-3.5 text-amber-400" />
-                    <span>{lang === 'uz' ? 'Shartlarni tozalash' : 'Очистить условия'}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={handlePlanSoundDirector}
-                    disabled={isPlanningSound || turns.length === 0}
-                    className="px-4 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all shadow-md shadow-purple-600/20 whitespace-nowrap cursor-pointer"
-                  >
-                    <Sparkles className={`w-3.5 h-3.5 ${isPlanningSound ? 'animate-spin' : ''}`} />
-                    {isPlanningSound
-                      ? (lang === 'uz' ? 'Rejalashtirilmoqda...' : 'Анализ...')
-                      : (lang === 'uz' ? 'AI Saund-Reja Tuzish' : 'AI Расстановка Музыки')}
-                  </button>
-                </div>
-              </div>
-
-              {/* Speech Condition Protection Notice */}
-              <div className="p-2.5 rounded-xl bg-indigo-950/40 border border-indigo-500/20 text-xs text-indigo-200 flex items-start gap-2">
-                <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                <p className="leading-relaxed text-[11px] text-zinc-300">
-                  <strong className="text-emerald-300">{lang === 'uz' ? 'Ovoz kafolati:' : 'Защита от зачитывания ремарок:'}</strong>{' '}
+            {/* Clean Dialogue Actions Toolbar */}
+            <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-white border border-[rgba(22,21,17,0.14)] rounded-xl shadow-xs">
+              <div className="flex items-center gap-2 text-xs text-[#5D594E]">
+                <ShieldCheck className="w-4 h-4 text-[#0E7C86] shrink-0" />
+                <span>
                   {lang === 'uz'
-                    ? 'Replikalardagi [Bariton], [Mezzo], [00:00], [Pauza] kabi barcha shartlar replikada tursa ham, sintez paytida avtomatik tarzda diktor tembri va emotsiyasiga o\'tkaziladi va baland ovozda O\'QILMAYDI!'
-                    : 'Условия тембра ([Баритон], [Меццо]), таймкоды и ремарки в скобках автоматически формируют голос Gemini TTS и НЕ озвучиваются вслух!'}
-                </p>
+                    ? 'Barcha shartlar [Bariton, Pauza] avtomatik diktor tembriga oʻtkaziladi va baland ovozda oʻqilmaydi.'
+                    : 'Ремарки в скобках формируют интонацию и не зачитываются вслух.'}
+                </span>
               </div>
 
-              {soundDirectorStrategy && (
-                <div className="p-2.5 rounded-xl bg-purple-950/30 border border-purple-500/30 text-xs text-purple-200 flex items-start gap-2">
-                  <Sparkles className="w-4 h-4 text-purple-400 shrink-0 mt-0.5" />
-                  <p className="leading-relaxed">
-                    <strong>{lang === 'uz' ? 'Rejissura strategiyasi:' : 'Стратегия режиссуры:'}</strong>{' '}
-                    {lang === 'uz' ? soundDirectorStrategy.strategyUz : soundDirectorStrategy.strategyRu}
-                  </p>
-                </div>
-              )}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleCleanAllTurns}
+                  className="btn-pill btn-ghost text-xs py-1.5 px-3 flex items-center gap-1.5"
+                  title="Barcha replikalardan skobkalar va ovoz shartlarini tozalash"
+                >
+                  <Eraser className="w-3.5 h-3.5 text-[#5D594E]" />
+                  <span>{lang === 'uz' ? 'Shartlarni tozalash' : 'Очистить условия'}</span>
+                </button>
+              </div>
             </div>
 
             {/* Turn by turn list */}
@@ -1280,22 +1286,22 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 return (
                   <div
                     key={turn.id}
-                    className={`p-3.5 rounded-xl border transition-all ${
+                    className={`p-4 rounded-2xl border transition-all ${
                       isCurrentlyActive
-                        ? 'border-yellow-400 bg-yellow-950/20 shadow-lg shadow-yellow-500/10'
+                        ? 'border-[#0E7C86] bg-[rgba(14,124,134,0.06)] shadow-sm'
                         : isHost1
-                        ? 'bg-emerald-950/20 border-emerald-500/30'
-                        : 'bg-cyan-950/20 border-cyan-500/30'
+                        ? 'bg-white border-[rgba(22,21,17,0.14)] border-l-4 border-l-[#0E7C86] shadow-xs'
+                        : 'bg-[#FAF8F3] border-[rgba(22,21,17,0.14)] border-l-4 border-l-[#C4552D] shadow-xs'
                     }`}
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                       <div className="flex items-center gap-2">
                         <button
                           onClick={() => toggleTurnSpeaker(turn.id)}
-                          className={`px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-transform active:scale-95 cursor-pointer ${
+                          className={`btn-pill text-xs py-1 px-3 flex items-center gap-1.5 cursor-pointer font-semibold ${
                             isHost1
-                              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                              : 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                              ? 'bg-[rgba(14,124,134,0.1)] text-[#0A5A62] border border-[rgba(14,124,134,0.3)]'
+                              : 'bg-[rgba(196,85,45,0.1)] text-[#C4552D] border border-[rgba(196,85,45,0.3)]'
                           }`}
                           title="Spikerni almashtirish uchun bosing"
                         >
@@ -1306,16 +1312,16 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                         {turnConditions.hasConditions && (
                           <div className="flex items-center gap-1.5">
                             <span
-                              className="px-2 py-0.5 rounded-md bg-zinc-900 border border-amber-500/30 text-amber-300 text-[10px] font-mono flex items-center gap-1"
-                              title="Bu shart ovoz modulatsiyasi uchun ishlatiladi va baland ovozda o'qilmaydi"
+                              className="font-mono text-[10.5px] border border-[rgba(196,85,45,0.4)] text-[#C4552D] rounded-full px-2.5 py-0.5 flex items-center gap-1 bg-white"
+                              title="Bu shart ovoz modulatsiyasi uchun ishlatiladi"
                             >
-                              <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                              <ShieldCheck className="w-3 h-3 text-[#0E7C86]" />
                               <span>{turnConditions.conditions.slice(0, 2).join(' ')}</span>
                             </span>
                             <button
                               type="button"
                               onClick={() => handleCleanSingleTurn(turn.id)}
-                              className="p-1 rounded hover:bg-zinc-800 text-zinc-400 hover:text-amber-300 text-[10px] transition-colors cursor-pointer"
+                              className="p-1 rounded-full hover:bg-[rgba(22,21,17,0.06)] text-[#5D594E] hover:text-[#C4552D] text-[10px] transition-colors cursor-pointer"
                               title="Replikadagi shart va belgilarni olib tashlash"
                             >
                               <Eraser className="w-3 h-3" />
@@ -1329,7 +1335,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           <button
                             type="button"
                             onClick={() => playSingleTurn(turn.id, turnAudio)}
-                            className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-cyan-300 text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                            className="btn-pill btn-ghost text-[10.5px] py-0.5 px-2.5 flex items-center gap-1 cursor-pointer"
                             title="Faqat shu replikani eshitish"
                           >
                             {isTurnPlaying ? <Pause className="w-2.5 h-2.5" /> : <Play className="w-2.5 h-2.5" />}
@@ -1337,13 +1343,13 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           </button>
                         )}
                         {turn.emotion && (
-                          <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-400">
+                          <span className="font-mono text-[10px] uppercase px-2 py-0.5 rounded-full border border-[rgba(22,21,17,0.14)] text-[#5D594E]">
                             {turn.emotion}
                           </span>
                         )}
                         <button
                           onClick={() => removeTurn(turn.id)}
-                          className="p-1 text-zinc-500 hover:text-red-400 transition-colors cursor-pointer"
+                          className="p-1.5 text-[#5D594E] hover:text-[#C4552D] rounded-full hover:bg-[rgba(196,85,45,0.08)] transition-colors cursor-pointer"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -1354,39 +1360,39 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                       rows={2}
                       value={turn.text}
                       onChange={(e) => updateTurnText(turn.id, e.target.value)}
-                      className="w-full bg-zinc-950/80 border border-zinc-800 rounded-lg p-2.5 text-xs sm:text-sm text-zinc-200 focus:outline-none focus:border-zinc-600 resize-none font-sans leading-relaxed"
+                      className="w-full bg-white border border-[rgba(22,21,17,0.14)] rounded-xl p-3 text-xs sm:text-sm text-[#161511] focus:outline-none focus:border-[#0E7C86] resize-none font-sans leading-relaxed shadow-2xs"
                       placeholder="Ushbu spikerning replikasi..."
                     />
 
                     {/* Turn Music Cue Selector Strip */}
-                    <div className="mt-2.5 pt-2 border-t border-zinc-800/80 flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="mt-2.5 pt-2 border-t border-[rgba(22,21,17,0.08)] flex flex-wrap items-center justify-between gap-2 text-xs">
                       <div className="flex items-center gap-2">
-                        <span className="text-[11px] text-zinc-400 flex items-center gap-1 font-medium">
-                          <Music className="w-3 h-3 text-purple-400" />
-                          {lang === 'uz' ? 'Fon rejissurasi:' : 'Саунд:'}
+                        <span className="text-[11px] text-[#5D594E] flex items-center gap-1 font-mono uppercase tracking-wider">
+                          <Music className="w-3 h-3 text-[#0E7C86]" />
+                          {lang === 'uz' ? 'Fon:' : 'Саунд:'}
                         </span>
 
-                        <div className="flex items-center gap-1 bg-zinc-950/80 p-0.5 rounded-lg border border-zinc-800">
+                        <div className="flex items-center gap-1 bg-[#F4F1EA] p-0.5 rounded-full border border-[rgba(22,21,17,0.1)]">
                           <button
                             type="button"
                             onClick={() => handleUpdateTurnCue(turn.id, 'silence')}
-                            className={`px-2 py-0.5 rounded text-[11px] font-semibold transition-all cursor-pointer ${
+                            className={`px-2.5 py-0.5 rounded-full text-[10.5px] font-semibold transition-all cursor-pointer ${
                               turn.musicCue?.cueType === 'silence' || !turn.musicCue?.enabled
-                                ? 'bg-zinc-800 text-amber-300 border border-amber-500/40 shadow-sm'
-                                : 'text-zinc-500 hover:text-zinc-300'
+                                ? 'bg-[#161511] text-[#F4F1EA]'
+                                : 'text-[#5D594E] hover:text-[#161511]'
                             }`}
-                            title="Toza studiya nutqi, hech qanday musiqasiz"
+                            title="Toza studiya nutqi, musiqasiz"
                           >
-                            🔇 {lang === 'uz' ? 'Toza ovoz' : 'Без музыки'}
+                            🔇 {lang === 'uz' ? 'Toza' : 'Без музыки'}
                           </button>
 
                           <button
                             type="button"
                             onClick={() => handleUpdateTurnCue(turn.id, 'intro')}
-                            className={`px-2 py-0.5 rounded text-[11px] font-semibold transition-all cursor-pointer ${
+                            className={`px-2.5 py-0.5 rounded-full text-[10.5px] font-semibold transition-all cursor-pointer ${
                               turn.musicCue?.cueType === 'intro' && turn.musicCue?.enabled
-                                ? 'bg-purple-900/60 text-purple-300 border border-purple-500/40 shadow-sm'
-                                : 'text-zinc-500 hover:text-zinc-300'
+                                ? 'bg-[#0E7C86] text-white'
+                                : 'text-[#5D594E] hover:text-[#161511]'
                             }`}
                           >
                             🎵 Intro
@@ -1395,10 +1401,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           <button
                             type="button"
                             onClick={() => handleUpdateTurnCue(turn.id, 'emotional', 'calm-piano')}
-                            className={`px-2 py-0.5 rounded text-[11px] font-semibold transition-all cursor-pointer ${
+                            className={`px-2.5 py-0.5 rounded-full text-[10.5px] font-semibold transition-all cursor-pointer ${
                               turn.musicCue?.cueType === 'emotional' && turn.musicCue?.enabled
-                                ? 'bg-cyan-900/60 text-cyan-300 border border-cyan-500/40 shadow-sm'
-                                : 'text-zinc-500 hover:text-zinc-300'
+                                ? 'bg-[#0E7C86] text-white'
+                                : 'text-[#5D594E] hover:text-[#161511]'
                             }`}
                           >
                             🎹 {lang === 'uz' ? 'Pianino' : 'Пианино'}
@@ -1407,10 +1413,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           <button
                             type="button"
                             onClick={() => handleUpdateTurnCue(turn.id, 'stinger', 'tech-ambient')}
-                            className={`px-2 py-0.5 rounded text-[11px] font-semibold transition-all cursor-pointer ${
+                            className={`px-2.5 py-0.5 rounded-full text-[10.5px] font-semibold transition-all cursor-pointer ${
                               turn.musicCue?.cueType === 'stinger' && turn.musicCue?.enabled
-                                ? 'bg-emerald-900/60 text-emerald-300 border border-emerald-500/40 shadow-sm'
-                                : 'text-zinc-500 hover:text-zinc-300'
+                                ? 'bg-[#C4552D] text-white'
+                                : 'text-[#5D594E] hover:text-[#161511]'
                             }`}
                           >
                             ⚡ Stinger
@@ -1419,10 +1425,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           <button
                             type="button"
                             onClick={() => handleUpdateTurnCue(turn.id, 'outro')}
-                            className={`px-2 py-0.5 rounded text-[11px] font-semibold transition-all cursor-pointer ${
+                            className={`px-2.5 py-0.5 rounded-full text-[10.5px] font-semibold transition-all cursor-pointer ${
                               turn.musicCue?.cueType === 'outro' && turn.musicCue?.enabled
-                                ? 'bg-rose-900/60 text-rose-300 border border-rose-500/40 shadow-sm'
-                                : 'text-zinc-500 hover:text-zinc-300'
+                                ? 'bg-[#161511] text-[#F4F1EA]'
+                                : 'text-[#5D594E] hover:text-[#161511]'
                             }`}
                           >
                             🎬 Outro
@@ -1431,7 +1437,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                       </div>
 
                       {turn.musicCue?.reasoning && (
-                        <span className="text-[10px] text-zinc-500 italic max-w-[280px] truncate" title={turn.musicCue.reasoning}>
+                        <span className="text-[10px] text-[#5D594E] italic max-w-[280px] truncate" title={turn.musicCue.reasoning}>
                           💡 {turn.musicCue.reasoning}
                         </span>
                       )}
@@ -1445,21 +1451,21 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
             <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-3">
               <button
                 onClick={addTurn}
-                className="w-full sm:w-auto px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors border border-zinc-700 cursor-pointer"
+                className="btn-pill btn-ghost text-xs px-4 py-2 flex items-center justify-center gap-1.5 w-full sm:w-auto"
               >
-                <Plus className="w-4 h-4" />
-                {lang === 'uz' ? 'Yangi Replika Qo\'shish' : 'Добавить реплику'}
+                <Plus className="w-4 h-4 text-[#0E7C86]" />
+                {lang === 'uz' ? 'Yangi Replika Qoʻshish' : 'Добавить реплику'}
               </button>
 
               <button
                 onClick={handleSynthesizeDialogue}
                 disabled={isSynthesizing || turns.length === 0}
-                className="w-full sm:w-auto px-6 py-2.5 bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 disabled:opacity-50 text-white rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-emerald-600/25 cursor-pointer"
+                className="btn-pill btn-solid text-xs sm:text-sm py-2.5 px-6 flex items-center justify-center gap-2 w-full sm:w-auto shadow-sm"
               >
-                <Volume2 className={`w-4 h-4 ${isSynthesizing ? 'animate-pulse' : ''}`} />
+                <Volume2 className={`w-4 h-4 text-[#5CC8CF] ${isSynthesizing ? 'animate-pulse' : ''}`} />
                 {isSynthesizing
                   ? (lang === 'uz' ? 'Ikkala Ovoz Sintez Qilinmoqda...' : 'Синтез диалога...')
-                  : (lang === 'uz' ? 'To\'liq Dialog Podkastni Yaratish (Dual TTS)' : 'Синтезировать Диалог (Dual TTS)')}
+                  : (lang === 'uz' ? 'Toʻliq Dialog Podkastni Yaratish (Dual TTS)' : 'Синтезировать Диалог (Dual TTS)')}
               </button>
             </div>
           </div>
@@ -1467,11 +1473,11 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
         {/* Right: Master Audio Player & Karaoke Turns (4 cols) */}
         <div className="lg:col-span-4 space-y-6">
-          <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-5 space-y-4">
-            <h3 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
-              <Volume2 className="w-4 h-4 text-emerald-400" />
-              {lang === 'uz' ? '3. Birlashtirilgan Master Audio' : '3. Мастер-трек диалога'}
-            </h3>
+          <div className="border border-[rgba(22,21,17,0.14)] rounded-[20px] bg-[rgba(255,255,255,0.52)] backdrop-blur-sm p-5 space-y-4 shadow-[0_30px_50px_-30px_rgba(22,21,17,0.15)]">
+            <div className="flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.14em] text-[#0A5A62]">
+              <span>04 — Master audio</span>
+              <span className="h-[1px] flex-1 bg-[rgba(22,21,17,0.14)]" />
+            </div>
 
             {masterAudioBase64 ? (
               <div className="space-y-4">
@@ -1487,20 +1493,20 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   }}
                 />
 
-                {/* Big Master Player */}
-                <div className="p-4 rounded-xl bg-zinc-950 border border-emerald-500/30 space-y-3">
+                {/* Bounded Dark Studio Screen Panel for Master Console */}
+                <div className="p-4 sm:p-5 rounded-2xl bg-[#141414] border border-[#2B2B27] text-[#EDEAE2] space-y-4 shadow-[0_30px_50px_-20px_rgba(20,20,20,0.45)]">
                   <div className="flex items-center gap-4">
                     <button
                       onClick={toggleMasterPlay}
-                      className="w-12 h-12 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white flex items-center justify-center transition-transform hover:scale-105 shadow-md shadow-emerald-600/30 cursor-pointer shrink-0"
+                      className="w-12 h-12 rounded-full bg-[#0E7C86] hover:bg-[#0A5A62] text-white flex items-center justify-center transition-transform hover:scale-105 shadow-md shadow-[#0E7C86]/30 cursor-pointer shrink-0"
                     >
-                      {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 ml-0.5" />}
+                      {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 ml-0.5 fill-current" />}
                     </button>
 
-                    <div className="flex-1">
-                      <div className="flex items-center justify-between text-xs text-zinc-400">
-                        <span>{lang === 'uz' ? 'Efir davomiyligi' : 'Длительность'}:</span>
-                        <span className="font-mono text-emerald-300 font-bold">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between text-xs text-[#7D7A70]">
+                        <span className="font-mono uppercase text-[10px] tracking-wider">{lang === 'uz' ? 'Efir vaqti' : 'Время'}:</span>
+                        <span className="font-mono text-[#5CC8CF] font-bold">
                           {masterCurrentTime.toFixed(1)}s / {totalDuration}s
                         </span>
                       </div>
@@ -1513,10 +1519,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                               key={i}
                               className={`w-1 rounded-full transition-all ${
                                 isPassed
-                                  ? 'bg-emerald-400 shadow-sm shadow-emerald-400/50'
+                                  ? 'bg-[#5CC8CF]'
                                   : isPlaying
-                                  ? 'bg-emerald-950 animate-pulse'
-                                  : 'bg-zinc-800'
+                                  ? 'bg-[#0E7C86]/30 animate-pulse'
+                                  : 'bg-[#2B2B27]'
                               }`}
                               style={{ height: `${h}%` }}
                             />
@@ -1539,32 +1545,32 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                         ambientAudioRef.current.currentTime = newTime % ambientAudioRef.current.duration;
                       }
                     }}
-                    className="relative h-2 bg-zinc-900 rounded-full overflow-hidden cursor-pointer hover:bg-zinc-800 transition-colors"
+                    className="relative h-2 bg-[#2B2B27] rounded-full overflow-hidden cursor-pointer"
                   >
                     <div
-                      className="absolute left-0 top-0 bottom-0 bg-gradient-to-r from-emerald-500 to-cyan-400 rounded-full transition-all"
+                      className="absolute left-0 top-0 bottom-0 bg-[#0E7C86] rounded-full transition-all"
                       style={{ width: `${totalDuration > 0 ? (masterCurrentTime / totalDuration) * 100 : 0}%` }}
                     />
                   </div>
 
                   {/* Dynamic Sound Design Map & Ducking Mode */}
-                  <div className="p-3 bg-zinc-900/80 rounded-xl border border-purple-500/25 space-y-2">
+                  <div className="p-3 bg-[#1D1D1B] rounded-xl border border-[#2B2B27] space-y-2">
                     <div className="flex items-center justify-between text-xs">
-                      <span className="font-bold text-zinc-300 flex items-center gap-1.5">
-                        <Music className="w-3.5 h-3.5 text-purple-400" />
-                        {lang === 'uz' ? 'Dinamik Ovoz Rejissurasi:' : 'Динамический саунд:'}
+                      <span className="font-mono text-[10.5px] uppercase tracking-wider text-[#EDEAE2] flex items-center gap-1.5">
+                        <Music className="w-3.5 h-3.5 text-[#5CC8CF]" />
+                        {lang === 'uz' ? 'Ovoz Rejissurasi:' : 'Саунд-дизайн:'}
                       </span>
                       <button
                         type="button"
                         onClick={() => setDynamicDuckingEnabled(!dynamicDuckingEnabled)}
-                        className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all cursor-pointer ${
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-mono uppercase tracking-wider transition-all cursor-pointer ${
                           dynamicDuckingEnabled
-                            ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
-                            : 'bg-zinc-800 text-zinc-400'
+                            ? 'bg-[#0E7C86] text-white'
+                            : 'bg-[#2B2B27] text-[#7D7A70]'
                         }`}
                       >
                         {dynamicDuckingEnabled
-                          ? (lang === 'uz' ? 'Dinamik Cues (Smart)' : 'Активны Cues')
+                          ? (lang === 'uz' ? 'Dinamik Cues' : 'Активны Cues')
                           : (lang === 'uz' ? 'Statik Loop' : 'Статичный')}
                       </button>
                     </div>
@@ -1579,18 +1585,18 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                         return (
                           <div
                             key={t.id}
-                            className={`px-2 py-1 rounded text-[10px] whitespace-nowrap font-medium transition-all border ${
+                            className={`px-2 py-1 rounded-md text-[10px] whitespace-nowrap font-mono transition-all border ${
                               isCur
-                                ? 'ring-1 ring-yellow-400 border-yellow-400/80 bg-yellow-950/40 text-yellow-200'
+                                ? 'border-[#5CC8CF] bg-[#0E7C86]/30 text-white font-bold'
                                 : isSil
-                                ? 'bg-zinc-950/70 border-zinc-800 text-zinc-400'
+                                ? 'bg-[#141414] border-[#2B2B27] text-[#7D7A70]'
                                 : cueType === 'intro'
-                                ? 'bg-purple-950/50 border-purple-500/40 text-purple-300'
+                                ? 'bg-[#0E7C86]/20 border-[#0E7C86]/50 text-[#5CC8CF]'
                                 : cueType === 'stinger'
-                                ? 'bg-emerald-950/50 border-emerald-500/40 text-emerald-300'
+                                ? 'bg-[#C4552D]/20 border-[#C4552D]/50 text-[#C4552D]'
                                 : cueType === 'emotional'
-                                ? 'bg-cyan-950/50 border-cyan-500/40 text-cyan-300'
-                                : 'bg-rose-950/50 border-rose-500/40 text-rose-300'
+                                ? 'bg-[#C98A12]/20 border-[#C98A12]/50 text-[#C98A12]'
+                                : 'bg-[#1D1D1B] border-[#2B2B27] text-[#EDEAE2]'
                             }`}
                             title={`${t.speakerName}: ${t.musicCue?.labelUz || cueType}`}
                           >
@@ -1603,16 +1609,16 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   </div>
 
                   {/* Ambient Music Controls for Dialogue */}
-                  <div className="pt-2 border-t border-zinc-800/80 flex flex-wrap items-center justify-between gap-2 text-xs">
-                    <div className="flex items-center gap-1.5 text-zinc-300">
-                      <Music className={`w-3.5 h-3.5 ${isPlaying && ambientEnabled && ambientSound !== 'none' ? 'text-purple-400 animate-spin' : 'text-purple-400'}`} />
-                      <span className="font-semibold">{lang === 'uz' ? 'Asosiy fon:' : 'Фон:'}</span>
+                  <div className="pt-2 border-t border-[#2B2B27] flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="flex items-center gap-1.5 text-[#EDEAE2]">
+                      <Music className={`w-3.5 h-3.5 ${isPlaying && ambientEnabled && ambientSound !== 'none' ? 'text-[#5CC8CF] animate-spin' : 'text-[#5CC8CF]'}`} />
+                      <span className="font-mono text-[10.5px] uppercase tracking-wider">{lang === 'uz' ? 'Asosiy fon:' : 'Фон:'}</span>
                     </div>
 
                     <select
                       value={ambientSound}
                       onChange={(e) => setAmbientSound(e.target.value as AmbientSoundscape)}
-                      className="bg-zinc-900 border border-zinc-800 text-zinc-200 text-xs rounded-lg px-2 py-1 font-medium focus:outline-none focus:border-emerald-500 cursor-pointer max-w-[150px] truncate"
+                      className="bg-[#1D1D1B] border border-[#2B2B27] text-[#EDEAE2] text-xs rounded-lg px-2 py-1 font-medium focus:outline-none focus:border-[#0E7C86] cursor-pointer max-w-[150px] truncate"
                     >
                       {AMBIENT_SOUNDSCAPES.map((s) => (
                         <option key={s.id} value={s.id}>
@@ -1632,20 +1638,20 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           ambientAudioRef.current?.play().catch(console.warn);
                         }
                       }}
-                      className={`px-2 py-0.5 rounded-md font-semibold text-[11px] transition-all cursor-pointer ${
+                      className={`px-2.5 py-0.5 rounded-full font-mono text-[10px] uppercase tracking-wider transition-all cursor-pointer ${
                         ambientEnabled && ambientSound !== 'none'
-                          ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
-                          : 'bg-zinc-800 text-zinc-400'
+                          ? 'bg-[#0E7C86] text-white'
+                          : 'bg-[#2B2B27] text-[#7D7A70]'
                       }`}
                     >
                       {ambientEnabled && ambientSound !== 'none'
                         ? (lang === 'uz' ? 'Yoqilgan' : 'Вкл')
-                        : (lang === 'uz' ? 'O\'chirilgan' : 'Выкл')}
+                        : (lang === 'uz' ? "O'chirilgan" : 'Выкл')}
                     </button>
 
                     {ambientEnabled && ambientSound !== 'none' && (
                       <div className="flex items-center gap-1">
-                        <span className="text-[10px] text-zinc-400 font-mono">{ambientVolume}%</span>
+                        <span className="text-[10px] text-[#7D7A70] font-mono">{ambientVolume}%</span>
                         <input
                           type="range"
                           min="5"
@@ -1653,7 +1659,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           step="5"
                           value={ambientVolume}
                           onChange={(e) => setAmbientVolume(parseInt(e.target.value))}
-                          className="w-14 accent-purple-400 h-1 bg-zinc-800 rounded-lg cursor-pointer"
+                          className="w-14 accent-[#0E7C86] h-1 bg-[#2B2B27] rounded-lg cursor-pointer"
                         />
                       </div>
                     )}
@@ -1662,7 +1668,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
                 {/* Live Transcript / Subtitle Sync Feed */}
                 <div className="space-y-2">
-                  <p className="text-xs font-semibold text-zinc-400">
+                  <p className="font-mono text-[10.5px] uppercase tracking-wider text-[#5D594E]">
                     {lang === 'uz' ? 'Ketma-ket Yangrayotgan Replikalar:' : 'Живой эфирный текст:'}
                   </p>
                   <div className="max-h-64 overflow-y-auto space-y-2 pr-1">
@@ -1672,17 +1678,17 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                       return (
                         <div
                           key={turn.id}
-                          className={`p-2.5 rounded-lg text-xs transition-all ${
+                          className={`p-3 rounded-xl text-xs transition-all ${
                             isActive
-                              ? 'bg-emerald-500/20 border border-emerald-400 text-white font-medium scale-[1.02]'
-                              : 'bg-zinc-950/60 border border-zinc-800 text-zinc-400'
+                              ? 'bg-[rgba(14,124,134,0.12)] border border-[#0E7C86] text-[#161511] font-medium'
+                              : 'bg-white border border-[rgba(22,21,17,0.1)] text-[#5D594E]'
                           }`}
                         >
                           <div className="flex items-center justify-between text-[10px] mb-1">
-                            <span className={isHost1 ? 'text-emerald-400 font-bold' : 'text-cyan-400 font-bold'}>
+                            <span className={isHost1 ? 'text-[#0A5A62] font-bold' : 'text-[#C4552D] font-bold'}>
                               {turn.speakerName}
                             </span>
-                            <span className="font-mono text-zinc-500">
+                            <span className="font-mono text-[#5D594E]">
                               {turn.startTime?.toFixed(1)}s - {turn.endTime?.toFixed(1)}s
                             </span>
                           </div>
@@ -1698,31 +1704,31 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   {onSaveToCMS && (
                     <button
                       onClick={handleSaveToCMS}
-                      className="w-full py-2.5 bg-zinc-800 hover:bg-zinc-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 border border-zinc-700 transition-all hover:scale-[1.01] cursor-pointer"
+                      className="btn-pill btn-ghost w-full py-2.5 flex items-center justify-center gap-2 text-xs font-semibold"
                     >
-                      {isSaved ? <Check className="w-4 h-4 text-emerald-400" /> : <Save className="w-4 h-4 text-cyan-400" />}
+                      {isSaved ? <Check className="w-4 h-4 text-[#0E7C86]" /> : <Save className="w-4 h-4 text-[#0E7C86]" />}
                       <span>{isSaved ? 'CMS Kutubxonasiga Saqlandi!' : 'CMS Kutubxonasiga Saqlash'}</span>
                     </button>
                   )}
 
                   <button
                     onClick={downloadMasterAudio}
-                    className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all shadow-md shadow-emerald-600/20 cursor-pointer"
+                    className="btn-pill btn-solid w-full py-2.5 flex items-center justify-center gap-2 text-xs font-bold"
                   >
-                    <Download className="w-4 h-4" />
-                    {lang === 'uz' ? 'To\'liq Master WAV Audioni Yuklash' : 'Скачать мастер-трек WAV'}
+                    <Download className="w-4 h-4 text-[#5CC8CF]" />
+                    {lang === 'uz' ? "To'liq Master WAV Audioni Yuklash" : 'Скачать мастер-трек WAV'}
                   </button>
                 </div>
               </div>
             ) : (
-              <div className="p-8 rounded-xl bg-zinc-950/60 border border-dashed border-zinc-800 text-center space-y-2">
-                <Users2 className="w-8 h-8 text-zinc-600 mx-auto" />
-                <p className="text-xs text-zinc-400 font-medium">
+              <div className="p-8 rounded-2xl bg-white border border-dashed border-[rgba(22,21,17,0.2)] text-center space-y-2">
+                <Users2 className="w-8 h-8 text-[#5D594E]/50 mx-auto" />
+                <p className="text-xs text-[#161511] font-medium">
                   {lang === 'uz' ? 'Dialog hali sintez qilinmadi' : 'Диалог еще не синтезирован'}
                 </p>
-                <p className="text-[11px] text-zinc-500">
+                <p className="text-[11px] text-[#5D594E]">
                   {lang === 'uz'
-                    ? 'Chap tarafdagi "To\'liq Dialog Podkastni Yaratish" tugmasini bosing. Barcha replikalar birlashtiriladi.'
+                    ? 'Chap tarafdagi "Toʻliq Dialog Podkastni Yaratish" tugmasini bosing. Barcha replikalar birlashtiriladi.'
                     : 'Нажмите "Синтезировать Диалог" слева.'}
                 </p>
               </div>

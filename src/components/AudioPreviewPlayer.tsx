@@ -9,6 +9,7 @@ import {
   Sparkles,
   Music,
   Check,
+  CheckCircle2,
   Disc,
   Radio,
   FileAudio,
@@ -26,6 +27,7 @@ import {
 } from '../utils/audioUtils';
 import { AmbientSoundscape, AudioSegmentCue, SoundCueType } from '../types/podcast';
 import { AMBIENT_SOUNDSCAPES } from '../data/ambientSoundscapes';
+import { connectAudioElement } from '../utils/audioReactive';
 
 interface AudioPreviewPlayerProps {
   rawAudioWavBase64: string;
@@ -191,6 +193,7 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
   // Handle Play/Pause
   const togglePlay = () => {
     if (!audioRef.current) return;
+    connectAudioElement(audioRef.current);
     if (isPlaying) {
       audioRef.current.pause();
       if (ambientAudioRef.current) {
@@ -440,7 +443,7 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
         // Gradient coloring
         const gradient = ctx.createLinearGradient(0, y, 0, y + barHeight);
         if (isPlayed) {
-          gradient.addColorStop(0, '#06b6d4'); // cyan-500
+          gradient.addColorStop(0, '#06b6d4'); // [#FACC15]
           gradient.addColorStop(1, '#3b82f6'); // blue-500
         } else {
           gradient.addColorStop(0, '#3f3f46'); // zinc-700
@@ -531,7 +534,7 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
   };
 
   return (
-    <div className="bg-gradient-to-b from-zinc-900/90 to-zinc-950 border border-zinc-800 rounded-3xl p-5 sm:p-7 shadow-2xl backdrop-blur-xl">
+    <div className="bg-white/80 border border-[rgba(22,21,17,0.14)] rounded-[24px] p-5 sm:p-7 shadow-[0_20px_40px_-20px_rgba(22,21,17,0.18)] backdrop-blur-xl space-y-5">
       {/* Hidden audio element */}
       {audioUrl && (
         <audio
@@ -542,37 +545,38 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
       )}
 
       {/* Header Info */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-5 border-b border-zinc-800/80">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-5 border-b border-[rgba(22,21,17,0.1)]">
         <div>
           <div className="flex items-center gap-2">
-            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 flex items-center gap-1">
-              <Radio className="w-3 h-3 text-cyan-400 animate-pulse" />
+            <span className="px-2.5 py-0.5 rounded-full text-[10.5px] font-mono font-semibold bg-[#0E7C86]/10 text-[#0A5A62] border border-[#0E7C86]/30 flex items-center gap-1">
+              <Radio className="w-3 h-3 text-[#0E7C86] pulse-teal-dot" />
               {lang === 'uz' ? 'Tinglashga tayyor' : 'Готово к прослушиванию'}
             </span>
-            <span className="text-xs text-zinc-500">•</span>
-            <span className="text-xs text-zinc-400 font-medium">{category}</span>
+            <span className="text-xs text-[#5D594E]/40">•</span>
+            <span className="text-xs font-mono text-[#5D594E]">{category}</span>
           </div>
-          <h3 className="text-lg sm:text-xl font-bold text-white mt-1">
+          <h3 className="font-serif text-xl sm:text-2xl text-[#161511] font-normal tracking-tight mt-1">
             {title}
           </h3>
-          <p className="text-xs text-zinc-400 mt-0.5 flex items-center gap-1.5">
-            <Disc className="w-3.5 h-3.5 text-cyan-400" />
-            <span>{lang === 'uz' ? 'Ovoz:' : 'Голос:'} <strong className="text-zinc-200">{voiceName}</strong></span>
+          <p className="text-xs text-[#5D594E] mt-0.5 flex items-center gap-1.5 font-mono">
+            <Disc className="w-3.5 h-3.5 text-[#0E7C86]" />
+            <span>{lang === 'uz' ? 'Ovoz:' : 'Голос:'} <strong className="text-[#161511]">{voiceName}</strong></span>
             <span>•</span>
             <span>Gemini 3.8 TTS Live 24kHz Studio Master</span>
           </p>
         </div>
 
         {/* Playback speed buttons */}
-        <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-xl border border-zinc-800 self-start sm:self-center">
+        <div className="flex items-center gap-1 bg-[#F4F1EA] p-1 rounded-full border border-[rgba(22,21,17,0.14)] self-start sm:self-center font-mono">
           {[0.8, 1.0, 1.25, 1.5].map((rate) => (
             <button
               key={rate}
+              type="button"
               onClick={() => changeSpeed(rate)}
-              className={`px-2 py-0.5 rounded-lg text-xs font-semibold transition-all ${
+              className={`px-2.5 py-0.5 rounded-full text-xs font-semibold transition-all cursor-pointer ${
                 playbackRate === rate
-                  ? 'bg-cyan-500 text-zinc-950 shadow-sm'
-                  : 'text-zinc-400 hover:text-white'
+                  ? 'bg-[#161511] text-[#F4F1EA] shadow-2xs'
+                  : 'text-[#5D594E] hover:text-[#161511]'
               }`}
             >
               {rate}x
@@ -581,11 +585,11 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
         </div>
       </div>
 
-      {/* Interactive Waveform Canvas */}
-      <div className="mt-5">
+      {/* Interactive Waveform Canvas (Studio Screen Panel #141414) */}
+      <div>
         <div
           onClick={handleSeek}
-          className="relative h-20 w-full bg-zinc-950 rounded-2xl border border-zinc-800/80 cursor-pointer overflow-hidden group hover:border-cyan-500/40 transition-colors"
+          className="relative h-20 w-full bg-[#141414] rounded-2xl border border-[#2B2B27] cursor-pointer overflow-hidden group hover:border-[#5CC8CF]/50 transition-colors shadow-inner"
         >
           <canvas
             ref={canvasRef}
@@ -596,7 +600,7 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
 
           {/* Time scrubber tooltip / bar */}
           <div
-            className="absolute top-0 bottom-0 w-0.5 bg-cyan-400 shadow-md shadow-cyan-400/50 pointer-events-none transition-all"
+            className="absolute top-0 bottom-0 w-0.5 bg-[#5CC8CF] shadow-[0_0_10px_#5CC8CF] pointer-events-none transition-all"
             style={{
               left: `${totalDuration > 0 ? (currentTime / totalDuration) * 100 : 0}%`,
             }}
@@ -604,202 +608,49 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
         </div>
 
         {/* Time labels */}
-        <div className="flex items-center justify-between text-xs font-mono text-zinc-400 mt-2 px-1">
+        <div className="flex items-center justify-between text-xs font-mono text-[#5D594E] mt-2 px-1">
           <span>{formatTime(currentTime)}</span>
-          <span className="text-zinc-600">/</span>
+          <span className="text-[#5D594E]/40">/</span>
           <span>{formatTime(totalDuration)}</span>
         </div>
       </div>
 
-      {/* Sound Director & Interactive Cue Timeline Track */}
-      <div className="mt-4 p-4 rounded-2xl bg-zinc-950/80 border border-purple-500/25 space-y-3">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-          <div className="flex items-center gap-2">
-            <span className="p-1 rounded-lg bg-purple-500/20 text-purple-300 border border-purple-500/30">
-              <Sliders className="w-3.5 h-3.5" />
-            </span>
-            <div>
-              <h4 className="text-xs sm:text-sm font-bold text-white flex items-center gap-1.5">
-                {lang === 'uz' ? 'Ovoz Rejissyori: Dinamik Saund-Dizayn & Sukunat' : 'Звукорежиссура: Динамический саунд и тишина'}
-              </h4>
-              <p className="text-[11px] text-zinc-400">
-                {lang === 'uz'
-                  ? 'Bitta zerikarli uzluksiz fondan voz kechilgan: kirishda jingle, asosiy nutqda toza ovoz (silence), kerakli nuqtada mayin fon.'
-                  : 'Без монотонного длинного пианино: интро-джингл, кристально чистый голос без музыки в середине, акцент и аутро.'}
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 self-start sm:self-auto">
-            {/* Mode switch */}
-            <div className="flex items-center bg-zinc-900 p-0.5 rounded-lg border border-zinc-800 text-[11px]">
-              <button
-                type="button"
-                onClick={() => setSoundDirectorMode(true)}
-                className={`px-2 py-1 rounded font-semibold transition-all cursor-pointer ${
-                  soundDirectorMode
-                    ? 'bg-purple-600 text-white shadow-sm'
-                    : 'text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                {lang === 'uz' ? 'Dinamik Rejissura' : 'Динамика'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setSoundDirectorMode(false)}
-                className={`px-2 py-1 rounded font-semibold transition-all cursor-pointer ${
-                  !soundDirectorMode
-                    ? 'bg-zinc-800 text-zinc-200'
-                    : 'text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                {lang === 'uz' ? 'Statik Loop' : 'Статично'}
-              </button>
-            </div>
-
-            {/* AI Auto-plan button */}
-            <button
-              type="button"
-              onClick={handleRunSoundDirector}
-              disabled={isPlanningDirector}
-              className="px-3 py-1 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-sm transition-all cursor-pointer"
-            >
-              <Sparkles className={`w-3 h-3 ${isPlanningDirector ? 'animate-spin' : ''}`} />
-              <span>{isPlanningDirector ? (lang === 'uz' ? 'Reja tuzilmoqda...' : 'Анализ...') : (lang === 'uz' ? 'AI Taklif' : 'AI План')}</span>
-            </button>
-          </div>
-        </div>
-
-        {directorStrategy && (
-          <div className="p-2 rounded-xl bg-purple-950/30 border border-purple-500/20 text-[11px] text-purple-200 flex items-start gap-1.5">
-            <Sparkles className="w-3.5 h-3.5 text-purple-400 shrink-0 mt-0.5" />
-            <p>
-              <strong>{lang === 'uz' ? 'Strategiya:' : 'Стратегия:'}</strong>{' '}
-              {lang === 'uz' ? directorStrategy.strategyUz : directorStrategy.strategyRu}
-            </p>
-          </div>
-        )}
-
-        {/* Visual Cue Track blocks */}
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between text-[11px] text-zinc-400 px-0.5">
-            <span>{lang === 'uz' ? 'Musiqa va Sukunat xaritasi (bosib o\'zgartiring):' : 'Карта музыки и тишины (нажмите для переключения):'}</span>
-            <span className="text-[10px] text-zinc-500">
-              {lang === 'uz' ? '🔇 Bosganda toza ovoz / musiqa almashadi' : '🔇 Клик переключает звук/тишину'}
-            </span>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-5 gap-2">
-            {cues.map((cue, idx) => {
-              const isActive = currentTime >= (cue.startTime ?? 0) && currentTime < (cue.endTime ?? totalDuration);
-              const isSilence = cue.cueType === 'silence' || cue.soundscape === 'none' || cue.volumePercent <= 0;
-
-              return (
-                <div
-                  key={cue.id || idx}
-                  className={`p-2 rounded-xl border transition-all text-xs flex flex-col justify-between ${
-                    isActive
-                      ? 'border-yellow-400 bg-yellow-950/20 shadow-md shadow-yellow-500/10 ring-1 ring-yellow-400/50'
-                      : isSilence
-                      ? 'bg-zinc-900/60 border-zinc-800'
-                      : cue.cueType === 'intro'
-                      ? 'bg-purple-950/30 border-purple-500/30'
-                      : cue.cueType === 'stinger'
-                      ? 'bg-emerald-950/30 border-emerald-500/30'
-                      : cue.cueType === 'emotional'
-                      ? 'bg-cyan-950/30 border-cyan-500/30'
-                      : 'bg-rose-950/30 border-rose-500/30'
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-1 mb-1">
-                    <span className="font-mono text-[10px] text-zinc-400">
-                      {formatTime(cue.startTime ?? 0)} - {formatTime(cue.endTime ?? totalDuration)}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => handleToggleCueSilence(cue.id)}
-                      className={`px-1.5 py-0.5 rounded text-[10px] font-bold cursor-pointer transition-colors ${
-                        isSilence
-                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                          : 'bg-zinc-800 text-zinc-300 hover:text-white'
-                      }`}
-                      title={isSilence ? 'Musiqani yoqish' : 'Sukunat (toza ovoz) qilish'}
-                    >
-                      {isSilence ? '🔇 Sukunat' : '🎵 Musiqa'}
-                    </button>
-                  </div>
-
-                  <div className="my-1">
-                    <div className="font-bold text-zinc-200 flex items-center gap-1 text-[11px] truncate">
-                      {isSilence ? (
-                        <span className="text-zinc-400">Toza ovoz (Silence)</span>
-                      ) : (
-                        <span>{lang === 'uz' ? cue.labelUz : cue.labelRu}</span>
-                      )}
-                    </div>
-                    {cue.reasoning && (
-                      <p className="text-[10px] text-zinc-500 line-clamp-2 mt-0.5 leading-tight" title={cue.reasoning}>
-                        {cue.reasoning}
-                      </p>
-                    )}
-                  </div>
-
-                  {!isSilence && (
-                    <div className="mt-1 pt-1 border-t border-zinc-800/60 flex items-center justify-between text-[10px]">
-                      <select
-                        value={cue.soundscape}
-                        onChange={(e) => handleUpdateCueSound(cue.id, e.target.value as AmbientSoundscape)}
-                        className="bg-zinc-950 border border-zinc-800 text-zinc-300 rounded px-1.5 py-0.5 text-[10px] max-w-[110px] truncate cursor-pointer"
-                      >
-                        {AMBIENT_SOUNDSCAPES.filter((s) => s.id !== 'none').map((s) => (
-                          <option key={s.id} value={s.id}>
-                            {s.icon} {lang === 'uz' ? s.labelUz : s.labelRu}
-                          </option>
-                        ))}
-                      </select>
-                      <span className="font-mono text-zinc-400">{cue.volumePercent}%</span>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
       {/* Transport Controls */}
-      <div className="flex flex-wrap items-center justify-between gap-4 mt-4 pt-4 border-t border-zinc-800/70">
+      <div className="flex flex-wrap items-center justify-between gap-4 pt-4 border-t border-[rgba(22,21,17,0.1)]">
         <div className="flex items-center gap-3">
           {/* Main Play/Pause Button */}
           <button
+            type="button"
             onClick={togglePlay}
-            className="w-14 h-14 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-zinc-950 font-bold flex items-center justify-center shadow-lg shadow-cyan-500/25 transition-all hover:scale-105 active:scale-95"
+            className="w-13 h-13 rounded-full bg-[#161511] hover:bg-[#0A5A62] text-[#F4F1EA] font-bold flex items-center justify-center shadow-md transition-all active:scale-95 cursor-pointer"
             title={isPlaying ? 'Pause' : 'Play'}
           >
             {isPlaying ? (
-              <Pause className="w-6 h-6 fill-current text-zinc-950" />
+              <Pause className="w-5 h-5 fill-current" />
             ) : (
-              <Play className="w-6 h-6 fill-current text-zinc-950 translate-x-0.5" />
+              <Play className="w-5 h-5 fill-current ml-0.5" />
             )}
           </button>
 
           {/* Restart */}
           <button
+            type="button"
             onClick={() => {
               if (audioRef.current) {
                 audioRef.current.currentTime = 0;
                 setCurrentTime(0);
               }
             }}
-            className="p-3 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white border border-zinc-800 transition-colors"
+            className="p-2.5 rounded-full bg-[#F4F1EA] hover:bg-[#ECE7DB] text-[#5D594E] hover:text-[#161511] border border-[rgba(22,21,17,0.14)] transition-colors cursor-pointer"
             title={lang === 'uz' ? 'Boshiga qaytarish' : 'С начала'}
           >
             <RotateCcw className="w-4 h-4" />
           </button>
 
           {/* Volume Control */}
-          <div className="flex items-center gap-2 bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800">
+          <div className="flex items-center gap-2 bg-[#F4F1EA] px-3 py-2 rounded-full border border-[rgba(22,21,17,0.14)]">
             <button
+              type="button"
               onClick={() => {
                 if (audioRef.current) {
                   const nextMuted = !isMuted;
@@ -807,10 +658,10 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
                   audioRef.current.muted = nextMuted;
                 }
               }}
-              className="text-zinc-400 hover:text-white transition-colors"
+              className="text-[#5D594E] hover:text-[#161511] transition-colors cursor-pointer"
             >
               {isMuted || volume === 0 ? (
-                <VolumeX className="w-4 h-4 text-rose-400" />
+                <VolumeX className="w-4 h-4 text-[#C4552D]" />
               ) : (
                 <Volume2 className="w-4 h-4" />
               )}
@@ -830,23 +681,23 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
                   audioRef.current.muted = false;
                 }
               }}
-              className="w-16 sm:w-20 accent-cyan-400 h-1 bg-zinc-800 rounded-lg cursor-pointer"
+              className="w-16 sm:w-20 accent-[#0E7C86] h-1 bg-[#ECE7DB] rounded-lg cursor-pointer"
             />
           </div>
         </div>
 
         {/* Ambient Soundscape Live Controls */}
-        <div className="flex flex-wrap items-center gap-2.5 bg-zinc-950/90 px-3 py-2 rounded-xl border border-zinc-800 text-xs">
-          <div className="flex items-center gap-1.5 text-zinc-300">
-            <Music className={`w-3.5 h-3.5 ${isPlaying && ambientEnabled && currentAmbient !== 'none' ? 'text-purple-400 animate-spin' : 'text-purple-400'}`} />
-            <span className="font-semibold">{lang === 'uz' ? 'Fon musiqasi:' : 'Фоновая музыка:'}</span>
+        <div className="flex flex-wrap items-center gap-2.5 bg-[#F4F1EA] px-3 py-1.5 rounded-full border border-[rgba(22,21,17,0.14)] text-xs">
+          <div className="flex items-center gap-1.5 text-[#5D594E]">
+            <Music className={`w-3.5 h-3.5 ${isPlaying && ambientEnabled && currentAmbient !== 'none' ? 'text-[#0E7C86] animate-spin' : 'text-[#0E7C86]'}`} />
+            <span className="font-semibold text-[11px]">{lang === 'uz' ? 'Fon musiqasi:' : 'Фоновая музыка:'}</span>
           </div>
 
           {/* Soundscape Selector */}
           <select
             value={currentAmbient}
             onChange={(e) => handleSelectAmbient(e.target.value as AmbientSoundscape)}
-            className="bg-zinc-900 border border-zinc-700/80 text-zinc-200 text-xs rounded-lg px-2.5 py-1 font-medium focus:outline-none focus:border-purple-500 cursor-pointer max-w-[170px] truncate"
+            className="bg-white border border-[rgba(22,21,17,0.14)] text-[#161511] text-xs rounded-full px-2.5 py-1 font-medium focus:outline-none focus:border-[#0E7C86] cursor-pointer max-w-[170px] truncate"
           >
             {AMBIENT_SOUNDSCAPES.map((s) => (
               <option key={s.id} value={s.id}>
@@ -856,22 +707,23 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
           </select>
 
           <button
+            type="button"
             onClick={handleToggleAmbient}
-            className={`px-2.5 py-1 rounded-lg font-semibold transition-all flex items-center gap-1 cursor-pointer ${
+            className={`px-2.5 py-1 rounded-full font-semibold transition-all flex items-center gap-1 cursor-pointer text-xs ${
               ambientEnabled && currentAmbient !== 'none'
-                ? 'bg-purple-500/25 text-purple-300 border border-purple-500/40 shadow-sm shadow-purple-500/20'
-                : 'bg-zinc-800/80 text-zinc-400 hover:text-zinc-200'
+                ? 'bg-[#0E7C86] text-white shadow-2xs'
+                : 'bg-white text-[#5D594E] hover:text-[#161511] border border-[rgba(22,21,17,0.1)]'
             }`}
           >
-            <span className={`w-1.5 h-1.5 rounded-full ${ambientEnabled && currentAmbient !== 'none' ? 'bg-purple-400 animate-pulse' : 'bg-zinc-600'}`} />
+            <span className={`w-1.5 h-1.5 rounded-full ${ambientEnabled && currentAmbient !== 'none' ? 'bg-[#5CC8CF] animate-pulse' : 'bg-[#5D594E]/40'}`} />
             {ambientEnabled && currentAmbient !== 'none'
               ? (lang === 'uz' ? 'Yoqilgan' : 'Вкл')
               : (lang === 'uz' ? 'O\'chirilgan' : 'Выкл')}
           </button>
 
           {ambientEnabled && currentAmbient !== 'none' && (
-            <div className="flex items-center gap-2 pl-2 border-l border-zinc-800">
-              <span className="text-[10px] text-zinc-400 font-mono">{ambientVol}%</span>
+            <div className="flex items-center gap-2 pl-2 border-l border-[rgba(22,21,17,0.14)]">
+              <span className="text-[10px] text-[#5D594E] font-mono">{ambientVol}%</span>
               <input
                 type="range"
                 min="5"
@@ -879,30 +731,30 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
                 step="5"
                 value={ambientVol}
                 onChange={(e) => setAmbientVol(parseInt(e.target.value))}
-                className="w-16 accent-purple-400 h-1 bg-zinc-800 rounded-lg cursor-pointer"
+                className="w-16 accent-[#0E7C86] h-1 bg-[#ECE7DB] rounded-lg cursor-pointer"
                 title={lang === 'uz' ? 'Fon ovozi balandligi' : 'Громкость фона'}
               />
             </div>
           )}
 
           {isPlaying && ambientEnabled && currentAmbient !== 'none' && (
-            <span className="text-[10px] px-2 py-0.5 rounded-md bg-purple-950/60 border border-purple-500/30 text-purple-300 flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+            <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#0E7C86]/10 border border-[#0E7C86]/30 text-[#0A5A62] flex items-center gap-1 font-mono">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#0E7C86] animate-ping" />
               {lang === 'uz' ? 'Efirda yangramoqda' : 'Звучит в эфире'}
             </span>
           )}
         </div>
       </div>
 
-      {/* Export & Download Section (Requested: popular audio formats MP3, WAV with quality selection) */}
-      <div className="mt-6 pt-5 border-t border-zinc-800/80 bg-zinc-950/60 -mx-5 -mb-5 sm:-mx-7 sm:-mb-7 p-5 sm:p-7 rounded-b-3xl">
+      {/* Export & Download Section */}
+      <div className="mt-5 pt-5 border-t border-[rgba(22,21,17,0.1)] bg-[#F4F1EA] -mx-5 -mb-5 sm:-mx-7 sm:-mb-7 p-5 sm:p-7 rounded-b-[24px]">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="space-y-1">
-            <h4 className="text-sm font-bold text-white flex items-center gap-2">
-              <FileAudio className="w-4 h-4 text-cyan-400" />
-              {lang === 'uz' ? 'Podkastni yuklab olish va eksport qilish' : 'Экспорт и скачивание подкаста'}
+            <h4 className="text-xs font-mono uppercase tracking-[0.14em] text-[#0A5A62] font-semibold flex items-center gap-2">
+              <FileAudio className="w-4 h-4 text-[#0E7C86]" />
+              {lang === 'uz' ? '04 — Podkastni yuklab olish va eksport' : '04 — Экспорт и скачивание подкаста'}
             </h4>
-            <p className="text-xs text-zinc-400">
+            <p className="text-xs text-[#5D594E]">
               {lang === 'uz'
                 ? 'Format (MP3, WAV), ovoz sifati va fon musiqasi sozlamalarini tanlang'
                 : 'Выберите формат (MP3, WAV), качество аудио и фоновую музыку'}
@@ -911,23 +763,25 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
 
           <div className="flex flex-wrap items-center gap-2 sm:gap-3">
             {/* Format Selector */}
-            <div className="flex items-center bg-zinc-900 rounded-xl p-1 border border-zinc-800 text-xs">
+            <div className="flex items-center bg-white rounded-full p-1 border border-[rgba(22,21,17,0.14)] text-xs font-mono">
               <button
+                type="button"
                 onClick={() => setExportFormat('wav')}
-                className={`px-3 py-1.5 rounded-lg font-bold transition-all ${
+                className={`px-3 py-1 rounded-full font-bold transition-all cursor-pointer ${
                   exportFormat === 'wav'
-                    ? 'bg-cyan-500 text-zinc-950 shadow-sm'
-                    : 'text-zinc-400 hover:text-white'
+                    ? 'bg-[#161511] text-[#F4F1EA] shadow-2xs'
+                    : 'text-[#5D594E] hover:text-[#161511]'
                 }`}
               >
                 WAV (Studio)
               </button>
               <button
+                type="button"
                 onClick={() => setExportFormat('mp3')}
-                className={`px-3 py-1.5 rounded-lg font-bold transition-all ${
+                className={`px-3 py-1 rounded-full font-bold transition-all cursor-pointer ${
                   exportFormat === 'mp3'
-                    ? 'bg-cyan-500 text-zinc-950 shadow-sm'
-                    : 'text-zinc-400 hover:text-white'
+                    ? 'bg-[#161511] text-[#F4F1EA] shadow-2xs'
+                    : 'text-[#5D594E] hover:text-[#161511]'
                 }`}
               >
                 MP3
@@ -938,7 +792,7 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
             <select
               value={exportQuality}
               onChange={(e: any) => setExportQuality(e.target.value)}
-              className="bg-zinc-900 border border-zinc-800 text-xs text-zinc-200 rounded-xl px-3 py-2 font-medium focus:outline-none focus:border-cyan-500"
+              className="bg-white border border-[rgba(22,21,17,0.14)] text-xs text-[#161511] rounded-full px-3 py-1.5 font-medium focus:outline-none focus:border-[#0E7C86]"
             >
               <option value="lossless">
                 {lang === 'uz' ? 'Lossless (24kHz Studio Master)' : 'Lossless (24kHz Studio)'}
@@ -949,13 +803,13 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
             </select>
 
             {/* Include Ambient Checkbox */}
-            <label className="flex items-center gap-1.5 text-xs text-zinc-300 cursor-pointer bg-zinc-900 px-3 py-2 rounded-xl border border-zinc-800 hover:border-zinc-700">
+            <label className="flex items-center gap-1.5 text-xs text-[#161511] cursor-pointer bg-white px-3 py-1.5 rounded-full border border-[rgba(22,21,17,0.14)]">
               <input
                 type="checkbox"
                 checked={includeAmbientInExport && ambientEnabled && currentAmbient !== 'none'}
                 disabled={!ambientEnabled || currentAmbient === 'none'}
                 onChange={(e) => setIncludeAmbientInExport(e.target.checked)}
-                className="accent-cyan-400 rounded"
+                className="accent-[#0E7C86] rounded"
               />
               <span>{lang === 'uz' ? 'Musiqa bilan' : 'С музыкой'}</span>
             </label>
@@ -969,16 +823,16 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
                   setIsSavedToCMS(true);
                   setTimeout(() => setIsSavedToCMS(false), 3000);
                 }}
-                className="flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs sm:text-sm bg-zinc-800 hover:bg-zinc-700 text-white border border-zinc-700 transition-all hover:scale-105 active:scale-95 cursor-pointer shadow-md"
+                className="btn-pill btn-ghost text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
               >
                 {isSavedToCMS ? (
                   <>
-                    <Check className="w-4 h-4 text-emerald-400" />
-                    <span className="text-emerald-300">{lang === 'uz' ? 'Kutubxonaga Saqlandi!' : 'Сохранено!'}</span>
+                    <Check className="w-3.5 h-3.5 text-[#0E7C86]" />
+                    <span className="text-[#0A5A62]">{lang === 'uz' ? 'Saqlandi!' : 'Сохранено!'}</span>
                   </>
                 ) : (
                   <>
-                    <Save className="w-4 h-4 text-cyan-400" />
+                    <Save className="w-3.5 h-3.5 text-[#0E7C86]" />
                     <span>{lang === 'uz' ? 'CMS\'ga Saqlash' : 'Сохранить в CMS'}</span>
                   </>
                 )}
@@ -987,27 +841,24 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
 
             {/* Download Button */}
             <button
+              type="button"
               onClick={handleExport}
               disabled={isExporting}
-              className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-bold text-xs sm:text-sm transition-all shadow-lg ${
-                exportSuccess
-                  ? 'bg-emerald-500 text-zinc-950 shadow-emerald-500/20'
-                  : 'bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-zinc-950 shadow-cyan-500/20 active:scale-95'
-              }`}
+              className="btn-pill btn-solid text-xs font-semibold flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50"
             >
               {isExporting ? (
                 <>
-                  <div className="w-4 h-4 border-2 border-zinc-950 border-t-transparent rounded-full animate-spin" />
-                  <span>{lang === 'uz' ? 'Tayyorlanmoqda...' : 'Экспорт...'}</span>
+                  <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  <span>{lang === 'uz' ? 'Eksport qilinmoqda...' : 'Экспорт...'}</span>
                 </>
               ) : exportSuccess ? (
                 <>
-                  <Check className="w-4 h-4" />
-                  <span>{lang === 'uz' ? 'Yuklab olindi!' : 'Скачано!'}</span>
+                  <CheckCircle2 className="w-3.5 h-3.5 text-[#5CC8CF]" />
+                  <span>{lang === 'uz' ? 'Yuklandi!' : 'Скачано!'}</span>
                 </>
               ) : (
                 <>
-                  <Download className="w-4 h-4" />
+                  <Download className="w-3.5 h-3.5" />
                   <span>
                     {lang === 'uz'
                       ? `Yuklab olish (${exportFormat.toUpperCase()})`

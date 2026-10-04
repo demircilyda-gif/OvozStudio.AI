@@ -2,10 +2,15 @@ import express from "express";
 import http from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import dotenv from "dotenv";
+import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import Stripe from "stripe";
 import { GoogleGenAI, Modality } from "@google/genai";
 import { YoutubeTranscript } from "youtube-transcript";
+import { extractMediaAudio } from "./server/services/mediaExtractor.js";
+import { runMediaDubbingPipeline, getPipelineLogs } from "./server/services/mediaPipeline.js";
+import { normalizeUzbekSpeech } from "./src/utils/uzbekNormalizer.js";
 
 dotenv.config();
 
@@ -206,14 +211,15 @@ function cleanScriptForSpeech(rawText: string): {
 
   // 6. Remove stage directions / condition parentheses
   cleaned = cleaned.replace(
-    /\((?:[^)]*(?:bariton|mezzo|sopran|tenor|bas|sokin|tez|pauza|nafas|kulgi|kamera|kadr|musiqa|ovoz|ohang|jiddiy|hayajon|голос|баритон|меццо|тенор|сопрано|бас|пауз|шепот|громк|интонац|акцент|настроени|уверен|бодр|спокойн|секунд|сек|диктор|ведущ|гость|кадр|сцен|музык|эффект|улыбк|смех|\d{1,2}:\d{2})[^)]*)\)/gi,
+    /\((?:[^)]*(?:bariton|mezzo|sopran|tenor|bas|sokin|tez|pauza|nafas|kulgi|kamera|kadr|musiqa|ovoz|ohang|jiddiy|hayajon|голос|баритон|меццо|тенор|сопрано|бас|пауз|шепот|громк|интонац|акцент|настроени|уверен|бодр|спокойн|секунд|сек|диктор|ведущ|гость|кадр|сцен|музык|эффект|улыбк|смех)[^)]*)\)/gi,
     " ",
   );
 
-  // 7. Remove standalone timestamps: 00:00 - 00:06, 01:23:, etc.
+  // 7. Remove timing ranges (e.g. 00:00 - 00:06) and line-start director markers (e.g. 01:23: )
+  // CRITICAL: Normal clock times in sentence context (e.g. "soat 12:30 da", "19:00") MUST be preserved!
   cleaned = cleaned
-    .replace(/\b\d{1,2}:\d{2}(?:\s*-\s*\d{1,2}:\d{2})?\b/g, " ")
-    .replace(/^\s*\d{1,2}:\d{2}\s*[:-]?\s*/gm, "");
+    .replace(/\b\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}\b/g, " ")
+    .replace(/^\s*\d{1,2}:\d{2}(?::\d{2})?\s*[:-]\s*/gm, "");
 
   // 8. Remove speaker label prefixes at line starts: e.g. "Диктор (баритон):", "Ведущий:", "Host 1:", "Boshlovchi:", "Speaker:"
   cleaned = cleaned.replace(
@@ -334,6 +340,164 @@ app.get("/api/voices", async (_req, res) => {
       defaultVoiceId: "voice_17raj9ewke3g",
       totalCount: 1,
     });
+  }
+});
+
+// Built-in Voice Audio Preview (Instant playback, Zero token usage after 1st generation)
+app.get("/api/voices/preview/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const cleanId = path.basename(id).replace(/\.wav$/, "");
+    const previewDir = path.join(process.cwd(), "public", "audio", "previews");
+    const previewFile = path.join(previewDir, `${cleanId}.wav`);
+
+    // 1. If already saved on disk, stream immediately with strong cache headers
+    if (fs.existsSync(previewFile)) {
+      res.setHeader("Content-Type", "audio/wav");
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      return fs.createReadStream(previewFile).pipe(res);
+    }
+
+    // 2. If not yet on disk, synthesize once, save, and stream
+    if (!fs.existsSync(previewDir)) {
+      fs.mkdirSync(previewDir, { recursive: true });
+    }
+
+    const previewGreeting = "Assalomu alaykum! OvozStudio'ga xush kelibsiz, o'zbekcha professional podkast yaratamiz.";
+    const response = await ai.models.generateContent({
+      model: "gemini-3.8-flash-tts",
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: previewGreeting }],
+        },
+      ],
+      config: {
+        responseModalities: ["AUDIO"],
+        speechConfig: {
+          voiceConfig: { prebuiltVoiceConfig: { voiceName: "Charon" } },
+        },
+      },
+    });
+
+    const part = response.candidates?.[0]?.content?.parts?.[0];
+    if (part?.inlineData?.data) {
+      const rawBuf = Buffer.from(part.inlineData.data, "base64");
+      const { pcm, sampleRate } = extractPcmData(rawBuf);
+      const wav = buildWavBuffer(pcm, sampleRate);
+      fs.writeFileSync(previewFile, wav);
+
+      res.setHeader("Content-Type", "audio/wav");
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      return res.send(wav);
+    }
+
+    return res.status(404).json({ error: "Ovoz namunasi topilmadi" });
+  } catch (err: any) {
+    console.error("Error serving voice preview:", err);
+    res.status(500).json({ error: err.message || "Xatolik" });
+  }
+});
+
+// ----------------------------------------------------
+// Billing & Payment Gateways (Stripe + Telegram / Card)
+// ----------------------------------------------------
+const stripeApiKey = process.env.STRIPE_SECRET_KEY?.trim();
+const stripeClient = stripeApiKey && stripeApiKey.startsWith("sk_") ? new Stripe(stripeApiKey) : null;
+
+// Get Payment & Gateway Configuration
+app.get("/api/billing/config", (req, res) => {
+  res.json({
+    stripeConfigured: Boolean(stripeClient),
+    telegramHandle: process.env.TELEGRAM_ADMIN_HANDLE || "ovozstudio_admin",
+    phoneNumber: process.env.ADMIN_PHONE_NUMBER || "+998 90 123 45 67",
+    adminEmail: "demircilyda@gmail.com",
+    cardDetails: {
+      cardNumber: process.env.ADMIN_CARD_NUMBER || "9860 3501 4500 1755",
+      cardHolder: process.env.ADMIN_CARD_HOLDER || "HUMO",
+      bank: process.env.ADMIN_CARD_BANK || "Humo",
+    },
+  });
+});
+
+// Create Stripe Checkout Session
+app.post("/api/billing/create-checkout-session", async (req, res) => {
+  try {
+    const { planId, userId, userEmail } = req.body;
+
+    if (!stripeClient) {
+      return res.status(400).json({
+        configured: false,
+        error: "Stripe hali ulanmagan. Iltimos, Telegram orqali to'lovni tasdiqlang yoki .env fayliga STRIPE_SECRET_KEY kiriting.",
+      });
+    }
+
+    const plansConfig: Record<string, { name: string; amountCents: number; credits: number }> = {
+      starter: { name: "OvozStudio Start Paketi (25 kredit)", amountCents: 400, credits: 25 },
+      pro: { name: "OvozStudio Ijodkor Pro (100 kredit)", amountCents: 1000, credits: 100 },
+      unlimited: { name: "OvozStudio Media VIP (350 kredit)", amountCents: 2400, credits: 350 },
+    };
+
+    const targetPlan = plansConfig[planId] || plansConfig.pro;
+    const origin = (req.headers.origin as string) || process.env.APP_URL || "http://localhost:3000";
+
+    const session = await stripeClient.checkout.sessions.create({
+      line_items: [
+        {
+          price_data: {
+            currency: "usd",
+            product_data: {
+              name: targetPlan.name,
+              description: `${targetPlan.credits} ta professional AI ovoz sintezi, to'liq o'zbekcha replikatsiya va dublyaj`,
+            },
+            unit_amount: targetPlan.amountCents,
+          },
+          quantity: 1,
+        },
+      ],
+      mode: "payment",
+      customer_email: userEmail,
+      client_reference_id: userId,
+      metadata: {
+        userId: userId || "",
+        userEmail: userEmail || "",
+        planId: planId || "pro",
+        credits: String(targetPlan.credits),
+      },
+      success_url: `${origin}/?payment_status=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${origin}/?payment_status=cancelled`,
+    });
+
+    res.json({ configured: true, url: session.url, sessionId: session.id });
+  } catch (err: any) {
+    console.error("Stripe Session Error:", err);
+    res.status(500).json({ error: err.message || "Stripe sessiyasini yaratishda xatolik" });
+  }
+});
+
+// Verify Stripe Checkout Session
+app.get("/api/billing/verify-session/:sessionId", async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    if (!stripeClient) {
+      return res.status(400).json({ error: "Stripe sozlanmagan" });
+    }
+
+    const session = await stripeClient.checkout.sessions.retrieve(sessionId);
+    if (session.payment_status === "paid") {
+      res.json({
+        paid: true,
+        userId: session.client_reference_id || session.metadata?.userId,
+        userEmail: session.customer_email || session.metadata?.userEmail,
+        planId: session.metadata?.planId,
+        credits: Number(session.metadata?.credits || 0),
+      });
+    } else {
+      res.json({ paid: false, status: session.payment_status });
+    }
+  } catch (err: any) {
+    console.error("Stripe verify error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -476,17 +640,73 @@ function splitTextIntoSpeechChunks(
 
   const chunks: string[] = [];
 
+  // Helper: splits a long fragment by punctuation pauses (; : , — -) or words
+  function splitLongSentence(sent: string): string[] {
+    if (sent.length <= maxChunkLength) return [sent];
+
+    // Cascade 2: split by pauses (; : , — -)
+    const pauseMatches =
+      sent.match(/[^;:,\u2014\u2013-]+[;:,\u2014\u2013-]+(?:\s|$)|[^;:,\u2014\u2013-]+$/g) ||
+      [sent];
+    const subChunks: string[] = [];
+    let cur = "";
+
+    for (const p of pauseMatches) {
+      const pTrimmed = p.trim();
+      if (!pTrimmed) continue;
+
+      if (pTrimmed.length > maxChunkLength) {
+        // Cascade 3: split strictly by words (\s+)
+        if (cur) {
+          subChunks.push(cur);
+          cur = "";
+        }
+        const words = pTrimmed.split(/\s+/);
+        let wordCur = "";
+        for (const w of words) {
+          if ((wordCur + " " + w).length <= maxChunkLength) {
+            wordCur += (wordCur ? " " : "") + w;
+          } else {
+            if (wordCur) subChunks.push(wordCur);
+            wordCur = w.slice(0, maxChunkLength); // Guarantee hard upper bound
+          }
+        }
+        if (wordCur) subChunks.push(wordCur);
+      } else if ((cur + " " + pTrimmed).length <= maxChunkLength) {
+        cur += (cur ? " " : "") + pTrimmed;
+      } else {
+        if (cur) subChunks.push(cur);
+        cur = pTrimmed;
+      }
+    }
+    if (cur) subChunks.push(cur);
+    return subChunks;
+  }
+
   for (const para of paragraphs) {
     if (para.length <= maxChunkLength) {
       chunks.push(para);
     } else {
-      // Split into sentences using punctuation boundaries (. ! ?)
-      const sentences = para.match(/[^.!?]+[.!?]+(?:\s|$)|[^.!?]+$/g) || [para];
+      // Cascade 1: Split into sentences using punctuation boundaries (. ! ?)
+      const sentences =
+        para.match(/[^.!?]+[.!?]+(?:\s|$)|[^.!?]+$/g) || [para];
       let currentChunk = "";
+
       for (const sent of sentences) {
         const trimmed = sent.trim();
         if (!trimmed) continue;
-        if ((currentChunk + " " + trimmed).length <= maxChunkLength) {
+
+        if (trimmed.length > maxChunkLength) {
+          // If a single sentence exceeds limit, split it further through sub-cascades
+          if (currentChunk) {
+            chunks.push(currentChunk);
+            currentChunk = "";
+          }
+          const subPieces = splitLongSentence(trimmed);
+          for (const sub of subPieces) {
+            chunks.push(sub);
+          }
+        } else if ((currentChunk + " " + trimmed).length <= maxChunkLength) {
           currentChunk += (currentChunk ? " " : "") + trimmed;
         } else {
           if (currentChunk) chunks.push(currentChunk);
@@ -849,6 +1069,7 @@ app.post("/api/podcast/synthesize", async (req, res) => {
     // Break text into natural speech chunks to support any duration (even 15-60 minutes) without truncation
     const chunks = splitTextIntoSpeechChunks(cleanedText, 320);
     const pcmChunks: Buffer[] = [];
+    const failedChunkIndices: number[] = [];
     // 250ms silence pause between paragraphs (24000 samples/s * 2 bytes * 0.25s = 12000 bytes)
     const pauseBuffer = Buffer.alloc(12000);
 
@@ -931,6 +1152,8 @@ app.post("/api/podcast/synthesize", async (req, res) => {
         if (cIdx < chunks.length - 1) {
           pcmChunks.push(pauseBuffer);
         }
+      } else {
+        failedChunkIndices.push(cIdx + 1);
       }
     }
 
@@ -958,6 +1181,7 @@ app.post("/api/podcast/synthesize", async (req, res) => {
       baseVoice,
       textLength: cleanedText.length,
       chunksCount: chunks.length,
+      failedChunks: failedChunkIndices.length > 0 ? failedChunkIndices : undefined,
     });
   } catch (error: any) {
     console.error("TTS error:", error);
@@ -1218,82 +1442,113 @@ app.post("/api/voiceover/fetch-media-url", async (req, res) => {
 
     const trimmedUrl = url.trim();
 
-    // 1. Direct media file link (mp4, webm, mp3, wav)
-    if (/\.(mp4|webm|mp3|wav|m4a)(\?.*)?$/i.test(trimmedUrl)) {
-      try {
-        const fetchRes = await fetch(trimmedUrl);
-        if (!fetchRes.ok) {
-          throw new Error(`Media faylini yuklab bo'lmadi (HTTP ${fetchRes.status})`);
-        }
-        const arrayBuf = await fetchRes.arrayBuffer();
-        const base64Data = Buffer.from(arrayBuf).toString("base64");
-        const contentType = fetchRes.headers.get("content-type") || "video/mp4";
+    // Determine embed URL for preview if applicable
+    let embedUrl: string | null = null;
+    let videoTitle = "";
 
-        return res.json({
-          status: "success",
-          type: "direct_file",
-          mediaBase64: base64Data,
-          mimeType: contentType,
-          message: "Media fayli to'g'ridan-to'g'ri yuklandi",
-        });
-      } catch (directErr: any) {
-        return res.status(400).json({
-          error: `To'g'ridan-to'g'ri havola xatosi: ${directErr.message}`,
-        });
-      }
-    }
-
-    // 2. YouTube / Shorts
     const isYouTube = /(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)/i.test(trimmedUrl);
+    let videoId = "";
     if (isYouTube) {
-      let videoId = "";
       const shortsMatch = trimmedUrl.match(/shorts\/([a-zA-Z0-9_-]+)/);
       const watchMatch = trimmedUrl.match(/[?&]v=([a-zA-Z0-9_-]+)/);
       const beMatch = trimmedUrl.match(/youtu\.be\/([a-zA-Z0-9_-]+)/);
-
       if (shortsMatch) videoId = shortsMatch[1];
       else if (watchMatch) videoId = watchMatch[1];
       else if (beMatch) videoId = beMatch[1];
 
-      if (!videoId) {
-        return res.status(400).json({ error: "YouTube video ID sini aniqlab bo'lmadi" });
-      }
-
-      const embedUrl = `https://www.youtube.com/embed/${videoId}?autoplay=0&enablejsapi=1`;
-
-      // 1. Fetch exact YouTube video title via oEmbed
-      let videoTitle = "";
-      try {
-        const oembedRes = await fetch(
-          `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`
-        );
-        if (oembedRes.ok) {
-          const oembedData: any = await oembedRes.json();
-          videoTitle = oembedData.title || "";
-        }
-      } catch (oembedErr) {
-        console.warn("oEmbed fetch warning:", oembedErr);
-      }
-
-      try {
-        // Fetch real YouTube subtitles / transcript directly (trying default, 'ru', and 'en')
-        let transcriptItems: any = null;
+      if (videoId) {
+        embedUrl = `https://www.youtube.com/embed/${videoId}?autoplay=0&enablejsapi=1`;
         try {
-          transcriptItems = await YoutubeTranscript.fetchTranscript(videoId);
-        } catch (e1) {
-          try {
-            transcriptItems = await YoutubeTranscript.fetchTranscript(videoId, { lang: "ru" });
-          } catch (e2) {
-            try {
-              transcriptItems = await YoutubeTranscript.fetchTranscript(videoId, { lang: "en" });
-            } catch (e3) {
-              transcriptItems = null;
-            }
+          const oembedRes = await fetch(
+            `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`
+          );
+          if (oembedRes.ok) {
+            const oembedData: any = await oembedRes.json();
+            videoTitle = oembedData.title || "";
           }
+        } catch (e) {}
+      }
+    }
+
+    const isInstagram = /instagram\.com\/(?:reel|p|tv)\//i.test(trimmedUrl);
+    if (isInstagram) {
+      const shortcodeMatch = trimmedUrl.match(/(?:reel|p|tv)\/([a-zA-Z0-9_-]+)/);
+      const shortcode = shortcodeMatch ? shortcodeMatch[1] : null;
+      if (shortcode) {
+        embedUrl = `https://www.instagram.com/p/${shortcode}/embed/`;
+      }
+    }
+
+    // Run full production pipeline
+    const pipelineRes = await runMediaDubbingPipeline(
+      {
+        url: trimmedUrl,
+        videoTitle: videoTitle || undefined,
+      },
+      ai
+    );
+
+    if (pipelineRes.state === "media_ready") {
+      return res.json({
+        status: "success",
+        jobState: "media_ready",
+        platform: pipelineRes.platform,
+        type: pipelineRes.platform,
+        embedUrl,
+        hasTranscript: pipelineRes.hasSpeech,
+        audioBase64: pipelineRes.extractedAudioBase64,
+        videoDuration: pipelineRes.videoDuration,
+        audioDuration: pipelineRes.audioDuration,
+        durationsMatch: pipelineRes.durationsMatch,
+        suggestedTopic: pipelineRes.suggestedTopic || videoTitle || "Video Dublyaji",
+        segments: pipelineRes.segments,
+        fullTimedScript: pipelineRes.fullTimedScript,
+        cleanUzbekScript: pipelineRes.cleanUzbekScript,
+        attemptLog: pipelineRes.attemptLog,
+        streamInspection: pipelineRes.streamInspection,
+        message: "Video muvaffaqiyatli yuklandi, audio ajratildi va sinxron o'zbekcha dublyaj tayyorlandi!",
+      });
+    }
+
+    if (pipelineRes.state === "transcript_only") {
+      return res.json({
+        status: "transcript_only",
+        jobState: "transcript_only",
+        platform: pipelineRes.platform,
+        type: pipelineRes.platform,
+        embedUrl,
+        hasTranscript: true,
+        audioBase64: null, // CRITICAL: In transcript_only mode, no raw audio is returned
+        videoDuration: pipelineRes.videoDuration,
+        audioDuration: 0,
+        durationsMatch: false,
+        suggestedTopic: pipelineRes.suggestedTopic || videoTitle || "YouTube Video",
+        segments: pipelineRes.segments,
+        fullTimedScript: pipelineRes.fullTimedScript,
+        cleanUzbekScript: pipelineRes.cleanUzbekScript,
+        attemptLog: pipelineRes.attemptLog,
+        requiresMediaUpload: true,
+        transcriptOnlyNotice: pipelineRes.transcriptOnlyNotice,
+        message: pipelineRes.transcriptOnlyNotice || "Transkripsiya Gemini orqali olindi. To'liq dublyaj uchun MP4 faylni yuklang.",
+      });
+    }
+
+    // Fallback for YouTube: check if YouTube auto-captions exist before requiring upload
+    if (isYouTube && videoId) {
+      try {
+        let transcriptItems: any = null;
+        const targetLangs = [undefined, "tr", "ru", "en", "uz", "es", "de"];
+        for (const langCode of targetLangs) {
+          try {
+            transcriptItems = await YoutubeTranscript.fetchTranscript(
+              videoId,
+              langCode ? { lang: langCode } : undefined
+            );
+            if (transcriptItems && transcriptItems.length > 0) break;
+          } catch (e) {}
         }
 
         if (transcriptItems && transcriptItems.length > 0) {
-          // Format transcript items with start and end seconds
           const rawSegments = transcriptItems.map((item: any) => {
             const startSec = Math.floor(item.offset / 1000);
             const durSec = Math.ceil(item.duration / 1000) || 3;
@@ -1313,7 +1568,6 @@ app.post("/api/voiceover/fetch-media-url", async (req, res) => {
             };
           });
 
-          // Merge very short contiguous segments for better readability
           const mergedSegments: { start: string; end: string; originalText: string }[] = [];
           for (const seg of rawSegments) {
             if (!seg.originalText.trim()) continue;
@@ -1328,41 +1582,35 @@ app.post("/api/voiceover/fetch-media-url", async (req, res) => {
             mergedSegments.push(seg);
           }
 
-          // Use Gemini to translate every line into synchronized, colloquial Uzbek
           const translatePrompt = `Siz professional video dublyaj rejissyorisiz.
-Quyida YouTube / Shorts videosidan olingan asl nutq replikalari va ularning vaqtlari (taymkodlari) keltirilgan.
+Quyida YouTube videosining asl nutqi va taymkodlari keltirilgan:
 Video sarlavhasi: "${videoTitle || 'YouTube Video'}"
-Har bir replikani O'zbek tiliga (lotin yozuvida) "qanday aytilgan bo'lsa, xuddi shunday" sinxron ravishda, vaqtiga moslab tarjima qiling.
-Talablar:
-- Tarjima qilingan o'zbekcha replika asl nutq xronometrajiga mos kelishi shart.
-- Gaplar dinamik, jonli va jarangdor bo'lsin.
-
 Replikalar:
 ${JSON.stringify(mergedSegments.slice(0, 45), null, 2)}
 
+Har bir replikani O'zbek tiliga (lotin yozuvida) "qanday aytilgan bo'lsa, xuddi shunday" sinxron ravishda tarjima qiling.
 Qat'iy JSON formatida qaytaring:
 {
-  "detectedLanguage": "${transcriptItems[0]?.lang || 'Ingliz/Rus tili'}",
+  "detectedLanguage": "${transcriptItems[0]?.lang || 'Aniqlangan til'}",
   "suggestedTopic": "${videoTitle || 'YouTube Video Dublyaji'}",
   "segments": [
     {
+      "id": 1,
       "start": "00:00",
       "end": "00:04",
-      "originalText": "Asl tildagi matn...",
-      "uzbekText": "Vaqtga mos o'zbekcha dublyaj matni..."
+      "speaker": "Speaker 1",
+      "originalText": "...",
+      "uzbekText": "..."
     }
   ],
-  "fullTimedScript": "[00:00 - 00:04] [Dinamik]: O'zbekcha matn...",
-  "cleanUzbekScript": "Toza o'zbekcha matn"
+  "fullTimedScript": "[00:00 - 00:04] [Speaker 1]: ...",
+  "cleanUzbekScript": "..."
 }`;
 
           const transResponse = await ai.models.generateContent({
             model: "gemini-3.8-flash",
             contents: translatePrompt,
-            config: {
-              responseMimeType: "application/json",
-              temperature: 0.3,
-            },
+            config: { responseMimeType: "application/json", temperature: 0.2 },
           });
 
           const parsedTranslation = JSON.parse(transResponse.text?.trim() || "{}");
@@ -1380,168 +1628,119 @@ Qat'iy JSON formatida qaytaring:
             segments: parsedTranslation.segments || [],
             fullTimedScript: parsedTranslation.fullTimedScript || "",
             cleanUzbekScript: parsedTranslation.cleanUzbekScript || "",
-            message: "YouTube videosi va subtitrlari muvaffaqiyatli tahlil qilindi! O'zbekcha sinxron dublyaj tayyor.",
+            attemptLog: pipelineRes.attemptLog,
+            message: "YouTube subtitrlari orqali haqiqiy nutq aniqlandi va o'zbekcha sinxron dublyaj tayyorlandi!",
           });
         }
-      } catch (transcriptErr: any) {
-        console.warn("YouTube transcript fetch error:", transcriptErr?.message);
-      }
-
-      // If captions could not be fetched automatically from YouTube track,
-      // USE GEMINI TO CREATE ACCURATE TIMECODED DUBBING SCENES & SUBTITLES FOR THIS VIDEO
-      try {
-        const fallbackTopic = videoTitle || "YouTube Video Sahnalari";
-        const aiScenePrompt = `Siz eng mohir kino, Reels va video dublyaj rejissyorisiz.
-Foydalanuvchi quyidagi YouTube / Shorts videosini kiritdi:
-Video sarlavhasi / mavzusi: "${fallbackTopic}"
-
-Ushbu video uchun o'zbek tilida (lotin yozuvida) aniq taymkodlar ([00:00 - 00:05], [00:05 - 00:12], va h.k.) va har bir sahna uchun sinxron dublyaj ssenariysini yarating.
-Agarda bu kino yoki mashhur qahramon sahnasi bo'lsa (masalan: Artur Deyn / Qilich / Jang / Game of Thrones), ssenariy aynan ushbu qahramon, jang yoki voqea tafsilotlariga mos jozibali, qahramonona va kinematik bo'lsin!
-
-Talablar:
-1. Rolikni 5-8 ta aniq taymkodga bo'ling ([00:00 - 00:05], [00:05 - 00:11], va h.k.).
-2. Har bir taymkod uchun:
-   - "originalText": Sahnada nima bo'layotgani yoki qahramon gapi (masalan: "[Artur Deyn qilichini qinidan chiqaradi]")
-   - "uzbekText": Diktor/aktyor o'qiydigan ta'sirchan, jonli o'zbekcha dublyaj gapi.
-3. To'liq ssenariy va toza matnni ham shakllantiring.
-
-Qat'iy JSON formatida qaytaring:
-{
-  "detectedLanguage": "AI Taymkod & Subtitr Generatori",
-  "suggestedTopic": "${fallbackTopic}",
-  "segments": [
-    {
-      "start": "00:00",
-      "end": "00:05",
-      "originalText": "[Sahna boshlanishi: Qahramon qadami va nigohi]",
-      "uzbekText": "Tong Qilichi laqabini olgan afsonaviy ritsarning eng buyuk jangi..."
-    }
-  ],
-  "fullTimedScript": "[00:00 - 00:05] [Kinematik]: Tong Qilichi...",
-  "cleanUzbekScript": "..."
-}`;
-
-        const fallbackResponse = await ai.models.generateContent({
-          model: "gemini-3.8-flash",
-          contents: aiScenePrompt,
-          config: {
-            responseMimeType: "application/json",
-            temperature: 0.5,
-          },
-        });
-
-        const fallbackParsed = JSON.parse(fallbackResponse.text?.trim() || "{}");
-
-        return res.json({
-          status: "success",
-          type: "youtube",
-          platform: "YouTube / Shorts",
-          videoId,
-          videoTitle: fallbackTopic,
-          embedUrl,
-          hasTranscript: true,
-          isAIGeneratedScenes: true,
-          detectedLanguage: "AI Taymkod & Dublyaj",
-          suggestedTopic: fallbackTopic,
-          segments: fallbackParsed.segments || [],
-          fullTimedScript: fallbackParsed.fullTimedScript || "",
-          cleanUzbekScript: fallbackParsed.cleanUzbekScript || "",
-          message: `«${fallbackTopic}» videosi uchun AI taymkodlar va sinxron dublyaj ssenariysi muvaffaqiyatli yaratildi!`,
-        });
-      } catch (aiFallbackErr: any) {
-        console.error("AI Fallback Scene Generation Error:", aiFallbackErr);
-        return res.json({
-          status: "platform_link",
-          platform: "YouTube / Shorts",
-          type: "youtube",
-          videoId,
-          videoTitle: videoTitle || "YouTube Video",
-          embedUrl,
-          hasTranscript: false,
-          message: "YouTube videosi pleyerga yuklandi.",
-        });
-      }
+      } catch (e) {}
     }
 
-    // 3. Instagram Reels
-    const isInstagram = /instagram\.com\/(?:reel|p|tv)\//i.test(trimmedUrl);
-    if (isInstagram) {
-      const shortcodeMatch = trimmedUrl.match(/(?:reel|p|tv)\/([a-zA-Z0-9_-]+)/);
-      const shortcode = shortcodeMatch ? shortcodeMatch[1] : null;
-      const embedUrl = shortcode ? `https://www.instagram.com/p/${shortcode}/embed/` : null;
-
-      // Generate AI scene dubbing script for Instagram Reels
-      try {
-        const igPrompt = `Siz Instagram Reels va qisqa videolar dublyaji bo'yicha mutaxassissiz.
-Instagram Reels videosi uchun o'zbek tilida 5-6 ta aniq taymkodli ([00:00 - 00:05], [00:05 - 00:10], [00:10 - 00:18], [00:18 - 00:25], [00:25 - 00:30]) dinamik dublyaj ssenariysini yarating.
-Uslub: O'ta dinamik, qiziqarli, tomoshabinni o'ziga tortuvchi (Reels uslubi).
-
-Qat'iy JSON formatida qaytaring:
-{
-  "suggestedTopic": "Instagram Reels Dublyaji",
-  "segments": [
-    {
-      "start": "00:00",
-      "end": "00:05",
-      "originalText": "[Reels Kirish: Qiziqarli boshlanish]",
-      "uzbekText": "Bu videoni oxirigacha ko'ring, sababi..."
-    }
-  ],
-  "fullTimedScript": "[00:00 - 00:05] [Dinamik]: ...",
-  "cleanUzbekScript": "..."
-}`;
-
-        const igRes = await ai.models.generateContent({
-          model: "gemini-3.8-flash",
-          contents: igPrompt,
-          config: { responseMimeType: "application/json", temperature: 0.5 },
-        });
-        const igParsed = JSON.parse(igRes.text?.trim() || "{}");
-
-        return res.json({
-          status: "success",
-          platform: "Instagram Reels",
-          type: "instagram",
-          shortcode,
-          embedUrl,
-          hasTranscript: true,
-          suggestedTopic: "Instagram Reels",
-          segments: igParsed.segments || [],
-          fullTimedScript: igParsed.fullTimedScript || "",
-          cleanUzbekScript: igParsed.cleanUzbekScript || "",
-          message: "Instagram Reels uchun AI taymkodlar va dublyaj tayyor!",
-        });
-      } catch (igErr) {
-        return res.json({
-          status: "platform_link",
-          platform: "Instagram Reels",
-          type: "instagram",
-          shortcode,
-          embedUrl,
-          message: "Instagram Reels havolasi aniqlandi.",
-        });
-      }
-    }
-
-    // 4. TikTok
-    const isTikTok = /tiktok\.com\//i.test(trimmedUrl);
-    if (isTikTok) {
-      return res.json({
-        status: "platform_link",
-        platform: "TikTok",
-        type: "tiktok",
-        message: "TikTok videosi aniqlandi.",
-      });
-    }
-
-    // Other generic link
+    // If download failed and no captions exist, return audio_upload_required with exact log
     return res.json({
-      status: "unsupported_link",
-      message: "Ushbu havola formati to'g'ridan-to'g'ri o'qib bo'lmadi. Iltimos, YouTube havolasini yoki MP4/MP3 formatidagi faylni yuklang.",
+      status: pipelineRes.state === "platform_blocked" ? "audio_upload_required" : pipelineRes.state,
+      jobState: pipelineRes.state || "platform_blocked",
+      platform: pipelineRes.platform,
+      type: pipelineRes.platform,
+      embedUrl,
+      hasTranscript: false,
+      requiresMediaUpload: true,
+      audioBase64: null,
+      error: pipelineRes.error,
+      errorDetails: pipelineRes.errorDetails,
+      attemptLog: pipelineRes.attemptLog,
+      streamInspection: pipelineRes.streamInspection,
+      message:
+        pipelineRes.error ||
+        "Ushbu havoladan video oqimini to'g'ridan-to'g'ri yuklab bo'lmadi. Diktorning haqiqiy ovozini 100% eshitib dublyaj qilish uchun video (MP4) yoki audio (MP3) faylini yuklang!",
     });
   } catch (error: any) {
     console.error("Error in fetch-media-url:", error);
     res.status(500).json({ error: error.message || "Havolani tekshirishda xatolik" });
+  }
+});
+
+/**
+ * Full Media Dubbing Pipeline Endpoint:
+ * url -> download -> ffmpeg audio extraction -> ffprobe duration check -> verbatim STT + diarization -> Uzbek translation
+ */
+app.post("/api/voiceover/process-pipeline", async (req, res) => {
+  try {
+    const { url, mediaBase64, mimeType, videoTitle } = req.body;
+    if (!url && !mediaBase64) {
+      return res.status(400).json({ error: "Havola (URL) yoki fayl ma'lumoti yuborilmadi." });
+    }
+
+    const result = await runMediaDubbingPipeline(
+      {
+        url,
+        mediaBase64,
+        mimeType,
+        videoTitle,
+      },
+      ai
+    );
+
+    res.json(result);
+  } catch (err: any) {
+    console.error("Error in process-pipeline:", err);
+    res.status(500).json({ error: err.message || "Pipeline bajarishda xatolik" });
+  }
+});
+
+/**
+ * Endpoint to retrieve recent pipeline attempt logs
+ */
+app.get("/api/voiceover/pipeline-logs", (req, res) => {
+  res.json({ logs: getPipelineLogs() });
+});
+
+/**
+ * Translate user's provided original speech text into synchronized Uzbek with timecodes.
+ * Guarantees NO hallucination: strictly translates the speaker's real words.
+ */
+app.post("/api/voiceover/translate-custom-speech", async (req, res) => {
+  try {
+    const { originalText, videoTitle = "Video Dublyaji", targetDuration = "45s" } = req.body;
+    if (!originalText || !originalText.trim()) {
+      return res.status(400).json({ error: "Asl nutq matni kiritilmadi" });
+    }
+
+    const prompt = `Siz professional video dublyaj rejissyorisiz.
+Quyida video qahramoni yoki diktori aytgan ASL NUTQ matni keltirilgan:
+"${originalText}"
+
+VAZIFA:
+1. Ushbu matndagi har bir gapni vaqtga moslab, ketma-ket taymkodlarga ([00:00 - 00:05], [00:05 - 00:12], va h.k.) ajrating.
+2. Har bir gapni o'zbek tiliga (lotin yozuvida) "qanday aytilgan bo'lsa, xuddi shunday" sinxron, jarangdor va jonli qilib tarjima qiling.
+3. O'zingizdan hech qanday yangi sahna yoki xayoliy voqea to'qimang! Faqat berilgan asl nutqni tarjima qiling.
+
+Qat'iy JSON formatida qaytaring:
+{
+  "detectedLanguage": "Asl til",
+  "suggestedTopic": "${videoTitle}",
+  "segments": [
+    {
+      "start": "00:00",
+      "end": "00:05",
+      "originalText": "Asl gap...",
+      "uzbekText": "Sinxron o'zbekcha tarjimasi..."
+    }
+  ],
+  "fullTimedScript": "[00:00 - 00:05] [Dinamik]: O'zbekcha matn...",
+  "cleanUzbekScript": "Diktor mikrofon oldida to'xtovsiz o'qiydigan toza o'zbekcha matn"
+}`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.8-flash",
+      contents: prompt,
+      config: { responseMimeType: "application/json", temperature: 0.2 },
+    });
+
+    const parsed = JSON.parse(response.text?.trim() || "{}");
+    res.json(parsed);
+  } catch (err: any) {
+    console.error("Error in translate-custom-speech:", err);
+    res.status(500).json({ error: err.message || "Nutqni tarjima qilishda xatolik" });
   }
 });
 
@@ -1956,11 +2155,12 @@ app.post("/api/podcast/synthesize-dialogue", async (req, res) => {
         };
 
     // Route speaker 2: Guest voice.
-    // CRITICAL: A female speaker (like Aziza) MUST NEVER use the host's male replicated voice ('voice_17raj9ewke3g')!
+    // If guest has custom cloned voice (female or male), allow it!
+    // ONLY prevent accidental substitution of the host 1 male replicated voice ('17raj9') for a female speaker.
+    const isMaleHost1VoiceId = host2Id && host2Id.includes("17raj9");
     const isHost2Custom =
-      !isHost2Female &&
       host2Id &&
-      !host2Id.includes("17raj9") &&
+      !(isHost2Female && isMaleHost1VoiceId) &&
       (host2Id.startsWith("voice_") || host2Id.startsWith("voicekey_"));
     const host2Config = isHost2Custom
       ? { voice: host2Id }
@@ -1977,10 +2177,13 @@ app.post("/api/podcast/synthesize-dialogue", async (req, res) => {
 
     const synthesizedTurns: any[] = [];
     const pcmChunks: Buffer[] = [];
+    const failedTurns: number[] = [];
     let currentMasterTime = 0;
 
-    // 400ms pause PCM (24000 samples/sec * 1 channel * 2 bytes/sample * 0.4s = 19200 bytes of pure silence)
-    const pauseBuffer = Buffer.alloc(19200);
+    // Single unified dialogue pause constant (350ms):
+    // 24000 samples/sec * 1 channel * 2 bytes/sample * 0.35s = exactly 16800 bytes of silence!
+    const DIALOGUE_PAUSE_SECONDS = 0.35;
+    const pauseBuffer = Buffer.alloc(Math.round(24000 * 2 * DIALOGUE_PAUSE_SECONDS));
 
     for (let i = 0; i < turns.length; i++) {
       const turn = turns[i];
@@ -2089,9 +2292,10 @@ app.post("/api/podcast/synthesize-dialogue", async (req, res) => {
         }
       }
 
-      // If synthesis failed for this turn, generate a brief clean silent spacer so timing aligns
+      // If synthesis failed for this turn, track and log
       if (!turnPcm || turnPcm.length === 0) {
-        turnPcm = Buffer.alloc(24000); // 0.5s silence placeholder
+        failedTurns.push(i + 1);
+        turnPcm = Buffer.alloc(24000); // 0.5s clean silence placeholder
       }
 
       const turnDuration = Math.max(
@@ -2100,7 +2304,8 @@ app.post("/api/podcast/synthesize-dialogue", async (req, res) => {
       );
       const turnStartTime = currentMasterTime;
       const turnEndTime = currentMasterTime + turnDuration;
-      currentMasterTime = turnEndTime + 0.35; // 350ms natural conversational pause
+      // Synchronized exactly with pauseBuffer duration
+      currentMasterTime = turnEndTime + DIALOGUE_PAUSE_SECONDS;
 
       pcmChunks.push(turnPcm);
       pcmChunks.push(pauseBuffer);
@@ -2116,6 +2321,7 @@ app.post("/api/podcast/synthesize-dialogue", async (req, res) => {
         durationSeconds: turnDuration,
         startTime: turnStartTime,
         endTime: turnEndTime,
+        synthesisFailed: !turnPcm || turnPcm.length === 0,
       });
     }
 
@@ -2128,6 +2334,7 @@ app.post("/api/podcast/synthesize-dialogue", async (req, res) => {
       masterAudioBase64: masterWavBuffer.toString("base64"),
       totalDurationSeconds: totalDuration,
       turns: synthesizedTurns,
+      failedTurns: failedTurns.length > 0 ? failedTurns : undefined,
     });
   } catch (error: any) {
     console.error("Error synthesizing dialogue:", error);
@@ -2328,69 +2535,6 @@ Javobni FAQAT valid JSON formatida quyidagi strukturada qaytaring:
 });
 
 // =========================================================================
-// GOOGLE LYRIA 3 PRO & AI SOUNDTRACK GENERATOR
-// =========================================================================
-app.post("/api/podcast/lyria-soundtrack", async (req, res) => {
-  try {
-    const {
-      topic = "Podkast",
-      category = "Umumiy",
-      mood = "cinematic",
-      durationSeconds = 60,
-    } = req.body;
-
-    const promptText = `Siz Google DeepMind Lyria 3 Pro va professional podkast kompozitorisiz.
-Vazifa: Ushbu podkast mavzusi uchun eng mos, noyob, chalg'itmaydigan va atmosferali saundtrek dizaynini yarating.
-
-Podkast Mavzusi: "${topic}"
-Kategoriya: "${category}"
-Istalgan Kayfiyat: "${mood}"
-Xronometraj: ${durationSeconds} soniya
-
-Lyria 3 Pro uchun professional inglizcha prompt (lyriaPrompt), musiqa parametri va o'zbekcha/ruscha tavsifni JSON shaklida qaytaring:
-{
-  "title": "Saundtrek nomi",
-  "lyriaPrompt": "Cinematic lo-fi ambient acoustic guitar with warm vinyl noise, gentle rhodes chords, 82 bpm, non-intrusive background for storytelling, studio master quality",
-  "recommendedSoundscape": "calm-piano",
-  "bpm": 82,
-  "instruments": ["Acoustic Guitar", "Warm Rhodes", "Vinyl Texture"],
-  "descriptionUz": "Ushbu mavzu uchun Lyria 3 Pro uslubidagi mayin, chalg'itmaydigan akustik fon tanlandi.",
-  "descriptionRu": "Для этой темы сгенерирован мягкий, ненавязчивый акустический саундтрек в стиле Lyria 3 Pro."
-}
-
-recommendedSoundscape faqat quyidagilardan biri bo'lsin:
-['calm-piano', 'midnight-jazz', 'lofi-beats', 'tech-ambient', 'oriental-ney', 'dutor-acoustic', 'cinematic-dark', 'nature-ambient', 'business-uplifting', 'none']`;
-
-    const response = await ai.models.generateContent({
-      model: "gemini-3.8-flash",
-      contents: [{ role: "user", parts: [{ text: promptText }] }],
-      config: {
-        responseMimeType: "application/json",
-        temperature: 0.7,
-      },
-    });
-
-    const parsed = JSON.parse(response.text?.trim() || "{}");
-    res.json({
-      success: true,
-      ...parsed,
-    });
-  } catch (error: any) {
-    console.error("Error generating Lyria soundtrack metadata:", error);
-    res.json({
-      success: true,
-      title: "Atmospheric Podcast Score",
-      lyriaPrompt: "Warm ambient piano and gentle strings, 78 bpm, subtle acoustic bed",
-      recommendedSoundscape: "calm-piano",
-      bpm: 78,
-      instruments: ["Piano", "Ambient Strings"],
-      descriptionUz: "Mavzuga mos neoklassik mayin fon.",
-      descriptionRu: "Неоклассический мягкий эмбиент под тему выпуска.",
-    });
-  }
-});
-
-// =========================================================================
 // 3. LIVE VOICE AI AGENT & PHONE CALL ENDPOINTS
 // =========================================================================
 
@@ -2557,20 +2701,24 @@ app.post("/api/agent/call-turn", async (req, res) => {
     let systemPrompt = "";
     if (persona === "tashkent_real_estate") {
       systemPrompt = language === "ru"
-        ? `Вы — лучший риелтор-эксперт Ташкента по имени Шохрух (или Малика).
-Вы разговариваете с клиентом по живому телефону.
-ГЛАВНОЕ ПРАВИЛО: Слушайте клиента ("${recognizedUserText}") и отвечайте СТРОГО на его слова!
-Говорите тепло, уверенно, как живой человек (1-2 коротких предложения). Никакого канцелярита или фраз вроде "Я искусственный интеллект".
-Знание цен Ташкента: Мирабад ($1600-2500/м²), Яккасарай ($1300-1850/м²), Чиланзар ($900-1300/м²), Юнусабад ($950-1400/м²), Сергели ($700-950/м²).
-В конце реплики обязательно задайте естественный встречный вопрос.`
+        ? `Вы — топ-риелтор и эксперт по недвижимости Ташкента по имени Шохрух (или Малика).
+Вы ведёте живой телефонный разговор с клиентом.
+
+ЖЁСТКИЕ ОГРАНИЧЕНИЯ И ПРАВИЛА (GUARDRAILS):
+1. СТРОГО ТОЛЬКО НЕДВИЖИМОСТЬ: Вы говорите ИСКЛЮЧИТЕЛЬНО о недвижимости Ташкента (покупка, продажа, аренда, новостройки, вторичка, ипотека, рассрочка, кадастр, районы). Если клиент спрашивает о погоде, кулинарии, политике, программировании, личной жизни или любых других отвлечённых темах — КАТЕГОРИЧЕСКИ НЕ ПОДДЕРЖИВАЙТЕ оффтоп! В одном вежливом живом предложении верните диалог в русло: "Я узко консультирую только по недвижимости Ташкента. Давайте вернёмся к подбору жилья — какой район или бюджет вас интересует?".
+2. ПРАВИЛО ЧЕСТНОГО НЕПОНИМАНИЯ (АНТИГАЛЛЮЦИНАЦИЯ): Если реплика клиента неразборчива, оборвана, состоит из случайных звуков или вы точно не поняли суть вопроса — НИКОГДА НЕ ПРИДУМЫВАЙТЕ ответ от себя! Сразу честно и вежливо переспросите: "Вас немного плохо слышно, связь прерывается. Повторите, пожалуйста, какой район или бюджет вы имели в виду?".
+3. ТЕЛЕФОННЫЙ ТЕМП И ФОРМАТ: 1-2 коротких, естественных, живых предложения (не более 25 слов!). Никакого канцелярского сухого тона. Никаких слов "Я искусственный интеллект" или "Как языковая модель". Используйте естественные вводные фразы ("Да, конечно!", "Смотрите, какая ситуация...", "Отличный район!").
+4. ЗНАНИЕ РЫНКА ТАШКЕНТА: Мирабад ($1600-2500/м²), Яккасарай ($1300-1850/м²), Шайхантахур ($1200-1800/м²), Мирзо-Улугбек ($1000-1550/м²), Юнусабад ($950-1400/м²), Чиланзар ($900-1300/м²), Яшнабад ($850-1250/м²), Сергели/Янгихаёт ($700-950/м²). Рассрочка от застройщиков 0%, субсидированная ипотека 17-18%, проверка кадастра.
+5. ОБЯЗАТЕЛЬНЫЙ ВСТРЕЧНЫЙ ШАГ: В конце реплики всегда задавайте естественный квалификационный вопрос (о бюджете, способе оплаты — нал/ипотека/рассрочка, или сроках переезда).`
         : `Siz Toshkentdagi eng tajribali va samimiy rieltor-ekspert Shohruxsiz (yoki Malika).
-Siz mijoz bilan haqiqiy telefon orqali gaplashyapsiz.
-ASOSIY QOIDA: Mijozning aytgan gapini ("${recognizedUserText}") diqqat bilan eshiting va AYNAN unga javob bering!
-Javobingiz 1 yoki 2 ta qisqa, jarangdor, insoniy gap bo'lsin.
-"Men sun'iy intellektman", "Hurmatli mijoz" kabi qoliplarni MUTLAQO ISHLATMANG!
-"Vaalaykum assalom!", "Qarang...", "To'g'risini aytsam...", "Ajoyib variantlar bor!" kabi jonli so'zlardan foydalaning.
-Toshkent narxlari: Mirobod ($1600-2500/m²), Yakkasaroy ($1300-1850/m²), Mirzo Ulug'bek ($1000-1550/m²), Yunusobod ($950-1400/m²), Chilonzor ($900-1300/m²), Yashnobod ($850-1250/m²), Sergeli ($700-950/m²).
-Har bir javobingiz oxirida mijozga tabiiy savol bering (masalan: "O'zingiz yashashgami yoki ijaragami?").`;
+Siz mijoz bilan haqiqiy jonli telefon orqali gaplashyapsiz.
+
+QAT'IY CHEKLOVLAR VA QOIDALAR (GUARDRAILS):
+1. FAQAT KO'CHMAS MULK (STRICT DOMAIN): Siz FAQAT Toshkent ko'chmas mulki (kvartira sotib olish, sotish, ijara, novostroyka, ikkilamchi bozor, kadastr, ipoteka, tumanlar) haqida gapirasiz. Agar mijoz ob-havo, siyosat, pazandachilik, IT yoki boshqa mavzularga chalg'isa — CHALG'IMANG! 1 ta samimiy gap bilan mavzuni mulkka qaytaring: "Men faqat Toshkent ko'chmas mulki bo'yicha maslahat beraman. Keling, uy tanlashga qaytamiz — qaysi tuman yoki qanday byudjet sizga ma'qul?".
+2. TUSHUNMAGANDA DARHOL SO'RASH (ANTI-HALLUCINATION): Agar mijozning gapi tushunarsiz, uzilib qolgan yoki g'o'ldirash bo'lsa — HECH QACHON O'ZINGIZDAN TO'QIMANG! Darhol ochiq ayting: "Alo, ovozingiz biroz uzilib keldi. Qaytadan aytib yubora olasizmi, qaysi tuman yoki qanday byudjetni nazarda tutdingiz?".
+3. TELEFON FORMATI: 1-2 ta qisqa, jarangdor, insoniy gap (25 ta so'zdan oshmasin!). Kitobiy qoliplar, "Men sun'iy intellektman" kabi so'zlarni MUTLAQO ISHLATMANG! "Vaalaykum assalom!", "Qarang...", "To'g'risi...", "Ajoyib variantlar bor!" kabi so'zlashuv iboralaridan foydalaning.
+4. TOSHKENT BOZORI BILIMI: Mirobod ($1600-2500/m²), Yakkasaroy ($1300-1850/m²), Mirzo Ulug'bek ($1000-1550/m²), Yunusobod ($950-1400/m²), Chilonzor ($900-1300/m²), Yashnobod ($850-1250/m²), Sergeli ($700-950/m²). Kotlovan xavfsizligi, kadastr, 0% muddatli to'lov (rassrochka), ipoteka 17-18%.
+5. TABIIY SAVOL: Har doim javobingiz oxirida mijozga tabiiy savol bering (masalan: "To'lov naqdmi yoki bo'lib to'lashgami?").`;
     } else {
       systemPrompt = language === "ru"
         ? `Вы — умный, эмоциональный и чуткий голосовой AI-собеседник в прямом радиоэфире или подкасте.
@@ -2614,8 +2762,9 @@ Format: 1-2 ta qisqa jonli so'zlashuv jumlasi (lotin yozuvida), hech qanday mark
         systemInstruction:
           systemPrompt +
           "\n\n⚡ TEZKOR TELEFON QOIDASI: Javobingiz MAKSIMAL 1-2 ta qisqa, aniq va jonli gap bo'lsin (20-25 ta so'zdan oshmasin!). Kitobiy gaplar, keraksiz kirish so'zlarsiz, xuddi haqiqiy telefon orqali gaplashayotgandek tez va tabiiy javob bering.",
+        thinkingConfig: { thinkingBudget: 0 },
         temperature: 0.7,
-        maxOutputTokens: 95,
+        maxOutputTokens: 200,
       },
     });
 
@@ -2623,6 +2772,62 @@ Format: 1-2 ta qisqa jonli so'zlashuv jumlasi (lotin yozuvida), hech qanday mark
 
     // Clean any parenthesis or brackets from speech text
     const { speechText } = cleanScriptForSpeech(replyText);
+
+    // Dynamic Real Estate Lead Extraction & Guardrail Analysis (runs in fast background promise)
+    let leadUpdate: any = null;
+    let isOffTopic = false;
+    let clarificationNeeded = false;
+
+    if (persona === "tashkent_real_estate") {
+      try {
+        const leadAnalyzeRes = await ai.models.generateContent({
+          model: "gemini-3.8-flash",
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  text: `Analyze this conversational exchange in a Tashkent real estate voice call.
+User spoken text: "${recognizedUserText}"
+Agent replied: "${replyText}"
+
+Extract structured lead qualification data if mentioned or implied.
+Return strict JSON:
+{
+  "district": "Mirobod" | "Yakkasaroy" | "Chilonzor" | "Yunusobod" | "Mirzo Ulug'bek" | "Yashnobod" | "Sergeli" | null,
+  "budgetRange": string or null (e.g. "$60,000", "$45,000 - $70,000"),
+  "clientIntent": "buy" | "rent" | "sell" | "invest" | null,
+  "propertyType": "novostroyka" | "vtorichka" | "commercial" | "cottage" | null,
+  "roomsCount": "1 xonali" | "2 xonali" | "3 xonali" | "4+ xonali" | null,
+  "urgency": "immediate" | "this_month" | "exploring" | null,
+  "paymentMethod": "cash" | "mortgage" | "installments" | null,
+  "leadTemperature": "hot" | "warm" | "cold" | null,
+  "isOffTopic": boolean (true if user talked about cooking, politics, unrelated subjects),
+  "clarificationNeeded": boolean (true if user speech was muffled/unintelligible and agent had to ask to repeat)
+}`,
+                },
+              ],
+            },
+          ],
+          config: {
+            responseMimeType: "application/json",
+            thinkingConfig: { thinkingBudget: 0 },
+            temperature: 0.1,
+            maxOutputTokens: 350,
+          },
+        });
+
+        const rawJson = leadAnalyzeRes.text?.trim();
+        if (rawJson) {
+          const parsed = JSON.parse(rawJson);
+          leadUpdate = parsed;
+          isOffTopic = !!parsed.isOffTopic;
+          clarificationNeeded = !!parsed.clarificationNeeded;
+        }
+      } catch (err) {
+        // Fallback: non-blocking
+      }
+    }
 
     // Synthesize speech with Gemini 3.8 Flash-Lite TTS for ultra-low latency (~500ms)
     const isCustomVoice =
@@ -2669,6 +2874,9 @@ Format: 1-2 ta qisqa jonli so'zlashuv jumlasi (lotin yozuvida), hech qanday mark
       recognizedUserText,
       replyText: speechText || replyText,
       audioBase64,
+      leadUpdate,
+      isOffTopic,
+      clarificationNeeded,
       timestamp: new Date().toLocaleTimeString(language === "ru" ? "ru-RU" : "uz-UZ", {
         hour: "2-digit",
         minute: "2-digit",
@@ -2677,6 +2885,92 @@ Format: 1-2 ta qisqa jonli so'zlashuv jumlasi (lotin yozuvida), hech qanday mark
   } catch (error: any) {
     console.error("Error in agent call turn:", error);
     res.status(500).json({ error: error.message || "Agent javobida xatolik" });
+  }
+});
+
+// Comprehensive Post-Call Real Estate CRM Dossier & Matching Properties
+app.post("/api/agent/generate-summary", async (req, res) => {
+  try {
+    const { transcriptLines = [], leadCard = {}, language = "uz" } = req.body;
+
+    const fullTranscript = transcriptLines
+      .map((t: any) => `${t.sender === "user" ? "Mijoz" : "Rieltor (Shohrux)"}: ${t.text}`)
+      .join("\n");
+
+    const promptText = `Siz Toshkent ko'chmas mulk agentligining bosh tahlilchisisiz.
+Quyidagi telefon qo'ng'irog'i transkriptini to'liq tahlil qiling va rieltor uchun professional CRM dosyesini shakllantiring.
+
+Transkript:
+${fullTranscript || "Qisqa suhbat bo'ldi"}
+
+Hozirgi Lead Card parametrlari:
+${JSON.stringify(leadCard, null, 2)}
+
+Quyidagi qat'iy JSON formatida javob qaytaring:
+{
+  "callSummary": "${language === "ru" ? "Краткое резюме звонка (3-4 предложения)" : "Qo'ng'iroqning qisqa mazmuni (3-4 jumla)"}",
+  "leadTemperature": "hot" | "warm" | "cold",
+  "temperatureReason": "${language === "ru" ? "Почему такой статус" : "Nega bu harorat berildi"}",
+  "qualificationBANT": {
+    "budget": "${language === "ru" ? "Оценка бюджета и платежеспособности" : "Byudjet va to'lov qobiliyati"}",
+    "authority": "${language === "ru" ? "Кто принимает решение" : "Qaror qabul qiluvchi shaxs"}",
+    "need": "${language === "ru" ? "Точная потребность (комнаты, локация)" : "Aniq ehtiyoj"}",
+    "timeline": "${language === "ru" ? "Сроки покупки/аренды" : "Bitim muddati"}"
+  },
+  "objectionsHandled": ["${language === "ru" ? "Возражения клиента, если были" : "Mijoz e'tirozlari"}"],
+  "agreedNextStep": "${language === "ru" ? "Следующее целевое действие риелтора" : "Rieltorning keyingi qadami"}",
+  "matchedProperties": [
+    {
+      "id": "prop-1",
+      "title": "${language === "ru" ? "ЖК / Объект 1" : "1-variant mulk"}",
+      "district": "Mirobod",
+      "price": "$68,000",
+      "area": "62 m²",
+      "rooms": "2 xonali",
+      "roi": "11.5% yillik ijara",
+      "badge": "Top Tavsiya",
+      "developer": "Modern Stroy"
+    },
+    {
+      "id": "prop-2",
+      "title": "${language === "ru" ? "ЖК / Объект 2" : "2-variant mulk"}",
+      "district": "Chilonzor",
+      "price": "$52,000",
+      "area": "54 m²",
+      "rooms": "2 xonali",
+      "roi": "9.8% yillik ijara",
+      "badge": "Arzon & Qulay",
+      "developer": "Golden House"
+    },
+    {
+      "id": "prop-3",
+      "title": "${language === "ru" ? "ЖК / Объект 3" : "3-variant mulk"}",
+      "district": "Yunusobod",
+      "price": "$75,000",
+      "area": "78 m²",
+      "rooms": "3 xonali",
+      "roi": "10.2% yillik ijara",
+      "badge": "Oilaviy Keng",
+      "developer": "NRG"
+    }
+  ]
+}`;
+
+    const summaryRes = await ai.models.generateContent({
+      model: "gemini-3.8-flash",
+      contents: [{ role: "user", parts: [{ text: promptText }] }],
+      config: {
+        responseMimeType: "application/json",
+        thinkingConfig: { thinkingBudget: 0 },
+        temperature: 0.2,
+      },
+    });
+
+    const parsed = JSON.parse(summaryRes.text || "{}");
+    res.json(parsed);
+  } catch (err: any) {
+    console.error("Error generating CRM summary:", err);
+    res.status(500).json({ error: err.message || "Summary xatolik" });
   }
 });
 
@@ -3121,6 +3415,9 @@ Qoidalar:
       });
   }
 });
+
+// Mount static audio previews for zero-latency streaming
+app.use("/audio", express.static(path.resolve(process.cwd(), "public", "audio")));
 
 // Configure Vite or Static
 if (process.env.NODE_ENV !== "production") {

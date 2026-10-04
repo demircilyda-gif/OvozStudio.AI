@@ -1,5 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { VoiceProfile, AgentPersonaType, RealEstateLeadCard } from '../types/podcast';
+import { LiveCallCard } from './LiveCallCard';
+import { VoiceGallery3D } from './VoiceGallery3D';
 import {
   PhoneCall,
   PhoneOff,
@@ -20,7 +22,24 @@ import {
   Copy,
   Check,
   Sparkles,
+  Flame,
+  ShieldAlert,
+  FileText,
+  CheckSquare,
+  HelpCircle,
+  ArrowRight,
+  BadgeAlert,
+  DollarSign,
+  MapPin,
+  Home,
+  BookOpen,
+  Lock,
+  Play,
+  Square,
 } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
+import { getVoicePreviewUrl } from '../data/voicePreviews';
+import { connectAudioElement } from '../utils/audioReactive';
 
 interface VoiceAgentTabProps {
   voices: VoiceProfile[];
@@ -52,9 +71,11 @@ function float32ToPcm16Base64(float32Array: Float32Array): string {
 }
 
 export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
+  voices,
   userClonedVoiceId,
   lang,
 }) => {
+  const { isAuthenticated, requireAuth, useCredit, logGeneration } = useAuth();
   const shokhrukhVoiceId = userClonedVoiceId || 'voice_17raj9ewke3g';
 
   // Engine: 'shokhrukh_natural' (Recommended, 0% accent, authentic Shahrukh voice) vs 'gemini_live'
@@ -64,6 +85,35 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
   const [selectedPersona, setSelectedPersona] = useState<AgentPersonaType>('tashkent_real_estate');
   const [callTopic, setCallTopic] = useState<string>('Toshkentda novostroyka, ikkilamchi bozor, ijara va narxlar');
   const [agentVoiceId, setAgentVoiceId] = useState<string>(shokhrukhVoiceId);
+
+  // Built-in instant voice preview (0 tokens, pre-saved)
+  const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null);
+  const voicePreviewAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  const toggleVoicePreview = (vId: string) => {
+    if (previewingVoiceId === vId) {
+      if (voicePreviewAudioRef.current) {
+        voicePreviewAudioRef.current.pause();
+        voicePreviewAudioRef.current.currentTime = 0;
+      }
+      setPreviewingVoiceId(null);
+      return;
+    }
+    const cleanId = vId.toLowerCase();
+    const url = getVoicePreviewUrl(cleanId) || `/api/voices/preview/${cleanId}`;
+    if (!voicePreviewAudioRef.current) {
+      voicePreviewAudioRef.current = new Audio(url);
+    } else {
+      voicePreviewAudioRef.current.src = url;
+    }
+    voicePreviewAudioRef.current.volume = 0.95;
+    voicePreviewAudioRef.current.onended = () => setPreviewingVoiceId(null);
+    voicePreviewAudioRef.current.onerror = () => setPreviewingVoiceId(null);
+    voicePreviewAudioRef.current
+      .play()
+      .then(() => setPreviewingVoiceId(vId))
+      .catch(() => setPreviewingVoiceId(null));
+  };
 
   // Call Lifecycle: 'idle' -> 'calling' (ringing) -> 'connected' (live) -> 'ended'
   const [callStatus, setCallStatus] = useState<'idle' | 'calling' | 'connected' | 'ended'>('idle');
@@ -86,10 +136,21 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
     propertyType: 'novostroyka',
     roomsCount: '2 xonali',
     urgency: 'this_month',
+    paymentMethod: 'cash',
+    leadTemperature: 'warm',
     keyNotes: '',
   });
   const [copiedLead, setCopiedLead] = useState<boolean>(false);
-  const [activeTabSubView, setActiveTabSubView] = useState<'agent' | 'prices' | 'lead'>('agent');
+  const [activeTabSubView, setActiveTabSubView] = useState<'agent' | 'prices' | 'lead' | 'playbook' | 'summary'>('agent');
+
+  // Top 10 Real Estate Features State
+  const [guardrailAlert, setGuardrailAlert] = useState<string | null>(null);
+  const [clarificationAlert, setClarificationAlert] = useState<string | null>(null);
+  const [liveLeadUpdateToast, setLiveLeadUpdateToast] = useState<string | null>(null);
+  const [offTopicCount, setOffTopicCount] = useState<number>(0);
+  const [clarificationCount, setClarificationCount] = useState<number>(0);
+  const [crmSummaryData, setCrmSummaryData] = useState<any>(null);
+  const [isGeneratingSummary, setIsGeneratingSummary] = useState<boolean>(false);
 
   // Audio References
   const currentAudioElemRef = useRef<HTMLAudioElement | null>(null);
@@ -226,6 +287,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
     stopAllAudio();
     try {
       const audio = new Audio(`data:audio/wav;base64,${base64Wav}`);
+      connectAudioElement(audio);
       currentAudioElemRef.current = audio;
       setAgentSpeaking(true);
       setAudioLevel(0.7);
@@ -299,6 +361,49 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
       const data = await res.json();
       const replyText = data.replyText || '';
       setCurrentSubtitle(replyText);
+
+      // Handle real-time lead qualification update
+      if (data.leadUpdate) {
+        setReLeadCard((prev) => ({
+          ...prev,
+          ...(data.leadUpdate.district ? { district: data.leadUpdate.district } : {}),
+          ...(data.leadUpdate.budgetRange ? { budgetRange: data.leadUpdate.budgetRange } : {}),
+          ...(data.leadUpdate.clientIntent ? { clientIntent: data.leadUpdate.clientIntent } : {}),
+          ...(data.leadUpdate.propertyType ? { propertyType: data.leadUpdate.propertyType } : {}),
+          ...(data.leadUpdate.roomsCount ? { roomsCount: data.leadUpdate.roomsCount } : {}),
+          ...(data.leadUpdate.urgency ? { urgency: data.leadUpdate.urgency } : {}),
+          ...(data.leadUpdate.paymentMethod ? { paymentMethod: data.leadUpdate.paymentMethod } : {}),
+          ...(data.leadUpdate.leadTemperature ? { leadTemperature: data.leadUpdate.leadTemperature } : {}),
+        }));
+        setLiveLeadUpdateToast(
+          lang === 'uz'
+            ? '🎯 BANT Lead-kartasi jonli suhbatdan yangilandi!'
+            : '🎯 Лид-карта обновлена из живого диалога!'
+        );
+        setTimeout(() => setLiveLeadUpdateToast(null), 3500);
+      }
+
+      // Handle Strict Real Estate Guardrail deflection
+      if (data.isOffTopic) {
+        setOffTopicCount((prev) => prev + 1);
+        setGuardrailAlert(
+          lang === 'uz'
+            ? "🛡️ Guardrail faol: Begona mavzu to'xtatildi, agent suhbatni ko'chmas mulkka qaytardi"
+            : '🛡️ Защита темы: оффтоп отклонён, агент вернул диалог к недвижимости'
+        );
+        setTimeout(() => setGuardrailAlert(null), 4500);
+      }
+
+      // Handle Anti-Hallucination clarification trigger
+      if (data.clarificationNeeded) {
+        setClarificationCount((prev) => prev + 1);
+        setClarificationAlert(
+          lang === 'uz'
+            ? "✨ Halol aniqlashtirish: Ovoz noaniq bo'lgani uchun agent to'qimasdan qayta so'radi"
+            : '✨ Честное уточнение: агент не стал домысливать и переспросил неясный запрос'
+        );
+        setTimeout(() => setClarificationAlert(null), 4500);
+      }
 
       const agentLine: TranscriptLine = {
         id: `a-${Date.now()}`,
@@ -479,12 +584,27 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
 
   // Start Call (Route by selected engine)
   const handleStartCall = async () => {
+    if (
+      !requireAuth(
+        () => {},
+        lang === 'uz'
+          ? "AI Realtor Agent bilan jonli qo'ng'iroq faqat ro'yxatdan o'tgan foydalanuvchilar uchun ochiq. Begonalar API ni behuda sarflamasligi uchun avval tizimga kiring!"
+          : "Голосовой AI агент звонков доступен только для зарегистрированных пользователей."
+      )
+    ) {
+      return;
+    }
+
     cleanupCall();
     setMicWarning(null);
     setCallStatus('calling');
     playRingtone();
     setCurrentSubtitle('');
     setTranscriptLines([]);
+
+    // Deduct credit & record generation
+    await useCredit(1);
+    await logGeneration('agent_call', 'AI Realtor Call', 1);
 
     // 1. Graceful microphone permission request
     let stream: MediaStream | null = null;
@@ -575,8 +695,11 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
         const source = inputCtx.createMediaStreamSource(stream);
         const processor = inputCtx.createScriptProcessor(4096, 1, 1);
         micProcessorRef.current = processor;
+        const muteGain = inputCtx.createGain();
+        muteGain.gain.value = 0; // Eliminate local microphone echo and acoustic feedback loop
         source.connect(processor);
-        processor.connect(inputCtx.destination);
+        processor.connect(muteGain);
+        muteGain.connect(inputCtx.destination);
 
         processor.onaudioprocess = (e) => {
           if (isMuted || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
@@ -658,10 +781,46 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
     }
   };
 
-  // End Call
+  // End Call & Trigger AI CRM Summary
   const handleEndCall = () => {
     cleanupCall();
     setCallStatus('ended');
+    if (selectedPersona === 'tashkent_real_estate' && conversationHistoryRef.current.length >= 2) {
+      handleGenerateSummary();
+    }
+  };
+
+  // Generate Post-Call AI CRM Summary & Dossier
+  const handleGenerateSummary = async () => {
+    setIsGeneratingSummary(true);
+    try {
+      const res = await fetch('/api/agent/generate-summary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          transcriptLines: conversationHistoryRef.current,
+          leadCard: reLeadCard,
+          language: lang,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCrmSummaryData(data);
+        if (data.matchedProperties) {
+          setReLeadCard((prev) => ({
+            ...prev,
+            callSummary: data.callSummary,
+            leadTemperature: data.leadTemperature,
+            matchedProperties: data.matchedProperties,
+            nextStep: data.agreedNextStep,
+          }));
+        }
+      }
+    } catch (err) {
+      console.error('CRM Summary error:', err);
+    } finally {
+      setIsGeneratingSummary(false);
+    }
   };
 
   // Toggle Mute
@@ -690,6 +849,25 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
       executeNaturalTurn(text.trim());
     } else if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'text', text: text.trim() }));
+    }
+  };
+
+  // Immediate send when user clicks "Finished Speaking"
+  const handleManualFinishSpeaking = () => {
+    if (speechSilenceTimerRef.current) {
+      clearTimeout(speechSilenceTimerRef.current);
+      speechSilenceTimerRef.current = null;
+    }
+    const textToSend = interimSpeechRef.current.trim();
+    if (textToSend.length >= 2) {
+      interimSpeechRef.current = '';
+      setUserSpeaking(false);
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch (e) {}
+      }
+      executeNaturalTurn(textToSend);
     }
   };
 
@@ -807,21 +985,24 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
   return (
     <div className="space-y-6 max-w-5xl mx-auto">
       {/* Top Banner with Dual Engine Selector */}
-      <div className="bg-gradient-to-r from-emerald-950/70 via-zinc-900 to-purple-950/70 border border-emerald-500/30 rounded-2xl p-5 shadow-xl relative overflow-hidden">
-        <div className="absolute top-0 right-0 w-80 h-full bg-emerald-500/5 blur-3xl pointer-events-none" />
+      <div className="border border-[rgba(22,21,17,0.14)] rounded-[22px] bg-[rgba(255,255,255,0.52)] backdrop-blur-md p-6 sm:p-7 shadow-[0_30px_50px_-30px_rgba(22,21,17,0.35)] relative overflow-hidden">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 relative z-10">
           <div>
-            <div className="flex items-center gap-2 mb-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 text-xs font-bold border border-emerald-500/30 flex items-center gap-1">
-                <Zap className="w-3 h-3" />
+            <div className="flex items-center gap-2 mb-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-[#0E7C86] animate-pulse" />
+              <span className="px-2.5 py-0.5 rounded-full bg-[rgba(14,124,134,0.1)] text-[#0E7C86] text-[11px] font-mono tracking-wider font-semibold border border-[#0E7C86]/30 flex items-center gap-1 uppercase">
+                <Zap className="w-3 h-3 text-[#0E7C86]" />
                 {callEngine === 'shokhrukh_natural' ? 'SHOHRUX HAQIQIY OVOZ LIVE (0% AKSENT)' : 'GEMINI 3.8 LIVE API (SPEECH-TO-SPEECH)'}
               </span>
             </div>
-            <h2 className="text-xl sm:text-2xl font-black text-white tracking-tight">
-              {lang === 'uz' ? "Toshkent Ko'chmas Mulki & Podkast Ovozli Agenti" : 'Голосовой AI-Агент Недвижимости Ташкента'}
+            <h2 className="font-serif text-2xl sm:text-3xl text-[#161511] tracking-tight">
+              {lang === 'uz' ? (
+                <>Toshkent Ko'chmas Mulki & <em className="italic text-[#0E7C86]">Ovozli Agenti</em></>
+              ) : (
+                <>Голосовой AI-Агент <em className="italic text-[#0E7C86]">Недвижимости Ташкента</em></>
+              )}
             </h2>
-            <p className="text-xs sm:text-sm text-zinc-300 mt-1 max-w-2xl leading-relaxed">
+            <p className="text-xs sm:text-sm text-[#5D594E] mt-1.5 max-w-2xl leading-relaxed">
               {callEngine === 'shokhrukh_natural'
                 ? (lang === 'uz'
                     ? "Shohruxning haqiqiy ovoz nusxasi bilan to'liq jonli muloqot! Hech qanday chet elcha aksentsiz, sof o'zbek tilida Toshkent ko'chmas mulki bo'yicha maslahat oling."
@@ -833,13 +1014,13 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
           </div>
 
           {callStatus === 'connected' && (
-            <div className="flex items-center gap-2.5 bg-black/70 border border-emerald-500/60 px-4 py-2.5 rounded-2xl shadow-lg">
-              <span className="w-3 h-3 rounded-full bg-emerald-400 animate-ping" />
+            <div className="flex items-center gap-2.5 bg-[#141414] border border-[#2B2B27] px-4 py-2.5 rounded-2xl shadow-lg">
+              <span className="w-3 h-3 rounded-full bg-[#0E7C86] animate-ping" />
               <div className="text-left">
-                <p className="text-[10px] text-emerald-400 font-bold uppercase tracking-wider">
+                <p className="text-[10px] text-[#5CC8CF] font-mono uppercase tracking-wider font-bold">
                   {lang === 'uz' ? 'Aloqa faol' : 'На линии'}
                 </p>
-                <p className="text-lg font-mono font-black text-white">{formatTime(callDuration)}</p>
+                <p className="text-lg font-mono font-bold text-[#EDEAE2]">{formatTime(callDuration)}</p>
               </div>
             </div>
           )}
@@ -847,19 +1028,19 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
 
         {/* Engine Switcher & Sub-navigation tabs */}
         {callStatus === 'idle' && (
-          <div className="mt-4 pt-4 border-t border-zinc-800/80 flex flex-wrap items-center justify-between gap-3">
+          <div className="mt-5 pt-4 border-t border-[rgba(22,21,17,0.1)] flex flex-wrap items-center justify-between gap-3">
             {/* Engine Toggle */}
-            <div className="flex items-center gap-1.5 bg-black/50 p-1 rounded-xl border border-zinc-800">
+            <div className="flex items-center gap-1.5 bg-[#ECE7DB] p-1 rounded-full border border-[rgba(22,21,17,0.12)]">
               <button
                 type="button"
                 onClick={() => {
                   setCallEngine('shokhrukh_natural');
                   setAgentVoiceId(shokhrukhVoiceId);
                 }}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
                   callEngine === 'shokhrukh_natural'
-                    ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-md'
-                    : 'text-zinc-400 hover:text-white'
+                    ? 'bg-[#161511] text-[#F4F1EA] shadow-2xs'
+                    : 'text-[#5D594E] hover:text-[#161511]'
                 }`}
               >
                 <span>⭐ Shohrux Haqiqiy Ovoz (0% Aksent)</span>
@@ -867,10 +1048,10 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
               <button
                 type="button"
                 onClick={() => setCallEngine('gemini_live')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
                   callEngine === 'gemini_live'
-                    ? 'bg-purple-600 text-white shadow-md'
-                    : 'text-zinc-400 hover:text-white'
+                    ? 'bg-[#161511] text-[#F4F1EA] shadow-2xs'
+                    : 'text-[#5D594E] hover:text-[#161511]'
                 }`}
               >
                 <span>⚡ Gemini 3.8 Live API</span>
@@ -878,14 +1059,14 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
             </div>
 
             {/* Navigation Tabs */}
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-1.5">
               <button
                 type="button"
                 onClick={() => setActiveTabSubView('agent')}
-                className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
                   activeTabSubView === 'agent'
-                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
-                    : 'bg-zinc-900/80 text-zinc-400 hover:text-white border border-zinc-800'
+                    ? 'bg-[#0E7C86] text-white shadow-2xs'
+                    : 'bg-white/80 text-[#5D594E] hover:text-[#161511] border border-[rgba(22,21,17,0.14)]'
                 }`}
               >
                 <PhoneCall className="w-3.5 h-3.5" />
@@ -893,44 +1074,115 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => setActiveTabSubView('prices')}
-                className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
-                  activeTabSubView === 'prices'
-                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
-                    : 'bg-zinc-900/80 text-zinc-400 hover:text-white border border-zinc-800'
-                }`}
-              >
-                <TrendingUp className="w-3.5 h-3.5" />
-                <span>{lang === 'uz' ? 'Toshkent Narxlari' : 'Цены Ташкента'}</span>
-              </button>
-              <button
-                type="button"
                 onClick={() => setActiveTabSubView('lead')}
-                className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
                   activeTabSubView === 'lead'
-                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
-                    : 'bg-zinc-900/80 text-zinc-400 hover:text-white border border-zinc-800'
+                    ? 'bg-[#0E7C86] text-white shadow-2xs'
+                    : 'bg-white/80 text-[#5D594E] hover:text-[#161511] border border-[rgba(22,21,17,0.14)]'
                 }`}
               >
                 <Key className="w-3.5 h-3.5" />
-                <span>{lang === 'uz' ? 'Lead-Kartasi' : 'Карточка Лида'}</span>
+                <span>{lang === 'uz' ? 'LPMAMA Lead-Kartasi' : 'Лид-Карта (LPMAMA)'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTabSubView('prices')}
+                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
+                  activeTabSubView === 'prices'
+                    ? 'bg-[#0E7C86] text-white shadow-2xs'
+                    : 'bg-white/80 text-[#5D594E] hover:text-[#161511] border border-[rgba(22,21,17,0.14)]'
+                }`}
+              >
+                <TrendingUp className="w-3.5 h-3.5" />
+                <span>{lang === 'uz' ? 'Narxlar Radari' : 'Радар Цен'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTabSubView('summary');
+                  if (!crmSummaryData && conversationHistoryRef.current.length >= 2) {
+                    handleGenerateSummary();
+                  }
+                }}
+                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
+                  activeTabSubView === 'summary'
+                    ? 'bg-[#0E7C86] text-white shadow-2xs'
+                    : 'bg-white/80 text-[#5D594E] hover:text-[#161511] border border-[rgba(22,21,17,0.14)]'
+                }`}
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>{lang === 'uz' ? 'CRM Dosye & Mulklar' : 'CRM Досье & Объекты'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTabSubView('playbook')}
+                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
+                  activeTabSubView === 'playbook'
+                    ? 'bg-[#0E7C86] text-white shadow-2xs'
+                    : 'bg-white/80 text-[#5D594E] hover:text-[#161511] border border-[rgba(22,21,17,0.14)]'
+                }`}
+              >
+                <BookOpen className="w-3.5 h-3.5" />
+                <span>{lang === 'uz' ? 'Rieltor Skriptlari' : 'Скрипты и Инструкции'}</span>
               </button>
             </div>
           </div>
         )}
       </div>
 
-      {/* STATE 1: ACTIVE CALL OR CALLING SCREEN (FULL CALL INTERFACE) */}
-      {(callStatus === 'calling' || callStatus === 'connected') && (
-        <div className="bg-zinc-950 border border-emerald-500/40 rounded-3xl p-6 sm:p-10 shadow-2xl relative overflow-hidden flex flex-col items-center text-center space-y-6">
+      {/* ------------------------------------------------------------- */}
+      {/* ACTIVE CALL & ENDED SCREEN: Single unified LiveCallCard       */}
+      {/* ------------------------------------------------------------- */}
+      {callStatus !== 'idle' && (
+        <div className="py-2">
+          <LiveCallCard
+            callStatus={callStatus}
+            callDuration={callDuration}
+            agentSpeaking={agentSpeaking}
+            userSpeaking={userSpeaking}
+            currentSubtitle={currentSubtitle}
+            transcriptLines={transcriptLines}
+            callTopic={callTopic}
+            reLeadCard={reLeadCard}
+            onStartCall={handleStartCall}
+            onEndCall={handleEndCall}
+            onToggleMute={handleToggleMute}
+            isMuted={isMuted}
+            onResetCall={() => {
+              setCallStatus('idle');
+              setCallDuration(0);
+            }}
+            onGoToCRM={() => {
+              setCallStatus('idle');
+              setActiveTabSubView('summary');
+              if (!crmSummaryData && conversationHistoryRef.current.length >= 2) {
+                handleGenerateSummary();
+              }
+            }}
+            onGoToLead={() => {
+              setCallStatus('idle');
+              setActiveTabSubView('lead');
+            }}
+            isAuthenticated={isAuthenticated}
+            lang={lang}
+            agentVoiceName={agentVoiceId === shokhrukhVoiceId ? 'SHOKHRUKH' : 'Aoede'}
+            onSendText={handleSendQuickPrompt}
+            micWarning={micWarning}
+          />
+        </div>
+      )}
+
+      {/* Old legacy screen disabled */}
+      {false && (
+        <div className="hidden">
           {/* Background Ambient Glow */}
           <div
             className={`absolute inset-0 bg-radial transition-all duration-700 pointer-events-none ${
               agentSpeaking
-                ? 'from-purple-900/30 via-transparent to-transparent'
+                ? 'from-[#0E7C86]/25 via-transparent to-transparent'
                 : userSpeaking
-                ? 'from-emerald-900/30 via-transparent to-transparent'
-                : 'from-zinc-900/20 via-transparent to-transparent'
+                ? 'from-[#5CC8CF]/20 via-transparent to-transparent'
+                : 'from-white/5 via-transparent to-transparent'
             }`}
           />
 
@@ -938,10 +1190,10 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
           <div className="flex items-center gap-2 relative z-10">
             <span
               className={`w-3 h-3 rounded-full ${
-                callStatus === 'calling' ? 'bg-amber-400 animate-ping' : 'bg-emerald-400 animate-pulse'
+                callStatus === 'calling' ? 'bg-[#C98A12] animate-ping' : 'bg-[#5CC8CF] animate-pulse'
               }`}
             />
-            <span className="text-xs sm:text-sm font-bold text-zinc-300 font-mono tracking-wider">
+            <span className="text-xs sm:text-sm font-bold text-[#EDEAE2] font-mono tracking-wider">
               {callStatus === 'calling'
                 ? lang === 'uz'
                   ? 'QO\'NG\'IROQ QILINMOQDA (GO\'SHAK KO\'TARILMOQDA)...'
@@ -950,24 +1202,37 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
             </span>
           </div>
 
+          {/* Microphone Warning Banner if blocked */}
+          {micWarning && (
+            <div className="w-full max-w-xl bg-[rgba(196,85,45,0.15)] border border-[#C4552D]/50 rounded-2xl p-3 text-xs text-[#EDEAE2] flex items-start gap-2.5 text-left relative z-10 shadow-lg">
+              <span className="text-base leading-none">⚠️</span>
+              <div className="flex-1">
+                <p className="font-bold text-[#C4552D]">
+                  {lang === 'uz' ? 'Mikrofon ruxsati berilmadi' : 'Микрофон недоступен'}
+                </p>
+                <p className="text-[11px] text-[#EDEAE2]/90 mt-0.5 leading-relaxed">{micWarning}</p>
+              </div>
+            </div>
+          )}
+
           {/* Central Pulsating Voice Orb / Avatar */}
           <div className="relative z-10 my-4 flex items-center justify-center">
             <div
               className={`absolute rounded-full transition-all duration-200 pointer-events-none ${
                 agentSpeaking
-                  ? 'w-48 h-48 sm:w-64 sm:h-64 bg-purple-500/20 border border-purple-500/40 animate-ping'
+                  ? 'w-48 h-48 sm:w-64 sm:h-64 bg-[#0E7C86]/20 border border-[#0E7C86]/40 animate-ping'
                   : userSpeaking
-                  ? 'w-48 h-48 sm:w-64 sm:h-64 bg-emerald-500/20 border border-emerald-500/40 animate-ping'
-                  : 'w-36 h-36 bg-zinc-800/30'
+                  ? 'w-48 h-48 sm:w-64 sm:h-64 bg-[#5CC8CF]/20 border border-[#5CC8CF]/40 animate-ping'
+                  : 'w-36 h-36 bg-[#1D1D1B]'
               }`}
             />
             <div
               className={`absolute rounded-full transition-transform duration-150 pointer-events-none ${
                 agentSpeaking
-                  ? 'w-40 h-40 sm:w-52 sm:h-52 bg-gradient-to-r from-purple-600/30 to-indigo-600/30 border border-purple-400/50 scale-110 shadow-[0_0_50px_rgba(168,85,247,0.4)]'
+                  ? 'w-40 h-40 sm:w-52 sm:h-52 bg-gradient-to-r from-[#0E7C86]/30 to-[#5CC8CF]/30 border border-[#5CC8CF]/50 scale-110 shadow-[0_0_50px_rgba(14,124,134,0.4)]'
                   : userSpeaking
-                  ? 'w-40 h-40 sm:w-52 sm:h-52 bg-gradient-to-r from-emerald-600/30 to-teal-600/30 border border-emerald-400/50 scale-110 shadow-[0_0_50px_rgba(16,185,129,0.4)]'
-                  : 'w-32 h-32 bg-zinc-900 border border-zinc-800'
+                  ? 'w-40 h-40 sm:w-52 sm:h-52 bg-gradient-to-r from-[#0A5A62]/30 to-[#0E7C86]/30 border border-[#0E7C86]/50 scale-110 shadow-[0_0_50px_rgba(14,124,134,0.4)]'
+                  : 'w-32 h-32 bg-[#1D1D1B] border border-[#2B2B27]'
               }`}
               style={{
                 transform: `scale(${1 + audioLevel * 0.4})`,
@@ -975,91 +1240,178 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
             />
 
             {/* Central Circle */}
-            <div className="w-28 h-28 sm:w-36 sm:h-36 rounded-full bg-gradient-to-tr from-zinc-900 via-zinc-800 to-zinc-950 border-2 border-emerald-500/60 flex flex-col items-center justify-center shadow-2xl relative z-10">
+            <div className="w-28 h-28 sm:w-36 sm:h-36 rounded-full bg-gradient-to-tr from-[#0E0E0D] via-[#141414] to-[#1D1D1B] border-2 border-[#0E7C86] flex flex-col items-center justify-center shadow-2xl relative z-10">
               {selectedPersona === 'tashkent_real_estate' ? (
                 <Building2 className={`w-10 h-10 sm:w-12 sm:h-12 transition-colors ${
-                  agentSpeaking ? 'text-purple-400 animate-bounce' : userSpeaking ? 'text-emerald-400' : 'text-zinc-300'
+                  agentSpeaking ? 'text-[#5CC8CF] animate-bounce' : userSpeaking ? 'text-[#0E7C86]' : 'text-[#EDEAE2]'
                 }`} />
               ) : (
                 <Bot
                   className={`w-10 h-10 sm:w-12 sm:h-12 transition-colors ${
-                    agentSpeaking ? 'text-purple-400 animate-bounce' : userSpeaking ? 'text-emerald-400' : 'text-zinc-400'
+                    agentSpeaking ? 'text-[#5CC8CF] animate-bounce' : userSpeaking ? 'text-[#0E7C86]' : 'text-[#7D7A70]'
                   }`}
                 />
               )}
-              <span className="text-[10px] font-bold text-zinc-300 mt-1 uppercase tracking-wider font-mono">
-                {agentVoiceId === shokhrukhVoiceId ? 'SHOHRUX' : agentVoiceId}
+              <span className="text-[10px] font-bold text-[#EDEAE2] mt-1 uppercase tracking-wider font-mono">
+                {agentVoiceId === shokhrukhVoiceId
+                  ? 'SHOHRUX'
+                  : agentVoiceId === 'Aoede'
+                  ? 'MALIKA'
+                  : agentVoiceId}
               </span>
             </div>
           </div>
 
           {/* Caller Details & Current Live Status */}
           <div className="space-y-2 relative z-10 max-w-lg">
-            <h3 className="text-lg sm:text-xl font-black text-white">
+            <h3 className="font-serif text-xl sm:text-2xl text-[#EDEAE2]">
               {personaConfig[selectedPersona].titleUz}
             </h3>
-            <p className="text-xs text-zinc-400 line-clamp-2">
-              <span className="text-zinc-500">{lang === 'uz' ? 'Mavzu:' : 'Тема:'}</span> "{callTopic}"
+            <p className="text-xs text-[#7D7A70] line-clamp-2">
+              <span className="text-[#EDEAE2] font-semibold">{lang === 'uz' ? 'Mavzu:' : 'Тема:'}</span> "{callTopic}"
             </p>
 
-            <div className="pt-2">
+            {/* Active Guardrail & Anti-hallucination Real Estate Indicators */}
+            {selectedPersona === 'tashkent_real_estate' && (
+              <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                <span className="px-2.5 py-0.5 rounded-full bg-[rgba(14,124,134,0.15)] text-[#5CC8CF] border border-[#0E7C86]/40 text-[10px] font-mono font-bold flex items-center gap-1">
+                  <ShieldCheck className="w-3 h-3 text-[#5CC8CF]" />
+                  <span>{lang === 'uz' ? "Faqat Ko'chmas Mulk (Guardrail)" : 'Только Недвижимость (Guardrail)'}</span>
+                  {offTopicCount > 0 && (
+                    <span className="bg-[#0E7C86]/30 px-1.5 py-0.2 rounded-full text-[9px]">
+                      {offTopicCount} qaytarildi
+                    </span>
+                  )}
+                </span>
+
+                <span className="px-2.5 py-0.5 rounded-full bg-[rgba(201,138,18,0.15)] text-[#C98A12] border border-[#C98A12]/40 text-[10px] font-mono font-bold flex items-center gap-1">
+                  <Sparkles className="w-3 h-3 text-[#C98A12]" />
+                  <span>{lang === 'uz' ? "Halol Aniqlashtirish (Anti-hallucination)" : 'Защита от галлюцинаций'}</span>
+                  {clarificationCount > 0 && (
+                    <span className="bg-[#C98A12]/30 px-1.5 py-0.2 rounded-full text-[9px]">
+                      {clarificationCount}
+                    </span>
+                  )}
+                </span>
+
+                {reLeadCard.leadTemperature && (
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-bold flex items-center gap-1 border ${
+                    reLeadCard.leadTemperature === 'hot'
+                      ? 'bg-[rgba(196,85,45,0.15)] text-[#C4552D] border-[#C4552D]/40'
+                      : reLeadCard.leadTemperature === 'warm'
+                      ? 'bg-[rgba(201,138,18,0.15)] text-[#C98A12] border-[#C98A12]/40'
+                      : 'bg-[rgba(14,124,134,0.15)] text-[#5CC8CF] border-[#0E7C86]/40'
+                  }`}>
+                    <Flame className="w-3 h-3" />
+                    <span>{reLeadCard.leadTemperature?.toUpperCase()} LEAD</span>
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* Dynamic Flash Alert Banners */}
+            {guardrailAlert && (
+              <div className="w-full max-w-xl bg-[#1D1D1B] border border-[#0E7C86]/60 rounded-2xl p-2.5 text-xs text-[#5CC8CF] flex items-center gap-2 text-left shadow-lg animate-bounce">
+                <ShieldAlert className="w-4 h-4 text-[#5CC8CF] flex-shrink-0" />
+                <p className="font-semibold flex-1 text-[11px]">{guardrailAlert}</p>
+              </div>
+            )}
+
+            {clarificationAlert && (
+              <div className="w-full max-w-xl bg-[#1D1D1B] border border-[#C98A12]/50 rounded-2xl p-2.5 text-xs text-[#C98A12] flex items-center gap-2 text-left shadow-lg">
+                <HelpCircle className="w-4 h-4 text-[#C98A12] flex-shrink-0" />
+                <p className="font-semibold flex-1 text-[11px]">{clarificationAlert}</p>
+              </div>
+            )}
+
+            {liveLeadUpdateToast && (
+              <div className="w-full max-w-xl bg-[#1D1D1B] border border-[#0E7C86]/50 rounded-2xl p-2.5 text-xs text-[#5CC8CF] flex items-center gap-2 text-left shadow-lg">
+                <CheckCircle2 className="w-4 h-4 text-[#5CC8CF] flex-shrink-0" />
+                <p className="font-semibold flex-1 text-[11px]">{liveLeadUpdateToast}</p>
+              </div>
+            )}
+
+            <div className="pt-2 flex flex-col items-center gap-2">
               <span
-                className={`inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-bold transition-colors ${
+                className={`inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-mono font-bold transition-colors ${
                   agentSpeaking
-                    ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
+                    ? 'bg-[#0E7C86]/20 text-[#5CC8CF] border border-[#0E7C86]/40'
                     : userSpeaking
-                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                    ? 'bg-[#5CC8CF]/20 text-[#EDEAE2] border border-[#5CC8CF]/40'
                     : isLoadingTurn
-                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse'
-                    : 'bg-zinc-900 text-zinc-400 border border-zinc-800'
+                    ? 'bg-[#C98A12]/20 text-[#C98A12] border border-[#C98A12]/40 animate-pulse'
+                    : 'bg-[#1D1D1B] text-[#7D7A70] border border-[#2B2B27]'
                 }`}
               >
                 {agentSpeaking ? (
                   <>
-                    <Volume2 className="w-3.5 h-3.5 animate-pulse" />
-                    <span>{lang === 'uz' ? 'Shohrux gapirmoqda...' : 'Шохрух говорит...'}</span>
+                    <Volume2 className="w-3.5 h-3.5 animate-pulse text-[#5CC8CF]" />
+                    <span>
+                      {agentVoiceId === 'Aoede'
+                        ? (lang === 'uz' ? 'Malika gapirmoqda...' : 'Малика говорит...')
+                        : (lang === 'uz' ? 'Shohrux gapirmoqda...' : 'Шохрух говорит...')}
+                    </span>
                   </>
                 ) : userSpeaking ? (
                   <>
-                    <Mic className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+                    <Mic className="w-3.5 h-3.5 text-[#5CC8CF] animate-pulse" />
                     <span>{lang === 'uz' ? 'Siz gapiryapsiz...' : 'Вы говорите...'}</span>
                   </>
                 ) : isLoadingTurn ? (
                   <>
-                    <Zap className="w-3.5 h-3.5 text-amber-400 animate-bounce" />
-                    <span>{lang === 'uz' ? 'O\'ylamoqda...' : 'Думает...'}</span>
+                    <Zap className="w-3.5 h-3.5 text-[#C98A12] animate-bounce" />
+                    <span>{lang === 'uz' ? '⚡ Javob tayyorlanmoqda (~1 soniya)...' : '⚡ Ответ готовится (~1 сек)...'}</span>
                   </>
                 ) : (
                   <>
-                    <Radio className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+                    <Radio className="w-3.5 h-3.5 text-[#5CC8CF] animate-pulse" />
                     <span>{lang === 'uz' ? '🎙️ Sizni tinglayapman — bemalol gapiring!' : '🎙️ Слушаю вас — говорите свободно!'}</span>
                   </>
                 )}
               </span>
+
+              {/* Instant finish button while user is speaking */}
+              {userSpeaking && (
+                <button
+                  type="button"
+                  onClick={handleManualFinishSpeaking}
+                  className="px-4 py-1.5 bg-[#0E7C86] hover:bg-[#0A5A62] text-white rounded-full text-[11px] font-mono font-bold shadow-lg flex items-center gap-1.5 cursor-pointer animate-pulse transition-all"
+                >
+                  <Zap className="w-3 h-3 fill-current text-[#5CC8CF]" />
+                  <span>{lang === 'uz' ? '⚡ Gapirib bo\'ldim (Javob olish)' : '⚡ Закончил говорить (Ответить)'}</span>
+                </button>
+              )}
             </div>
           </div>
 
-          {/* Quick Voice Prompt Suggestions during the call */}
+          {/* Quick Voice Prompt & Objection Handling Chips */}
           {selectedPersona === 'tashkent_real_estate' && (
-            <div className="w-full max-w-xl relative z-10 pt-1">
-              <p className="text-[11px] text-zinc-400 mb-1.5 font-medium">
-                {lang === 'uz' ? 'Tezkor savol berish (bosing yoki mikrofonga ayting):' : 'Быстрый вопрос (нажмите или скажите вслух):'}
-              </p>
+            <div className="w-full max-w-xl relative z-10 pt-1 space-y-2">
+              <div className="flex items-center justify-between text-[11px] text-[#7D7A70]">
+                <span className="font-medium">
+                  {lang === 'uz' ? 'Tezkor savollar va e\'tirozlar testi:' : 'Быстрые вопросы и проверка отработки возражений:'}
+                </span>
+                <span className="text-[10px] text-[#5CC8CF] font-mono">Bosing yoki mikrofonga ayting</span>
+              </div>
               <div className="flex flex-wrap items-center justify-center gap-1.5">
                 {[
-                  'Chilonzorda arzonroq 2 xonali uy bormi?',
-                  'Mirobodda 1 m² narxi qancha?',
-                  'Investitsiyaga qaysi tuman eng foydali?',
-                  'Kotlovandan olish xavfsizmi, kadastr bormi?',
-                  'Sergelida yangi uylar qanchadan?',
-                ].map((q) => (
+                  { text: 'Chilonzorda arzonroq 2 xonali uy bormi?', label: '🏢 Chilonzor 2x' },
+                  { text: 'Mirobodda 1 m² narxi qancha?', label: '📍 Mirobod m²' },
+                  { text: 'Juda qimmat, arzonroq variant bormi?', label: '⚠️ E\'tiroz: Qimmat' },
+                  { text: 'Narxlar tushishini kutyapman, shoshilmayman', label: '⏳ E\'tiroz: Kutyapman' },
+                  { text: 'O\'zim rieltorsiz sotib olaman, komissiya to\'lamayman', label: '🤝 E\'tiroz: O\'zim olaman' },
+                  { text: 'Subsidiyali ipoteka shartlari qanaqa?', label: '🏦 Ipoteka/Subsidiya' },
+                  { text: 'Toshkentda ertaga ob-havo qanday bo\'ladi?', label: '🛡️ Test: Offtop mavzu' },
+                  { text: 'Hm... anavi... haligi tuman bor-ku...', label: '✨ Test: Noaniq talaffuz' },
+                ].map((item) => (
                   <button
-                    key={q}
+                    key={item.text}
                     type="button"
-                    onClick={() => handleSendQuickPrompt(q)}
-                    className="px-2.5 py-1 bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-700/80 text-[11px] text-zinc-300 hover:text-white rounded-lg transition-colors cursor-pointer"
+                    onClick={() => handleSendQuickPrompt(item.text)}
+                    className="px-2.5 py-1 bg-[#1D1D1B] hover:bg-[#2B2B27] border border-[#2B2B27] text-[11px] text-[#EDEAE2] rounded-full transition-colors cursor-pointer flex items-center gap-1"
+                    title={item.text}
                   >
-                    💬 {q}
+                    <span>{item.label}</span>
                   </button>
                 ))}
               </div>
@@ -1067,12 +1419,12 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
           )}
 
           {/* Live Subtitles Strip */}
-          <div className="w-full max-w-xl bg-zinc-900/80 backdrop-blur-md border border-zinc-800 rounded-2xl p-4 text-center min-h-[64px] flex items-center justify-center relative z-10">
-            <p className="text-xs sm:text-sm text-zinc-200 italic font-medium leading-relaxed">
+          <div className="w-full max-w-xl bg-[#0E0E0D] border border-[#2B2B27] rounded-2xl p-4 text-center min-h-[64px] flex items-center justify-center relative z-10 shadow-inner">
+            <p className="text-xs sm:text-sm text-[#EDEAE2] italic font-medium leading-relaxed">
               {currentSubtitle ? (
                 `"${currentSubtitle}"`
               ) : (
-                <span className="text-zinc-500 text-xs not-italic">
+                <span className="text-[#7D7A70] text-xs not-italic">
                   {lang === 'uz'
                     ? 'Mikrofonga erkin gapiring, Shohrux sizni eshitadi...'
                     : 'Говорите в микрофон, Шохрух слушает вас в реальном времени...'}
@@ -1089,24 +1441,24 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
               onClick={handleToggleMute}
               className={`w-14 h-14 rounded-full flex flex-col items-center justify-center transition-all cursor-pointer shadow-lg ${
                 isMuted
-                  ? 'bg-amber-500/20 border-2 border-amber-500 text-amber-300'
-                  : 'bg-zinc-800/80 hover:bg-zinc-700 border border-zinc-700 text-zinc-200'
+                  ? 'bg-[#C98A12]/20 border-2 border-[#C98A12] text-[#C98A12]'
+                  : 'bg-[#1D1D1B] hover:bg-[#2B2B27] border border-[#2B2B27] text-[#EDEAE2]'
               }`}
               title={isMuted ? 'Mikrofonni yoqish' : 'Mikrofonni o\'chirish'}
             >
               {isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
-              <span className="text-[9px] font-bold mt-0.5">{isMuted ? 'Muted' : 'Mic'}</span>
+              <span className="text-[9px] font-mono font-bold mt-0.5">{isMuted ? 'Muted' : 'Mic'}</span>
             </button>
 
             {/* End Call Button (Big Red) */}
             <button
               type="button"
               onClick={handleEndCall}
-              className="w-18 h-18 rounded-full bg-gradient-to-tr from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white flex flex-col items-center justify-center shadow-xl shadow-red-600/40 hover:scale-105 active:scale-95 transition-all cursor-pointer border-2 border-red-400"
+              className="w-18 h-18 rounded-full bg-[#C4552D] hover:bg-[#b04823] text-white flex flex-col items-center justify-center shadow-xl hover:scale-105 active:scale-95 transition-all cursor-pointer border-2 border-[#C4552D]/80"
               title="Qo'ng'iroqni tugatish"
             >
               <PhoneOff className="w-8 h-8" />
-              <span className="text-[10px] font-black uppercase tracking-wider mt-0.5">
+              <span className="text-[10px] font-mono font-bold uppercase tracking-wider mt-0.5">
                 {lang === 'uz' ? 'Tugatish' : 'Сброс'}
               </span>
             </button>
@@ -1118,19 +1470,19 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
               disabled={!agentSpeaking}
               className={`w-14 h-14 rounded-full flex flex-col items-center justify-center transition-all cursor-pointer shadow-lg ${
                 agentSpeaking
-                  ? 'bg-purple-600 hover:bg-purple-500 text-white shadow-purple-600/30 animate-pulse'
-                  : 'bg-zinc-800/50 border border-zinc-800 text-zinc-500 cursor-not-allowed'
+                  ? 'bg-[#0E7C86] hover:bg-[#0A5A62] text-white shadow-[#0E7C86]/30 animate-pulse'
+                  : 'bg-[#1D1D1B]/50 border border-[#2B2B27] text-[#7D7A70] cursor-not-allowed'
               }`}
               title="Agent gapini to'xtatish"
             >
               <Zap className="w-6 h-6" />
-              <span className="text-[9px] font-bold mt-0.5">{lang === 'uz' ? 'To\'xtatish' : 'Перебить'}</span>
+              <span className="text-[9px] font-mono font-bold mt-0.5">{lang === 'uz' ? 'To\'xtatish' : 'Перебить'}</span>
             </button>
           </div>
 
           {/* Quick Text Input Fallback (Optional) */}
           <div className="w-full max-w-md pt-2 relative z-10">
-            <div className="flex items-center gap-2 bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-1.5">
+            <div className="flex items-center gap-2 bg-[#1D1D1B] border border-[#2B2B27] rounded-full px-4 py-2">
               <input
                 type="text"
                 value={textInput}
@@ -1142,7 +1494,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                   }
                 }}
                 placeholder={lang === 'uz' ? 'Yoki savolingizni yozib yuboring...' : 'Или напишите вопрос текстом...'}
-                className="flex-1 bg-transparent text-xs text-white focus:outline-none"
+                className="flex-1 bg-transparent text-xs text-[#EDEAE2] focus:outline-none"
               />
               <button
                 type="button"
@@ -1151,7 +1503,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                   setTextInput('');
                 }}
                 disabled={!textInput.trim()}
-                className="p-1.5 text-emerald-400 hover:text-emerald-300 disabled:text-zinc-600 cursor-pointer"
+                className="p-1.5 text-[#5CC8CF] hover:text-[#EDEAE2] disabled:text-[#7D7A70] cursor-pointer"
               >
                 <Send className="w-4 h-4" />
               </button>
@@ -1160,83 +1512,20 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
         </div>
       )}
 
-      {/* STATE 2: CALL ENDED SUMMARY SCREEN */}
-      {callStatus === 'ended' && (
-        <div className="bg-zinc-950 border border-zinc-800 rounded-3xl p-6 sm:p-8 shadow-xl text-center space-y-5">
-          <div className="w-16 h-16 rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 mx-auto">
-            <CheckCircle2 className="w-8 h-8" />
-          </div>
-          <div>
-            <h3 className="text-xl font-bold text-white">
-              {lang === 'uz' ? 'Qo\'ng\'iroq yakunlandi' : 'Звонок завершен'}
-            </h3>
-            <p className="text-xs text-zinc-400 mt-1">
-              {lang === 'uz'
-                ? `Davomiyligi: ${formatTime(callDuration)} • Mavzu: "${callTopic}"`
-                : `Длительность: ${formatTime(callDuration)} • Тема: "${callTopic}"`}
-            </p>
-          </div>
 
-          {/* Transcripts List */}
-          {transcriptLines.length > 0 && (
-            <div className="max-h-64 overflow-y-auto text-left space-y-2 bg-zinc-900/60 p-4 rounded-2xl border border-zinc-800/80">
-              {transcriptLines.map((line) => (
-                <div key={line.id} className="text-xs">
-                  <span className="font-semibold text-zinc-400 mr-1.5">
-                    [{line.timestamp}] {line.sender === 'user' ? 'Siz:' : 'Shohrux:'}
-                  </span>
-                  <span className={line.sender === 'user' ? 'text-zinc-200' : 'text-emerald-300'}>
-                    {line.text}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
-            <button
-              type="button"
-              onClick={handleStartCall}
-              className="px-6 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-600/30 cursor-pointer"
-            >
-              <RotateCcw className="w-4 h-4" />
-              <span>{lang === 'uz' ? 'Qaytadan Qo\'ng\'iroq Qilish' : 'Позвонить снова'}</span>
-            </button>
-
-            {transcriptLines.length > 0 && (
-              <button
-                type="button"
-                onClick={downloadTranscript}
-                className="px-5 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 rounded-xl text-xs font-semibold flex items-center gap-2 cursor-pointer"
-              >
-                <Download className="w-4 h-4 text-emerald-400" />
-                <span>{lang === 'uz' ? 'Transkriptni Yuklab Olish' : 'Скачать транскрипт'}</span>
-              </button>
-            )}
-
-            <button
-              type="button"
-              onClick={() => setCallStatus('idle')}
-              className="px-4 py-2.5 text-zinc-400 hover:text-white text-xs font-medium cursor-pointer"
-            >
-              {lang === 'uz' ? 'Sozlamalarga qaytish' : 'К настройкам'}
-            </button>
-          </div>
-        </div>
-      )}
 
       {/* STATE 3: PRE-CALL CONFIGURATION & DIAL SCREEN (IDLE) */}
       {callStatus === 'idle' && (
         <>
           {activeTabSubView === 'prices' && (
-            <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-6 space-y-4">
-              <div className="flex items-center justify-between">
+            <div className="bg-white border border-[rgba(22,21,17,0.14)] rounded-[22px] p-6 sm:p-7 space-y-5 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <h3 className="text-base font-bold text-white flex items-center gap-2">
-                    <TrendingUp className="w-5 h-5 text-emerald-400" />
-                    <span>{lang === 'uz' ? 'Toshkent Ko\'chmas Mulki Narxlar Radari (2025-2026)' : 'Радар Цен на Недвижимость Ташкента'}</span>
+                  <h3 className="font-serif text-xl sm:text-2xl text-[#161511] flex items-center gap-2">
+                    <TrendingUp className="w-5 h-5 text-[#0E7C86]" />
+                    <span>{lang === 'uz' ? <>Toshkent Ko'chmas Mulki <em className="italic text-[#0E7C86]">Narxlar Radari</em></> : <>Радар Цен на <em className="italic text-[#0E7C86]">Недвижимость Ташкента</em></>}</span>
                   </h3>
-                  <p className="text-xs text-zinc-400 mt-0.5">
+                  <p className="text-xs text-[#5D594E] mt-1">
                     {lang === 'uz'
                       ? 'AI Rieltor ushbu narxlar va bozor realligidan kelib chiqib aniq maslahat beradi.'
                       : 'AI Риелтор опирается на актуальные рыночные цены за м² и ставки аренды.'}
@@ -1245,7 +1534,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                 <button
                   type="button"
                   onClick={() => setActiveTabSubView('agent')}
-                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold cursor-pointer"
+                  className="btn-pill btn-solid text-xs py-2 px-4 cursor-pointer"
                 >
                   📞 Qo'ng'iroqqa o'tish
                 </button>
@@ -1253,16 +1542,16 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                 {tashkentDistricts.map((d) => (
-                  <div key={d.name} className="p-4 rounded-xl bg-zinc-900/70 border border-zinc-800 space-y-2">
+                  <div key={d.name} className="p-4 rounded-xl bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.1)] space-y-2">
                     <div className="flex items-center justify-between">
-                      <span className="font-bold text-sm text-white">{d.name}</span>
-                      <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 text-[11px] font-mono font-bold border border-emerald-500/30">
+                      <span className="font-bold text-sm text-[#161511]">{d.name}</span>
+                      <span className="px-2.5 py-0.5 rounded-full bg-[rgba(14,124,134,0.1)] text-[#0E7C86] text-[11px] font-mono font-bold border border-[#0E7C86]/30">
                         {d.price}
                       </span>
                     </div>
-                    <p className="text-[11px] text-zinc-400">{d.desc}</p>
-                    <div className="text-[10px] text-purple-300 font-medium">
-                      🔑 Ijara daromadi: <span className="text-white font-mono font-bold">{d.rent}/oy</span>
+                    <p className="text-[11px] text-[#5D594E] leading-relaxed">{d.desc}</p>
+                    <div className="text-[11px] text-[#0A5A62] font-medium pt-1 border-t border-[rgba(22,21,17,0.06)]">
+                      🔑 Ijara daromadi: <span className="text-[#161511] font-mono font-bold">{d.rent}/oy</span>
                     </div>
                   </div>
                 ))}
@@ -1271,36 +1560,66 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
           )}
 
           {activeTabSubView === 'lead' && (
-            <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-6 space-y-5">
-              <div className="flex items-center justify-between">
+            <div className="bg-white border border-[rgba(22,21,17,0.14)] rounded-[22px] p-6 sm:p-7 space-y-5 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <h3 className="text-base font-bold text-white flex items-center gap-2">
-                    <Key className="w-5 h-5 text-amber-400" />
-                    <span>{lang === 'uz' ? 'Rieltor Lead-Kartasi (Buyurtma Shakli)' : 'Карточка Заявки Клиента (Lead)'}</span>
+                  <h3 className="font-serif text-xl sm:text-2xl text-[#161511] flex items-center gap-2">
+                    <Key className="w-5 h-5 text-[#C98A12]" />
+                    <span>{lang === 'uz' ? <>LPMAMA Metodologiyasi & <em className="italic text-[#0E7C86]">Lead-Kartasi</em></> : <>Лид-Карта по Методологии <em className="italic text-[#0E7C86]">LPMAMA</em></>}</span>
                   </h3>
-                  <p className="text-xs text-zinc-400 mt-0.5">
+                  <p className="text-xs text-[#5D594E] mt-1">
                     {lang === 'uz'
-                      ? 'AI bilan gaplashgach yoki oldindan parametrlarni belgilab, Telegramga yuborish uchun nusxa oling.'
-                      : 'Заполните параметры для риелтора или скопируйте сформированную заявку в Telegram.'}
+                      ? 'AI-qo\'ng\'iroq paytida avtomatik to\'ldiriladi yoki parametrlarni qo\'lda moslashtiring.'
+                      : 'Автоматически заполняется во время звонка или настраивается вручную.'}
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleCopyLead}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-                >
-                  {copiedLead ? <Check className="w-4 h-4 text-white" /> : <Copy className="w-4 h-4" />}
-                  <span>{copiedLead ? 'Nusxalandi!' : 'Telegramga Nusxalash'}</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleCopyLead}
+                    className="btn-pill btn-solid text-xs py-2 px-4 flex items-center gap-1.5"
+                  >
+                    {copiedLead ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4 text-[#5CC8CF]" />}
+                    <span>{copiedLead ? 'Nusxalandi!' : 'Telegramga Nusxalash'}</span>
+                  </button>
+                </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              {/* LPMAMA 6-Pillar Checklist */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+                {[
+                  { tag: 'L', name: 'Location', desc: reLeadCard.district || 'Belgilanmagan', ok: !!reLeadCard.district },
+                  { tag: 'P', name: 'Price', desc: reLeadCard.budgetRange || 'Aniqlanmagan', ok: !!reLeadCard.budgetRange },
+                  { tag: 'M', name: 'Motivation', desc: reLeadCard.clientIntent ? reLeadCard.clientIntent.toUpperCase() : 'Noma\'lum', ok: !!reLeadCard.clientIntent },
+                  { tag: 'A', name: 'Agent', desc: 'Eksklyuziv Shohrux', ok: true },
+                  { tag: 'M', name: 'Mortgage', desc: reLeadCard.paymentMethod || 'Naqd/Ipoteka', ok: !!reLeadCard.paymentMethod },
+                  { tag: 'A', name: 'Appointment', desc: reLeadCard.nextStep || 'Ko\'rik tayinlash', ok: !!reLeadCard.nextStep },
+                ].map((item, idx) => (
+                  <div key={idx} className="p-3 bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.1)] rounded-xl space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="w-5 h-5 rounded-full bg-[rgba(14,124,134,0.1)] text-[#0E7C86] text-xs font-mono font-bold flex items-center justify-center">
+                        {item.tag}
+                      </span>
+                      {item.ok ? (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-[#0E7C86]" />
+                      ) : (
+                        <BadgeAlert className="w-3.5 h-3.5 text-[#C98A12]" />
+                      )}
+                    </div>
+                    <p className="text-[10px] font-mono text-[#5D594E] uppercase font-bold">{item.name}</p>
+                    <p className="text-xs text-[#161511] font-semibold truncate">{item.desc}</p>
+                  </div>
+                ))}
+              </div>
+
+              {/* Form Controls */}
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-2">
                 <div>
-                  <label className="text-[11px] font-semibold text-zinc-400 block mb-1">Maqsad:</label>
+                  <label className="text-[11px] font-mono uppercase tracking-wider text-[#5D594E] block mb-1">Maqsad (Intent):</label>
                   <select
                     value={reLeadCard.clientIntent}
                     onChange={(e) => setReLeadCard({ ...reLeadCard, clientIntent: e.target.value as any })}
-                    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white"
+                    className="w-full bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-2 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86]"
                   >
                     <option value="buy">Sotib olish (Kuplya)</option>
                     <option value="rent">Ijara (Arenda)</option>
@@ -1310,11 +1629,11 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                 </div>
 
                 <div>
-                  <label className="text-[11px] font-semibold text-zinc-400 block mb-1">Tuman:</label>
+                  <label className="text-[11px] font-mono uppercase tracking-wider text-[#5D594E] block mb-1">Tuman (Location):</label>
                   <select
                     value={reLeadCard.district}
                     onChange={(e) => setReLeadCard({ ...reLeadCard, district: e.target.value })}
-                    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white"
+                    className="w-full bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-2 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86]"
                   >
                     {tashkentDistricts.map((d) => (
                       <option key={d.name} value={d.name}>{d.name}</option>
@@ -1323,35 +1642,376 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                 </div>
 
                 <div>
-                  <label className="text-[11px] font-semibold text-zinc-400 block mb-1">Byudjet:</label>
+                  <label className="text-[11px] font-mono uppercase tracking-wider text-[#5D594E] block mb-1">Byudjet (Price):</label>
                   <input
                     type="text"
                     value={reLeadCard.budgetRange}
                     onChange={(e) => setReLeadCard({ ...reLeadCard, budgetRange: e.target.value })}
-                    placeholder="$40,000 - $70,000"
-                    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white"
+                    placeholder="$50,000 - $80,000"
+                    className="w-full bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-2 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86]"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-mono uppercase tracking-wider text-[#5D594E] block mb-1">To'lov usuli (Payment):</label>
+                  <select
+                    value={reLeadCard.paymentMethod || 'cash'}
+                    onChange={(e) => setReLeadCard({ ...reLeadCard, paymentMethod: e.target.value as any })}
+                    className="w-full bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-2 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86]"
+                  >
+                    <option value="cash">100% Naqd to'lov</option>
+                    <option value="mortgage">Bank ipotekasi (17-18%)</option>
+                    <option value="installments">0% Bo'lib to'lash (Rassrochka)</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Temperature & Urgency */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] font-mono uppercase tracking-wider text-[#5D594E] block mb-1">Mijoz Harorati (Temperature):</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {(['hot', 'warm', 'cold'] as const).map((temp) => (
+                      <button
+                        key={temp}
+                        type="button"
+                        onClick={() => setReLeadCard({ ...reLeadCard, leadTemperature: temp })}
+                        className={`py-2 px-3 rounded-full border text-xs font-bold capitalize transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                          reLeadCard.leadTemperature === temp
+                            ? temp === 'hot'
+                              ? 'bg-[rgba(196,85,45,0.12)] border-[#C4552D] text-[#C4552D]'
+                              : temp === 'warm'
+                              ? 'bg-[rgba(201,138,18,0.12)] border-[#C98A12] text-[#C98A12]'
+                              : 'bg-[rgba(14,124,134,0.12)] border-[#0E7C86] text-[#0E7C86]'
+                            : 'bg-white border-[rgba(22,21,17,0.14)] text-[#5D594E] hover:border-[#161511]'
+                        }`}
+                      >
+                        <Flame className="w-3.5 h-3.5" />
+                        <span>{temp}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-mono uppercase tracking-wider text-[#5D594E] block mb-1">Keyingi Qadam (Next Action):</label>
+                  <input
+                    type="text"
+                    value={reLeadCard.nextStep || 'Ertaga soat 15:00 da ob\'ekt ko\'rigi'}
+                    onChange={(e) => setReLeadCard({ ...reLeadCard, nextStep: e.target.value })}
+                    className="w-full bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-2 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86]"
                   />
                 </div>
               </div>
 
-              <div className="p-4 bg-zinc-900/60 rounded-xl border border-zinc-800 font-mono text-xs text-zinc-300 space-y-1">
-                <p className="text-emerald-400 font-bold">📋 Tayyor Telegram / CRM matni:</p>
-                <p>• Maqsad: {reLeadCard.clientIntent.toUpperCase()}</p>
-                <p>• Tuman: {reLeadCard.district}</p>
-                <p>• Byudjet: {reLeadCard.budgetRange}</p>
-                <p>• Xonalar: {reLeadCard.roomsCount} • Turi: {reLeadCard.propertyType}</p>
+              {/* Formatted Lead Text Preview */}
+              <div className="p-4 bg-[#F4F1EA]/80 rounded-xl border border-[rgba(22,21,17,0.14)] font-mono text-xs text-[#161511] space-y-1.5 shadow-2xs">
+                <div className="flex items-center justify-between text-[#0E7C86] font-bold">
+                  <span>📋 Telegram & CRM Tayyor Shakli:</span>
+                  <span className="text-[10px] text-[#5D594E] font-mono">1 Click Copy</span>
+                </div>
+                <p>• <b>Harorat:</b> {reLeadCard.leadTemperature ? reLeadCard.leadTemperature.toUpperCase() : 'WARM'} LEAD 🔥</p>
+                <p>• <b>Maqsad:</b> {reLeadCard.clientIntent.toUpperCase()}</p>
+                <p>• <b>Tuman:</b> {reLeadCard.district}</p>
+                <p>• <b>Byudjet:</b> {reLeadCard.budgetRange}</p>
+                <p>• <b>Xonalar:</b> {reLeadCard.roomsCount} • Mulk turi: {reLeadCard.propertyType}</p>
+                <p>• <b>To'lov:</b> {reLeadCard.paymentMethod === 'mortgage' ? 'Ipoteka' : reLeadCard.paymentMethod === 'installments' ? 'Rassrochka 0%' : 'Naqd'}</p>
+                <p>• <b>Keyingi Qadam:</b> {reLeadCard.nextStep || 'Ko\'rik va shartnoma'}</p>
+              </div>
+            </div>
+          )}
+
+          {activeTabSubView === 'summary' && (
+            <div className="bg-white border border-[rgba(22,21,17,0.14)] rounded-[22px] p-6 sm:p-7 space-y-6 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[rgba(22,21,17,0.08)] pb-4">
+                <div>
+                  <h3 className="font-serif text-xl sm:text-2xl text-[#161511] flex items-center gap-2">
+                    <FileText className="w-5 h-5 text-[#0E7C86]" />
+                    <span>{lang === 'uz' ? <>AI Rieltor <em className="italic text-[#0E7C86]">Qo'ng'iroq Dosyesi</em> & Tavsiya Qilingan Mulklar</> : <>CRM Досье Звонка и <em className="italic text-[#0E7C86]">Рекомендованные Объекты</em></>}</span>
+                  </h3>
+                  <p className="text-xs text-[#5D594E] mt-1">
+                    {lang === 'uz'
+                      ? 'Suhbat tahlili, BANT reytingi va Toshkent bazasidan mos 3 ta uy'
+                      : 'Анализ переговоров, оценка BANT и 3 подобранных объекта по параметрам клиента.'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleGenerateSummary}
+                  disabled={isGeneratingSummary}
+                  className="btn-pill btn-solid text-xs py-2 px-4 flex items-center gap-2 disabled:opacity-50"
+                >
+                  <Sparkles className="w-4 h-4 text-[#5CC8CF]" />
+                  <span>{isGeneratingSummary ? 'Tahlil qilinmoqda...' : 'Dosyeni Qayta Generatsiya Qilish'}</span>
+                </button>
+              </div>
+
+              {/* Temperature & Summary Banner */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="p-4 rounded-xl bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.1)] space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-mono uppercase tracking-wider text-[#5D594E] font-bold">Mijoz Harorati:</span>
+                    <span className={`px-2.5 py-0.5 rounded-full text-xs font-mono font-bold uppercase flex items-center gap-1 border ${
+                      reLeadCard.leadTemperature === 'hot'
+                        ? 'bg-[rgba(196,85,45,0.1)] text-[#C4552D] border-[#C4552D]/30'
+                        : reLeadCard.leadTemperature === 'warm'
+                        ? 'bg-[rgba(201,138,18,0.1)] text-[#C98A12] border-[#C98A12]/30'
+                        : 'bg-[rgba(14,124,134,0.1)] text-[#0E7C86] border-[#0E7C86]/30'
+                    }`}>
+                      <Flame className="w-3.5 h-3.5" />
+                      {reLeadCard.leadTemperature || 'WARM'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-[#5D594E] leading-relaxed">
+                    {crmSummaryData?.temperatureReason || 'Mijoz aniq parametrlar bo\'yicha qiziqish bildirdi.'}
+                  </p>
+                </div>
+
+                <div className="md:col-span-2 p-4 rounded-xl bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.1)] space-y-1.5">
+                  <span className="text-xs text-[#0E7C86] font-mono uppercase font-bold tracking-wider">Suhbat Mazmuni (Summary):</span>
+                  <p className="text-xs text-[#161511] leading-relaxed">
+                    {crmSummaryData?.callSummary || 'AI agent bilan Toshkent ko\'chmas mulki bo\'yicha telefon orqali samarali dastlabki maslahatlashuv o\'tkazildi.'}
+                  </p>
+                </div>
+              </div>
+
+              {/* BANT Qualification Cards */}
+              <div className="space-y-2">
+                <h4 className="text-xs font-mono uppercase tracking-wider text-[#5D594E] font-bold flex items-center gap-1.5">
+                  <CheckSquare className="w-4 h-4 text-[#0E7C86]" />
+                  <span>BANT Kwalifikatsiya Tahlili:</span>
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  <div className="p-3.5 rounded-xl bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.1)]">
+                    <span className="text-[10px] text-[#0E7C86] font-bold uppercase font-mono">B — Budget</span>
+                    <p className="text-xs text-[#161511] font-semibold mt-1">
+                      {crmSummaryData?.qualificationBANT?.budget || reLeadCard.budgetRange || '$50,000 - $80,000'}
+                    </p>
+                  </div>
+                  <div className="p-3.5 rounded-xl bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.1)]">
+                    <span className="text-[10px] text-[#0E7C86] font-bold uppercase font-mono">A — Authority</span>
+                    <p className="text-xs text-[#161511] font-semibold mt-1">
+                      {crmSummaryData?.qualificationBANT?.authority || 'Asosiy xaridor (oila boshlig\'i)'}
+                    </p>
+                  </div>
+                  <div className="p-3.5 rounded-xl bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.1)]">
+                    <span className="text-[10px] text-[#C98A12] font-bold uppercase font-mono">N — Need</span>
+                    <p className="text-xs text-[#161511] font-semibold mt-1">
+                      {crmSummaryData?.qualificationBANT?.need || `${reLeadCard.district} tumanida ${reLeadCard.roomsCount}`}
+                    </p>
+                  </div>
+                  <div className="p-3.5 rounded-xl bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.1)]">
+                    <span className="text-[10px] text-[#C98A12] font-bold uppercase font-mono">T — Timeline</span>
+                    <p className="text-xs text-[#161511] font-semibold mt-1">
+                      {crmSummaryData?.qualificationBANT?.timeline || 'Shu oy ichida ko\'rish va qaror qilish'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Matched Properties Catalog Simulation */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-mono uppercase tracking-wider text-[#5D594E] font-bold flex items-center gap-1.5">
+                    <Home className="w-4 h-4 text-[#0E7C86]" />
+                    <span>Mijoz Uchun Tanlangan 3 Ta Tavsiya:</span>
+                  </h4>
+                  <span className="text-[11px] font-mono text-[#0E7C86] font-medium">Bozor realligi bilan to'liq sinxron</span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  {(crmSummaryData?.matchedProperties || [
+                    {
+                      id: 'prop-1',
+                      title: 'Modern City Mirabad Residence',
+                      district: 'Mirobod',
+                      price: '$68,000',
+                      area: '62 m²',
+                      rooms: '2 xonali',
+                      roi: '11.5% yillik arenda',
+                      badge: 'Top Tavsiya',
+                      developer: 'Modern Stroy',
+                    },
+                    {
+                      id: 'prop-2',
+                      title: 'Chilanzar Green Park',
+                      district: 'Chilonzor',
+                      price: '$52,000',
+                      area: '54 m²',
+                      rooms: '2 xonali',
+                      roi: '9.8% yillik arenda',
+                      badge: 'Arzon & Qulay',
+                      developer: 'Golden House',
+                    },
+                    {
+                      id: 'prop-3',
+                      title: 'Yunusabad Metro Plaza',
+                      district: 'Yunusobod',
+                      price: '$74,000',
+                      area: '76 m²',
+                      rooms: '3 xonali',
+                      roi: '10.2% yillik arenda',
+                      badge: 'Keng Maydon',
+                      developer: 'NRG Uzbekistan',
+                    },
+                  ]).map((prop: any) => (
+                    <div key={prop.id} className="p-4 rounded-xl bg-white border border-[rgba(22,21,17,0.14)] space-y-2 hover:border-[#0E7C86] transition-all shadow-2xs">
+                      <div className="flex items-center justify-between">
+                        <span className="px-2.5 py-0.5 rounded-full bg-[rgba(14,124,134,0.1)] text-[#0E7C86] text-[10px] font-mono font-bold border border-[#0E7C86]/30">
+                          {prop.badge || 'Mos Variant'}
+                        </span>
+                        <span className="text-xs font-mono font-bold text-[#161511]">{prop.price}</span>
+                      </div>
+                      <h5 className="font-bold text-sm text-[#161511]">{prop.title}</h5>
+                      <div className="flex items-center gap-2 text-[11px] text-[#5D594E]">
+                        <span>📍 {prop.district}</span>
+                        <span>•</span>
+                        <span>📐 {prop.area}</span>
+                        <span>•</span>
+                        <span>🚪 {prop.rooms}</span>
+                      </div>
+                      <div className="pt-2 border-t border-[rgba(22,21,17,0.06)] flex items-center justify-between text-[11px]">
+                        <span className="text-zinc-500">Quruvchi: {prop.developer || 'Zastroyshik'}</span>
+                        <span className="text-[#0E7C86] font-bold font-mono">📈 {prop.roi}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTabSubView === 'playbook' && (
+            <div className="bg-white border border-[rgba(22,21,17,0.14)] rounded-[22px] p-6 sm:p-7 space-y-6 shadow-sm">
+              <div className="flex items-center justify-between border-b border-[rgba(22,21,17,0.08)] pb-4">
+                <div>
+                  <h3 className="font-serif text-xl sm:text-2xl text-[#161511] flex items-center gap-2">
+                    <BookOpen className="w-5 h-5 text-[#0E7C86]" />
+                    <span>{lang === 'uz' ? <>Rieltor Skriptlari & <em className="italic text-[#0E7C86]">AI Agent Qo'llanmasi</em></> : <>Скрипты и Речевые Модули <em className="italic text-[#0E7C86]">Риелтора</em></>}</span>
+                  </h3>
+                  <p className="text-xs text-[#5D594E] mt-1">
+                    {lang === 'uz'
+                      ? 'AI qanday gapiradi, qanday cheklovlar o\'rnatilgan va e\'tirozlarni qanday bartaraf etadi.'
+                      : 'Речевые модули, отработка возражений, защита от оффтопа и регламент дожима на просмотр.'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveTabSubView('agent')}
+                  className="btn-pill btn-solid text-xs py-1.5 px-3.5 cursor-pointer"
+                >
+                  📞 Qo'ng'iroqqa o'tish
+                </button>
+              </div>
+
+              {/* 5 Playbook Chapters */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* 1. First 10 Seconds */}
+                <div className="p-4 rounded-xl bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.1)] space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-[rgba(14,124,134,0.1)] text-[#0E7C86] text-xs font-mono font-bold flex items-center justify-center">1</span>
+                    <h4 className="text-sm font-bold text-[#161511]">Dastlabki 10 Soniya (Kirish & Ishonch)</h4>
+                  </div>
+                  <p className="text-xs text-[#5D594E] leading-relaxed">
+                    AI hech qachon "Men sun'iy intellektman" deb vaqt yo'qotmaydi. Birinchi soniyadayoq samimiy o'zbekcha salom beradi: <i>"Alo, assalomu alaykum! Xush ko'rdik, eshitaman sizni?"</i> — va darhol mijozga gapirish imkonini beradi.
+                  </p>
+                </div>
+
+                {/* 2. LPMAMA Qualification */}
+                <div className="p-4 rounded-xl bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.1)] space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-[rgba(14,124,134,0.1)] text-[#0E7C86] text-xs font-mono font-bold flex items-center justify-center">2</span>
+                    <h4 className="text-sm font-bold text-[#161511]">LPMAMA Kwalifikatsiya Zanjiri</h4>
+                  </div>
+                  <p className="text-xs text-[#5D594E] leading-relaxed">
+                    Har bir replika oxirida tabiiy 1 ta savol beriladi: <b>L</b>ocation (tuman) → <b>P</b>rice (byudjet) → <b>M</b>otivation (yashashgami, investitsiyagami) → <b>A</b>gent → <b>M</b>ortgage (naqdmi, ipotekami) → <b>A</b>ppointment (ko'rish vaqti).
+                  </p>
+                </div>
+
+                {/* 3. Objection Handling */}
+                <div className="p-4 rounded-xl bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.1)] space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-[rgba(201,138,18,0.1)] text-[#C98A12] text-xs font-mono font-bold flex items-center justify-center">3</span>
+                    <h4 className="text-sm font-bold text-[#161511]">E'tirozlarni Bartaraf Etish (Objections)</h4>
+                  </div>
+                  <p className="text-xs text-[#5D594E] leading-relaxed">
+                    • <i>"Juda qimmat":</i> Alternativ tuman yoki 0% muddatli to'lovni taklif qiladi.<br />
+                    • <i>"Narxlar tushishini kutyapman":</i> Inflyatsiya va ijara daromadini (10-12%) tushuntiradi.<br />
+                    • <i>"O'zim rieltorsiz olaman":</i> Xaridor uchun komissiya 0% ekanini va kadastr xavfsizligini ta'kidlaydi.
+                  </p>
+                </div>
+
+                {/* 4. Strict Guardrail & Anti-Hallucination */}
+                <div className="p-4 rounded-xl bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.1)] space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-[rgba(196,85,45,0.1)] text-[#C4552D] text-xs font-mono font-bold flex items-center justify-center">4</span>
+                    <h4 className="text-sm font-bold text-[#161511]">Cheklovlar & Halol Aniqlashtirish</h4>
+                  </div>
+                  <p className="text-xs text-[#5D594E] leading-relaxed">
+                    • <b>Strict Domain:</b> Siyosat, pazandachilik yoki ob-havoga chalg'imaydi, 1 jumlada ko'chmas mulkka qaytaradi.<br />
+                    • <b>Anti-Hallucination:</b> Agar g'o'ldirash yoki shovqin bo'lsa, o'zidan narx to'qimaydi, ochiq qayta so'raydi.
+                  </p>
+                </div>
               </div>
             </div>
           )}
 
           {activeTabSubView === 'agent' && (
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <div className="space-y-8">
+              {/* Primary Visual Layer: Live Call Card (State 1: IDLE before call) */}
+              <LiveCallCard
+                callStatus={callStatus}
+                callDuration={callDuration}
+                agentSpeaking={agentSpeaking}
+                userSpeaking={userSpeaking}
+                currentSubtitle={currentSubtitle}
+                transcriptLines={transcriptLines}
+                callTopic={callTopic}
+                reLeadCard={reLeadCard}
+                onStartCall={handleStartCall}
+                onEndCall={handleEndCall}
+                onToggleMute={handleToggleMute}
+                isMuted={isMuted}
+                onResetCall={() => {
+                  setCallStatus('idle');
+                  setCallDuration(0);
+                }}
+                onGoToCRM={() => {
+                  setCallStatus('idle');
+                  setActiveTabSubView('summary');
+                  if (!crmSummaryData && conversationHistoryRef.current.length >= 2) {
+                    handleGenerateSummary();
+                  }
+                }}
+                onGoToLead={() => {
+                  setCallStatus('idle');
+                  setActiveTabSubView('lead');
+                }}
+                isAuthenticated={isAuthenticated}
+                lang={lang}
+                agentVoiceName={agentVoiceId === shokhrukhVoiceId ? 'SHOKHRUKH' : 'Aoede'}
+                onSendText={handleSendQuickPrompt}
+                micWarning={micWarning}
+              />
+
+              {/* 3D Voice Gallery row for Agent Voice Picker */}
+              <VoiceGallery3D
+                voices={voices}
+                selectedVoiceId={agentVoiceId}
+                onSelectVoice={(id) => setAgentVoiceId(id)}
+                lang={lang}
+                title={lang === 'uz' ? '3D Agent Ovozlar Galereyasi' : '3D Галерея Голосов Агента'}
+                subtitle={lang === 'uz' ? 'SHISHA SHARLARNI AYLANTRING VA AGENT OVOZINI TANLANG' : 'ВРАЩАЙТЕ СФЕРЫ ДЛЯ ВЫБОРА ГОЛОСА'}
+              />
+
+              {/* Persona & Voice Timbre Setup */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
               {/* Left Column: Persona & Setup (7 cols) */}
               <div className="lg:col-span-7 space-y-5">
                 {/* Step 1: Select Persona */}
-                <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-5 space-y-3">
-                  <label className="text-xs font-bold text-zinc-300 uppercase tracking-wider flex items-center gap-2">
-                    <Bot className="w-4 h-4 text-emerald-400" />
+                <div className="bg-white border border-[rgba(22,21,17,0.14)] rounded-[22px] p-6 space-y-3.5 shadow-sm">
+                  <label className="text-xs font-mono uppercase tracking-wider text-[#5D594E] font-bold flex items-center gap-2">
+                    <Bot className="w-4 h-4 text-[#0E7C86]" />
                     <span>{lang === 'uz' ? '1. Suhbatdosh Personasi (Rol)' : '1. Персонаж и Роль Агента'}</span>
                   </label>
 
@@ -1370,20 +2030,20 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                               setCallTopic('Toshkentda novostroyka, ikkilamchi bozor, ijara va narxlar');
                             }
                           }}
-                          className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer relative ${
+                          className={`p-4 rounded-xl border text-left transition-all cursor-pointer relative ${
                             isSel
-                              ? 'bg-emerald-950/40 border-emerald-500 shadow-md shadow-emerald-500/10'
-                              : 'bg-zinc-900/60 border-zinc-800 hover:border-zinc-700'
+                              ? 'bg-[rgba(14,124,134,0.06)] border-[#0E7C86] shadow-2xs'
+                              : 'bg-[#F4F1EA]/60 border-[rgba(22,21,17,0.1)] hover:border-[#161511]'
                           }`}
                         >
                           <div className="flex items-center justify-between mb-1.5">
-                            <span className="text-xs font-bold text-white flex items-center gap-1.5">
-                              <Icon className={`w-3.5 h-3.5 ${isSel ? 'text-emerald-400' : 'text-zinc-400'}`} />
+                            <span className="text-xs font-bold text-[#161511] flex items-center gap-1.5">
+                              <Icon className={`w-3.5 h-3.5 ${isSel ? 'text-[#0E7C86]' : 'text-[#5D594E]'}`} />
                               {conf.titleUz.split('(')[0]}
                             </span>
-                            {isSel && <span className="w-2 h-2 rounded-full bg-emerald-400" />}
+                            {isSel && <span className="w-2 h-2 rounded-full bg-[#0E7C86]" />}
                           </div>
-                          <p className="text-[11px] text-zinc-400 line-clamp-2 leading-relaxed">
+                          <p className="text-[11px] text-[#5D594E] line-clamp-2 leading-relaxed">
                             {lang === 'uz' ? conf.descUz : conf.descRu}
                           </p>
                         </button>
@@ -1393,9 +2053,9 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                 </div>
 
                 {/* Step 2: Topic & Context */}
-                <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-5 space-y-3">
-                  <label className="text-xs font-bold text-zinc-300 uppercase tracking-wider flex items-center gap-2">
-                    <Radio className="w-4 h-4 text-purple-400" />
+                <div className="bg-white border border-[rgba(22,21,17,0.14)] rounded-[22px] p-6 space-y-3.5 shadow-sm">
+                  <label className="text-xs font-mono uppercase tracking-wider text-[#5D594E] font-bold flex items-center gap-2">
+                    <Radio className="w-4 h-4 text-[#0E7C86]" />
                     <span>{lang === 'uz' ? '2. Qo\'ng\'iroq Mavzusi yoki Savol' : '2. Тема Звонка или Вопрос'}</span>
                   </label>
 
@@ -1404,7 +2064,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                     value={callTopic}
                     onChange={(e) => setCallTopic(e.target.value)}
                     placeholder="Mavzuni kiriting..."
-                    className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-4 py-2.5 text-xs sm:text-sm text-white focus:outline-none focus:border-emerald-500 transition-colors"
+                    className="w-full bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.14)] rounded-xl px-4 py-2.5 text-xs sm:text-sm text-[#161511] focus:outline-none focus:border-[#0E7C86] transition-colors"
                   />
 
                   {/* Quick Topic Chips */}
@@ -1421,7 +2081,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                           key={chip}
                           type="button"
                           onClick={() => setCallTopic(chip)}
-                          className="px-2.5 py-1 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[11px] text-emerald-400 hover:text-emerald-300 rounded-lg transition-colors cursor-pointer"
+                          className="px-3 py-1 bg-white hover:bg-[#ECE7DB] border border-[rgba(22,21,17,0.14)] text-[11px] text-[#161511] rounded-full transition-all cursor-pointer font-medium"
                         >
                           + {chip}
                         </button>
@@ -1437,7 +2097,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                           key={chip}
                           type="button"
                           onClick={() => setCallTopic(chip)}
-                          className="px-2.5 py-1 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[11px] text-zinc-400 hover:text-zinc-200 rounded-lg transition-colors cursor-pointer"
+                          className="px-3 py-1 bg-white hover:bg-[#ECE7DB] border border-[rgba(22,21,17,0.14)] text-[11px] text-[#5D594E] hover:text-[#161511] rounded-full transition-all cursor-pointer font-medium"
                         >
                           + {chip}
                         </button>
@@ -1450,13 +2110,13 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
               {/* Right Column: Voice Selection & Call Trigger (5 cols) */}
               <div className="lg:col-span-5 space-y-5">
                 {/* Step 3: Agent Voice Selection */}
-                <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-5 space-y-3">
+                <div className="bg-white border border-[rgba(22,21,17,0.14)] rounded-[22px] p-6 space-y-3.5 shadow-sm">
                   <div className="flex items-center justify-between">
-                    <label className="text-xs font-bold text-zinc-300 uppercase tracking-wider flex items-center gap-2">
-                      <Volume2 className="w-4 h-4 text-cyan-400" />
+                    <label className="text-xs font-mono uppercase tracking-wider text-[#5D594E] font-bold flex items-center gap-2">
+                      <Volume2 className="w-4 h-4 text-[#0E7C86]" />
                       <span>{lang === 'uz' ? '3. Ovoz Tembrini Tanlang' : '3. Тембр Голоса'}</span>
                     </label>
-                    <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/30">
+                    <span className="text-[10px] text-[#0E7C86] font-mono font-bold bg-[rgba(14,124,134,0.1)] px-2.5 py-0.5 rounded-full border border-[#0E7C86]/30">
                       Tavsiya: Shohrux
                     </span>
                   </div>
@@ -1474,38 +2134,65 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                       { id: 'Puck', name: 'Puck', tag: '⚡ Dinamik & yosh broker', desc: 'Faol, tezkor, optimistik' },
                       { id: 'Kore', name: 'Kore', tag: '🌸 Muloyim maslahatchi', desc: 'Iliq, ishonchli ayol ovozi' },
                       { id: 'Fenrir', name: 'Fenrir', tag: '💪 Tajribali ekspert', desc: 'Kuchli, qat\'iy, aniq' },
-                    ].map((v) => (
-                      <button
-                        key={v.id}
-                        type="button"
-                        onClick={() => setAgentVoiceId(v.id)}
-                        className={`w-full p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
-                          agentVoiceId === v.id
-                            ? 'bg-emerald-950/50 border-emerald-500 text-emerald-200 shadow-md shadow-emerald-500/10'
-                            : 'bg-zinc-900/60 border-zinc-800 text-zinc-400 hover:border-zinc-700'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <p className="text-xs font-bold text-white">{v.name}</p>
-                          <span className="text-[10px] text-emerald-400 font-semibold">{v.tag}</span>
+                    ].map((v) => {
+                      const isVoicePlaying = previewingVoiceId === v.id;
+                      return (
+                        <div
+                          key={v.id}
+                          onClick={() => setAgentVoiceId(v.id)}
+                          className={`w-full p-3 rounded-xl border flex items-center justify-between gap-2 transition-all cursor-pointer ${
+                            agentVoiceId === v.id
+                              ? 'bg-[rgba(14,124,134,0.08)] border-[#0E7C86] text-[#161511] shadow-2xs'
+                              : 'bg-[#F4F1EA]/50 border-[rgba(22,21,17,0.1)] text-[#5D594E] hover:border-[#161511]'
+                          }`}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center justify-between gap-1">
+                              <p className="text-xs font-bold text-[#161511] truncate">{v.name}</p>
+                              <span className="text-[10px] font-mono text-[#0E7C86] font-semibold shrink-0">{v.tag}</span>
+                            </div>
+                            <p className="text-[10px] text-[#5D594E] mt-0.5 truncate">{v.desc}</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleVoicePreview(v.id);
+                            }}
+                            className={`w-7 h-7 rounded-full shrink-0 flex items-center justify-center transition-all cursor-pointer ${
+                              isVoicePlaying
+                                ? 'bg-[#0E7C86] text-white shadow-sm'
+                                : 'bg-white border border-[rgba(22,21,17,0.14)] text-[#161511] hover:bg-[#ECE7DB]'
+                            }`}
+                            title={
+                              isVoicePlaying
+                                ? (lang === 'uz' ? "To'xtatish" : 'Остановить')
+                                : (lang === 'uz' ? "Ovoz namunasini tinglash (0s kutish, tekin)" : 'Прослушать голос (встроено)')
+                            }
+                          >
+                            {isVoicePlaying ? (
+                              <Square className="w-3 h-3 fill-current" />
+                            ) : (
+                              <Play className="w-3 h-3 fill-current translate-x-0.5" />
+                            )}
+                          </button>
                         </div>
-                        <p className="text-[10px] text-zinc-400 mt-0.5">{v.desc}</p>
-                      </button>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
 
-                {/* Glowing Big Call Action Card */}
-                <div className="bg-gradient-to-br from-emerald-950/60 to-zinc-950 border-2 border-emerald-500/40 rounded-2xl p-6 text-center space-y-4 shadow-xl shadow-emerald-950/30">
-                  <div className="w-14 h-14 rounded-full bg-emerald-500/20 border border-emerald-400/50 flex items-center justify-center text-emerald-400 mx-auto shadow-[0_0_25px_rgba(16,185,129,0.3)]">
-                    <PhoneCall className="w-7 h-7 animate-pulse" />
+                {/* Big Call Action Card */}
+                <div className="bg-white border border-[rgba(22,21,17,0.14)] rounded-[22px] p-6 text-center space-y-4 shadow-sm">
+                  <div className="w-14 h-14 rounded-full bg-[rgba(14,124,134,0.1)] border border-[#0E7C86]/30 flex items-center justify-center text-[#0E7C86] mx-auto shadow-2xs">
+                    <PhoneCall className="w-7 h-7" />
                   </div>
 
                   <div>
-                    <h4 className="text-base font-bold text-white">
-                      {lang === 'uz' ? 'Shohrux bilan Jonli Muloqot' : 'Живой Разговор с Шохрухом'}
+                    <h4 className="font-serif text-lg font-normal text-[#161511]">
+                      {lang === 'uz' ? <>Shohrux bilan <em className="italic text-[#0E7C86]">Jonli Muloqot</em></> : <>Живой Разговор с <em className="italic text-[#0E7C86]">Шохрухом</em></>}
                     </h4>
-                    <p className="text-xs text-zinc-400 mt-1 max-w-xs mx-auto leading-relaxed">
+                    <p className="text-xs text-[#5D594E] mt-1 max-w-xs mx-auto leading-relaxed">
                       {lang === 'uz'
                         ? 'Tugmani bosing. Go\'shak ko\'tarilgach, Shohrux salom berib sizni tinglaydi. Erkin savol bering!'
                         : 'Нажмите кнопку. Когда Шохрух поднимет трубку и поздоровается, говорите свободно в микрофон!'}
@@ -1515,14 +2202,23 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                   <button
                     type="button"
                     onClick={handleStartCall}
-                    className="w-full py-4 bg-gradient-to-r from-emerald-500 via-teal-500 to-emerald-600 hover:from-emerald-400 hover:to-teal-500 text-white rounded-xl text-sm font-black flex items-center justify-center gap-2.5 shadow-xl shadow-emerald-500/40 hover:scale-[1.02] active:scale-[0.98] transition-all cursor-pointer tracking-wide uppercase"
+                    className="w-full btn-pill btn-solid py-3.5 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2.5"
                   >
-                    <PhoneCall className="w-5 h-5 fill-current" />
-                    <span>{lang === 'uz' ? '📞 Qo\'ng\'iroqni Boshlash (Jonli)' : '📞 Начать Звонок (Живой)'}</span>
+                    {!isAuthenticated ? (
+                      <>
+                        <Lock className="w-4 h-4 text-[#5CC8CF]" />
+                        <span>{lang === 'uz' ? '🔒 Ro\'yxatdan O\'tish & Qo\'ng\'iroq' : '🔒 Войти & Начать Звонок'}</span>
+                      </>
+                    ) : (
+                      <>
+                        <PhoneCall className="w-4 h-4 fill-current text-[#5CC8CF]" />
+                        <span>{lang === 'uz' ? '📞 Qo\'ng\'iroqni Boshlash (Jonli)' : '📞 Начать Звонок (Живой)'}</span>
+                      </>
+                    )}
                   </button>
 
-                  <div className="flex items-center justify-center gap-1.5 text-[11px] text-zinc-400">
-                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                  <div className="flex items-center justify-center gap-1.5 text-[11px] text-[#5D594E]">
+                    <ShieldCheck className="w-3.5 h-3.5 text-[#0E7C86]" />
                     <span>
                       {callEngine === 'shokhrukh_natural'
                         ? (lang === 'uz' ? 'Shohrux haqiqiy ovozi • 0% aksent' : 'Настоящий голос Шохруха • 0% акцента')
@@ -1532,7 +2228,8 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                 </div>
               </div>
             </div>
-          )}
+          </div>
+        )}
         </>
       )}
     </div>
