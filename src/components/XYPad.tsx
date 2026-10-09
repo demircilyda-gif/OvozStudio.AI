@@ -1,4 +1,5 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
+import { TIMBRE_PRESETS, getTimbrePresetByValue } from '../data/timbrePresets';
 
 interface XYPadProps {
   tempo: number; // 0.75 to 1.35
@@ -17,6 +18,7 @@ export const XYPad: React.FC<XYPadProps> = ({
 }) => {
   const padRef = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const activePreset = getTimbrePresetByValue(timbreValue);
 
   // Convert tempo (0.75 to 1.35) to percentage (0 to 100)
   // 0.75 -> 0%, 1.05 -> 50%, 1.35 -> 100%
@@ -148,6 +150,34 @@ export const XYPad: React.FC<XYPadProps> = ({
           {lang === 'uz' ? 'Standartga qaytarish (1.0x)' : 'Сброс (1.0x)'}
         </button>
         <span>{lang === 'uz' ? 'Tezkor' : 'Быстрый'}</span>
+      </div>
+
+      {/* Unified Deduplicated Timbre Presets */}
+      <div className="pt-1.5 space-y-1">
+        <div className="text-[10px] font-mono uppercase tracking-wider text-zinc-400 flex items-center justify-between">
+          <span>{lang === 'uz' ? 'Tembr andozalari:' : 'Предустановки тембра:'}</span>
+          <span className="text-[#FACC15] font-semibold">{lang === 'uz' ? activePreset.labelUz : activePreset.labelRu}</span>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+          {TIMBRE_PRESETS.map((p) => {
+            const isSelected = activePreset.id === p.id;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => onChangeTimbreValue(p.value)}
+                className={`px-2 py-1.5 rounded-lg text-center transition-all cursor-pointer border text-[11px] ${
+                  isSelected
+                    ? 'bg-[#FACC15] text-[#1E1E2C] font-bold border-[#FACC15] shadow-xs'
+                    : 'bg-[#1E1E2C]/70 text-zinc-300 border-zinc-700 hover:bg-[#1E1E2C] hover:text-white'
+                }`}
+                title={lang === 'uz' ? p.descUz : p.descRu}
+              >
+                <div className="truncate">{lang === 'uz' ? p.labelUz : p.labelRu}</div>
+              </button>
+            );
+          })}
+        </div>
       </div>
     </div>
   );

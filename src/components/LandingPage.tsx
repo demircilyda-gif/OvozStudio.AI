@@ -1,6 +1,25 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AppTab } from './Sidebar';
 import { connectAudioElement, getSharedAudioEnergy } from '../utils/audioReactive';
+import {
+  Sparkles,
+  Building2,
+  PhoneCall,
+  Video,
+  FileText,
+  Mic,
+  Fingerprint,
+  FileSearch,
+  ArrowRight,
+  ShieldCheck,
+  CheckCircle2,
+  Headphones,
+  BookOpen,
+  Megaphone,
+  Users,
+  Zap,
+  Play,
+} from 'lucide-react';
 
 interface LandingPageProps {
   onEnterApp: (tab?: AppTab, mode?: 'solo' | 'interview' | 'voiceover') => void;
@@ -341,73 +360,50 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             <i className="w-2.5 h-2.5 rounded-full bg-[#0E7C86] inline-block pulse-teal-dot" />
           </a>
 
-          <nav className="hidden md:flex items-center gap-7">
+          <nav className="hidden md:flex items-center gap-6">
             <a
               href="#mahsulotlar"
-              className="text-[#5D594E] hover:text-[#161511] text-[14.5px] font-medium transition-colors no-underline"
+              className="text-[#5D594E] hover:text-[#161511] text-[14px] font-medium transition-colors no-underline"
             >
-              {lang === 'uz' ? 'Mahsulotlar' : 'Продукты'}
+              {lang === 'uz' ? 'Imkoniyatlar' : 'Возможности'}
             </a>
             <button
               type="button"
+              onClick={() => onEnterApp('agent')}
+              className="text-[#5D594E] hover:text-[#161511] text-[14px] font-medium transition-colors cursor-pointer bg-transparent border-0"
+            >
+              {lang === 'uz' ? 'AI Qoʻngʻiroqlar' : 'AI-Звонки 24/7'}
+            </button>
+            <button
+              type="button"
               onClick={() => onEnterApp('studio')}
-              className="text-[#5D594E] hover:text-[#161511] text-[14.5px] font-medium transition-colors cursor-pointer bg-transparent border-0"
+              className="text-[#5D594E] hover:text-[#161511] text-[14px] font-medium transition-colors cursor-pointer bg-transparent border-0"
             >
               {lang === 'uz' ? 'Studiya' : 'Студия'}
             </button>
             <button
               type="button"
               onClick={() => onEnterApp('docs')}
-              className="text-[#5D594E] hover:text-[#161511] text-[14.5px] font-medium transition-colors cursor-pointer bg-transparent border-0"
+              className="text-[#5D594E] hover:text-[#161511] text-[14px] font-medium transition-colors cursor-pointer bg-transparent border-0"
             >
-              {lang === 'uz' ? 'Hujjatlar' : 'Документация'}
+              {lang === 'uz' ? 'API & Hujjatlar' : 'API и Документы'}
             </button>
             <button
               type="button"
               onClick={onOpenPricingModal}
-              className="text-[#5D594E] hover:text-[#161511] text-[14.5px] font-medium transition-colors cursor-pointer bg-transparent border-0"
+              className="text-[#5D594E] hover:text-[#161511] text-[14px] font-medium transition-colors cursor-pointer bg-transparent border-0"
             >
               {lang === 'uz' ? 'Tariflar' : 'Тарифы'}
             </button>
           </nav>
 
-          <div className="flex items-center gap-3">
-            {/* Language toggle pill */}
-            <div className="flex border border-[rgba(22,21,17,0.14)] rounded-full overflow-hidden text-[11px] font-mono">
-              <button
-                type="button"
-                onClick={() => setLang('uz')}
-                className={`px-2.5 py-1 transition-colors cursor-pointer ${
-                  lang === 'uz' ? 'bg-[#161511] text-[#F4F1EA]' : 'text-[#5D594E] hover:text-[#161511]'
-                }`}
-              >
-                UZ
-              </button>
-              <button
-                type="button"
-                onClick={() => setLang('ru')}
-                className={`px-2.5 py-1 transition-colors cursor-pointer ${
-                  lang === 'ru' ? 'bg-[#161511] text-[#F4F1EA]' : 'text-[#5D594E] hover:text-[#161511]'
-                }`}
-              >
-                RU
-              </button>
-            </div>
-
-            <button
-              type="button"
-              onClick={onOpenAuthModal}
-              className="hidden sm:inline-flex btn-pill btn-ghost text-xs px-4 py-2"
-            >
-              {lang === 'uz' ? 'Kirish' : 'Войти'}
-            </button>
-
+          <div className="flex items-center gap-2.5">
             <button
               type="button"
               onClick={() => onEnterApp('studio')}
-              className="btn-pill btn-solid text-xs px-4 py-2"
+              className="btn-pill btn-solid text-xs px-4 py-2 font-semibold"
             >
-              <span>{lang === 'uz' ? 'Podkast yaratish' : 'Создать подкаст'}</span>
+              <span>{lang === 'uz' ? 'Platformaga kirish' : 'Войти в студию'}</span>
             </button>
           </div>
         </div>
@@ -426,37 +422,81 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         <canvas ref={canvasRef} className="absolute inset-0 w-full h-full z-[1] cursor-crosshair" />
 
         {/* Hero Left Content */}
-        <div className="relative z-[2] max-w-[1280px] w-full mx-auto px-5 sm:px-8 py-14 flex flex-col justify-center pointer-events-none">
+        <div className="relative z-[2] max-w-[1280px] w-full mx-auto px-5 sm:px-8 py-12 sm:py-16 flex flex-col justify-center pointer-events-none">
           {/* REC Badge */}
-          <div className="inline-flex items-center gap-2.5 font-mono text-xs uppercase tracking-[0.14em] text-[#0A5A62] mb-6 pointer-events-auto">
+          <div className="inline-flex items-center gap-2.5 font-mono text-xs uppercase tracking-[0.14em] text-[#0A5A62] mb-5 pointer-events-auto">
             <i className="w-2 h-2 rounded-full bg-[#0E7C86] pulse-teal-dot" />
-            <span>REC · 24 kHz studio · Oʻzbek tili</span>
+            <span>REC · 24 kHz Studio · B2B &amp; Media Ekotizimi</span>
           </div>
 
           {/* Headline with H1 Line-Mask Reveal & Teal Italic Em */}
-          <h1 className="font-serif font-normal text-[clamp(2.7rem,6.2vw,5.5rem)] leading-[1.02] tracking-[-0.015em] max-w-[13ch] text-[#161511] select-none">
+          <h1 className="font-serif font-normal text-[clamp(2.5rem,5.8vw,5.2rem)] leading-[1.04] tracking-[-0.015em] max-w-[14ch] text-[#161511] select-none">
             <span className="block overflow-hidden pb-1 -mb-1">
               <span className="block transform translate-y-0 transition-transform duration-1000">
-                {lang === 'uz' ? 'Haqiqiy' : 'Вашим'}
+                {lang === 'uz' ? 'Neyron Ovoz,' : 'Нейронный Голос,'}
               </span>
             </span>
             <span className="block overflow-hidden pb-1 -mb-1">
               <span className="block transform translate-y-0 transition-transform duration-1000 delay-100">
-                {lang === 'uz' ? 'ovozingizda' : 'настоящим голосом'}
+                {lang === 'uz' ? 'Media Studiya va' : 'Медиа-Студия и'}
               </span>
             </span>
             <span className="block overflow-hidden pb-1 -mb-1">
               <span className="block transform translate-y-0 transition-transform duration-1000 delay-200">
-                <em>{lang === 'uz' ? 'oʻzbekcha' : 'подкасты'}</em> {lang === 'uz' ? 'podkast.' : 'на узбекском.'}
+                <em>{lang === 'uz' ? 'AI Agentlar.' : 'AI-Агенты 24/7.'}</em>
               </span>
             </span>
           </h1>
 
-          <p className="max-w-[46ch] text-[#5D594E] text-base sm:text-[17.5px] leading-relaxed mt-6">
+          <p className="max-w-[52ch] text-[#5D594E] text-base sm:text-[18px] leading-relaxed mt-6">
             {lang === 'uz'
-              ? 'Podkast, video dublyaj yoki jonli AI qoʻngʻiroq — hammasi sizning haqiqiy ovozingizda: nafas, kulgu va pauzalar bilan. Robot emas — jonli odamday. MP3/WAV, 24 kHz.'
-              : 'Подкасты, видеодубляж и живые AI-звонки — вашим клонированным голосом: с паузами, смехом и дыханием. Чистый узбекский язык студийного качества.'}
+              ? 'Faqat podkast emas: Reels dublyaj, 18+ tayyor neyron diktorlar, shaxsiy ovoz klonlash, audio-kitoblar hamda savdo boʻyicha 24/7 jonli telefon agentlari. Hammasi 24 kHz studiya sifatidagi toza oʻzbek tilida — 0% aksent.'
+              : 'Не только подкасты: дубляж Reels/видео, 18+ студийных дикторов, клонирование голоса, аудиокниги и телефонные AI-агенты для продаж 24/7. Чистый узбекский язык студийного качества 24 kHz — 0% акцента.'}
           </p>
+
+          {/* Quick Ecosystem Use-Case Navigation Pills */}
+          <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 mt-6 pointer-events-auto max-w-[680px]">
+            <button
+              type="button"
+              onClick={() => onEnterApp('studio', 'solo')}
+              className="px-3.5 py-1.5 rounded-full bg-white/90 hover:bg-white border border-[rgba(22,21,17,0.14)] hover:border-[#0E7C86] text-xs font-medium text-[#161511] shadow-2xs transition-all flex items-center gap-1.5 cursor-pointer"
+            >
+              <Mic className="w-3.5 h-3.5 text-[#0E7C86]" />
+              <span>{lang === 'uz' ? 'Podkast & Audiokitob' : 'Подкасты & Аудиокниги'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onEnterApp('agent')}
+              className="px-3.5 py-1.5 rounded-full bg-white/90 hover:bg-white border border-[rgba(22,21,17,0.14)] hover:border-[#0E7C86] text-xs font-medium text-[#161511] shadow-2xs transition-all flex items-center gap-1.5 cursor-pointer"
+            >
+              <PhoneCall className="w-3.5 h-3.5 text-[#0E7C86]" />
+              <span>{lang === 'uz' ? '24/7 AI Savdo Agentlari' : 'AI-Агенты для Продаж 24/7'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onEnterApp('studio', 'voiceover')}
+              className="px-3.5 py-1.5 rounded-full bg-white/90 hover:bg-white border border-[rgba(22,21,17,0.14)] hover:border-[#0E7C86] text-xs font-medium text-[#161511] shadow-2xs transition-all flex items-center gap-1.5 cursor-pointer"
+            >
+              <Video className="w-3.5 h-3.5 text-[#0E7C86]" />
+              <span>{lang === 'uz' ? 'Reels & Video Dublyaj' : 'Reels & Видеодубляж'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onEnterApp('studio')}
+              className="px-3.5 py-1.5 rounded-full bg-white/90 hover:bg-white border border-[rgba(22,21,17,0.14)] hover:border-[#0E7C86] text-xs font-medium text-[#161511] shadow-2xs transition-all flex items-center gap-1.5 cursor-pointer"
+            >
+              <Fingerprint className="w-3.5 h-3.5 text-[#0E7C86]" />
+              <span>{lang === 'uz' ? 'Ovoz Klonlash (30 sek)' : 'Клонирование Голоса'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onEnterApp('docs')}
+              className="px-3.5 py-1.5 rounded-full bg-white/90 hover:bg-white border border-[rgba(22,21,17,0.14)] hover:border-[#0E7C86] text-xs font-medium text-[#161511] shadow-2xs transition-all flex items-center gap-1.5 cursor-pointer"
+            >
+              <FileSearch className="w-3.5 h-3.5 text-[#0E7C86]" />
+              <span>{lang === 'uz' ? 'PDF & Hujjatdan Audio' : 'Аудио из PDF/Документов'}</span>
+            </button>
+          </div>
 
           {/* CTA Row */}
           <div className="flex items-center gap-3.5 mt-8 flex-wrap pointer-events-auto">
@@ -465,24 +505,36 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               onClick={() => onEnterApp('studio')}
               className="btn-pill btn-solid py-3 px-6 text-sm sm:text-base font-semibold shadow-md flex items-center gap-2.5"
             >
-              <span>{lang === 'uz' ? 'Bepul boshlash — 5 podkast' : 'Начать бесплатно — 5 подкастов'}</span>
+              <span>{lang === 'uz' ? 'Studiya: Ovoz Yaratish' : 'Открыть Студию'}</span>
               <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
                 <path d="M2 8h11M9 3.5 13.5 8 9 12.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </button>
 
-            <a
-              href="#mahsulotlar"
-              className="btn-pill btn-ghost py-3 px-6 text-sm sm:text-base"
+            <button
+              type="button"
+              onClick={() => onEnterApp('agent')}
+              className="btn-pill btn-ghost py-3 px-6 text-sm sm:text-base font-medium flex items-center gap-2 text-[#0A5A62] border border-[#0E7C86]/30 bg-white/60 hover:bg-white"
             >
-              {lang === 'uz' ? 'Barcha imkoniyatlar' : 'Все возможности'}
+              <PhoneCall className="w-4 h-4 text-[#0E7C86]" />
+              <span>{lang === 'uz' ? 'Jonli AI Qoʻngʻiroqni Sinash' : 'Тест AI-Звонка 24/7'}</span>
+            </button>
+
+            <a
+              href="#foyda-matritsa"
+              className="btn-pill btn-ghost py-3 px-5 text-sm sm:text-base text-[#5D594E]"
+            >
+              {lang === 'uz' ? 'Kimlar uchun foydali?' : 'Для кого подходит?'}
             </a>
           </div>
 
-          <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-[#5D594E] mt-6 pointer-events-auto">
-            {lang === 'uz'
-              ? '1 platforma — 4 mahsulot · Kredit karta shart emas · 30 soniyada boshlang'
-              : '1 платформа — 4 продукта · Без банковской карты · Старт за 30 секунд'}
+          <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-[#5D594E] mt-6 pointer-events-auto flex items-center gap-2">
+            <ShieldCheck className="w-3.5 h-3.5 text-[#0E7C86]" />
+            <span>
+              {lang === 'uz'
+                ? '1 platforma — 6 ta biznes mahsulot · Kredit karta shart emas · 30 soniyada boshlang'
+                : '1 платформа — 6 бизнес-продуктов · Без банковской карты · Старт за 30 секунд'}
+            </span>
           </div>
         </div>
 
@@ -550,7 +602,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             <div key={k} className="flex items-center gap-6 shrink-0 pr-6">
               <span>24 kHz Studio Sifati</span>
               <span className="text-[#0E7C86]">·</span>
-              <span>Oʻzbek Tili Gemini 3.8</span>
+              <span>Oʻzbek Tili Neural Studio</span>
               <span className="text-[#0E7C86]">·</span>
               <span>Voice Replication (Klonlash)</span>
               <span className="text-[#0E7C86]">·</span>
@@ -569,11 +621,197 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         </div>
       </section>
 
+      {/* Target Audience & Business Value Matrix (Kimlar uchun va nima beradi) */}
+      <section id="foyda-matritsa" className="py-20 border-b border-[rgba(22,21,17,0.14)] bg-[#FAF8F3]">
+        <div className="max-w-[1280px] mx-auto px-5 sm:px-8">
+          <div className="flex items-center gap-3.5 font-mono text-[11.5px] uppercase tracking-[0.14em] text-[#0A5A62] mb-4">
+            <span>01 — Platforma kimlar uchun va qanday foyda keltiradi?</span>
+            <span className="h-[1px] flex-1 bg-[rgba(22,21,17,0.14)]" />
+          </div>
+
+          <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-12">
+            <div>
+              <h2 className="font-serif font-normal text-[clamp(2.1rem,3.8vw,3.2rem)] tracking-[-0.01em] text-[#161511] max-w-[22ch]">
+                {lang === 'uz' ? (
+                  <>Faqat podkast emas — <em>butun biznes va media</em> uchun.</>
+                ) : (
+                  <>Не только подкасты — <em>для бизнеса, медиа и продаж</em>.</>
+                )}
+              </h2>
+              <p className="text-[#5D594E] text-base leading-relaxed mt-3 max-w-[54ch]">
+                {lang === 'uz'
+                  ? 'OvozStudio AI qanday vazifalarni yechadi, kimlarga vaqt hamda byudjetni 70% gacha tejashga yordam beradi:'
+                  : 'Какие задачи решает OvozStudio AI, кому помогает экономить до 70% бюджета и ускорять процессы в разы:'}
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={onOpenPricingModal}
+              className="btn-pill btn-ghost text-xs px-4 py-2.5 flex items-center gap-2 self-start md:self-auto text-[#0A5A62] border border-[#0E7C86]/30 bg-[#0E7C86]/5 hover:bg-[#0E7C86]/10 cursor-pointer"
+            >
+              <Sparkles className="w-4 h-4 text-[#0E7C86]" />
+              <span className="font-semibold">{lang === 'uz' ? 'Tariflar va Imkoniyatlar' : 'Тарифы и Возможности'}</span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+            {/* Value Card 1: B2B Sales & Calls */}
+            <div className="markaz-card p-6 flex flex-col justify-between group hover:-translate-y-1.5 transition-all duration-300 hover:shadow-lg">
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <span className="w-10 h-10 rounded-xl bg-[#0E7C86]/10 text-[#0A5A62] flex items-center justify-center">
+                    <PhoneCall className="w-5 h-5" />
+                  </span>
+                  <span className="font-mono text-[10.5px] uppercase tracking-wider text-[#0A5A62] font-semibold bg-[#0E7C86]/10 px-2.5 py-1 rounded-full">
+                    {lang === 'uz' ? 'Biznes & Savdo' : 'Бизнес и Продажи'}
+                  </span>
+                </div>
+                <h3 className="text-[17px] font-bold text-[#161511] leading-snug">
+                  {lang === 'uz' ? '24/7 AI Savdo & Call-Center Agenti' : 'AI-Агент для Продаж 24/7'}
+                </h3>
+                <p className="text-xs sm:text-sm text-[#5D594E] mt-2.5 leading-relaxed">
+                  {lang === 'uz'
+                    ? 'Qoʻngʻiroqlarga soniyalarda toza oʻzbekcha javob beradi, mijoz ehtiyojini aniqlaydi, eʼtirozlarni yopadi va leadni amoCRM yoki Bitrix24 ga kiritadi. Kechasi ham mijoz yoʻqotilmaydi.'
+                    : 'Мгновенно отвечает на узбекском и русском языках, консультирует по товарам и услугам, квалифицирует лидов и пишет данные в CRM. Ноль потерь звонков 24/7.'}
+                </p>
+              </div>
+
+              <div className="mt-5 pt-4 border-t border-[rgba(22,21,17,0.1)]">
+                <div className="font-mono text-[11px] text-[#0A5A62] font-semibold flex items-center gap-1.5 mb-3">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-[#0E7C86]" />
+                  <span>{lang === 'uz' ? 'Call-center xarajatlari -70%' : 'Расходы колл-центра -70%'}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onEnterApp('agent')}
+                  className="w-full py-2 rounded-full text-xs font-semibold bg-[#161511] text-[#F4F1EA] hover:bg-[#0A5A62] transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <span>{lang === 'uz' ? 'Agentni sinab koʻrish' : 'Тестировать агента'}</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Value Card 2: SMM & Reels Video Dubbing */}
+            <div className="markaz-card p-6 flex flex-col justify-between group hover:-translate-y-1.5 transition-all duration-300 hover:shadow-lg">
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <span className="w-10 h-10 rounded-xl bg-[#C4552D]/10 text-[#C4552D] flex items-center justify-center">
+                    <Video className="w-5 h-5" />
+                  </span>
+                  <span className="font-mono text-[10.5px] uppercase tracking-wider text-[#C4552D] font-semibold bg-[#C4552D]/10 px-2.5 py-1 rounded-full">
+                    {lang === 'uz' ? 'Reels & YouTube' : 'Reels и YouTube'}
+                  </span>
+                </div>
+                <h3 className="text-[17px] font-bold text-[#161511] leading-snug">
+                  {lang === 'uz' ? 'Reels, TikTok & Video Dublyaj' : 'Дубляж Reels, TikTok и Видео'}
+                </h3>
+                <p className="text-xs sm:text-sm text-[#5D594E] mt-2.5 leading-relaxed">
+                  {lang === 'uz'
+                    ? 'Videoni yuklang — tizim matnni ajratadi, oʻzbek tiliga sinxron tarjima qiladi va lab harakatiga (lip-sync) moslab hissiyotli dublyaj qiladi. Mikrofon va montajchi kerak emas.'
+                    : 'Загрузите ролик — система транскрибирует речь, переводит на узбекский и озвучивает с точным хронометражем и эмоциями без студии и монтажера.'}
+                </p>
+              </div>
+
+              <div className="mt-5 pt-4 border-t border-[rgba(22,21,17,0.1)]">
+                <div className="font-mono text-[11px] text-[#C4552D] font-semibold flex items-center gap-1.5 mb-3">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-[#C4552D]" />
+                  <span>{lang === 'uz' ? 'Kuniga 10+ rolik · Tezlik 5x' : '10+ роликов в день · В 5 раз быстрее'}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onEnterApp('studio', 'voiceover')}
+                  className="w-full py-2 rounded-full text-xs font-semibold bg-[#161511] text-[#F4F1EA] hover:bg-[#C4552D] transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <span>{lang === 'uz' ? 'Dublyaj studiyasi' : 'В студию дубляжа'}</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Value Card 3: Podcasting & Audiobooks */}
+            <div className="markaz-card p-6 flex flex-col justify-between group hover:-translate-y-1.5 transition-all duration-300 hover:shadow-lg">
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <span className="w-10 h-10 rounded-xl bg-[#0E7C86]/10 text-[#0A5A62] flex items-center justify-center">
+                    <Headphones className="w-5 h-5" />
+                  </span>
+                  <span className="font-mono text-[10.5px] uppercase tracking-wider text-[#0A5A62] font-semibold bg-[#0E7C86]/10 px-2.5 py-1 rounded-full">
+                    {lang === 'uz' ? 'Podkast & Audio' : 'Подкасты & Аудио'}
+                  </span>
+                </div>
+                <h3 className="text-[17px] font-bold text-[#161511] leading-snug">
+                  {lang === 'uz' ? '1 Soatlik Podkast — 2 Daqiqada' : 'Часовой Подкаст за 2 Минуты'}
+                </h3>
+                <p className="text-xs sm:text-sm text-[#5D594E] mt-2.5 leading-relaxed">
+                  {lang === 'uz'
+                    ? 'Ssenariydan tayyor professional songacha: 2 kishilik intervyu dialoglari, 18+ professional neyron diktorlar, fon musiqasi ducking va 24 kHz toza studiya sifati.'
+                    : 'От идеи до готового 1-часового выпуска: диалог 2-х ведущих, 18+ дикторов, фоновая музыка с авто-приглушением и экспорт в MP3/WAV.'}
+                </p>
+              </div>
+
+              <div className="mt-5 pt-4 border-t border-[rgba(22,21,17,0.1)]">
+                <div className="font-mono text-[11px] text-[#0A5A62] font-semibold flex items-center gap-1.5 mb-3">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-[#0E7C86]" />
+                  <span>{lang === 'uz' ? 'Nafas va kulguli jonli ovoz' : 'Живой голос с дыханием'}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onEnterApp('studio', 'solo')}
+                  className="w-full py-2 rounded-full text-xs font-semibold bg-[#161511] text-[#F4F1EA] hover:bg-[#0A5A62] transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <span>{lang === 'uz' ? 'Podkast yaratish' : 'Создать подкаст'}</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Value Card 4: EdTech & Document Audio Hub */}
+            <div className="markaz-card p-6 flex flex-col justify-between group hover:-translate-y-1.5 transition-all duration-300 hover:shadow-lg">
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <span className="w-10 h-10 rounded-xl bg-[#C98A12]/10 text-[#C98A12] flex items-center justify-center">
+                    <BookOpen className="w-5 h-5" />
+                  </span>
+                  <span className="font-mono text-[10.5px] uppercase tracking-wider text-[#C98A12] font-semibold bg-[#C98A12]/10 px-2.5 py-1 rounded-full">
+                    {lang === 'uz' ? 'EdTech & Hujjatlar' : 'EdTech и Обучение'}
+                  </span>
+                </div>
+                <h3 className="text-[17px] font-bold text-[#161511] leading-snug">
+                  {lang === 'uz' ? 'PDF & Kitoblardan Audio Darslik' : 'Аудиоуроки из PDF и Книг'}
+                </h3>
+                <p className="text-xs sm:text-sm text-[#5D594E] mt-2.5 leading-relaxed">
+                  {lang === 'uz'
+                    ? 'Qalin PDF qoʻllanmalar, maqolalar va hisobotlarni bir zumda tushunarli audio darslikka yoki 2 ekspertning jonli intervyusiga aylantiring. Xodimlar va talabalar uchun qulay format.'
+                    : 'Превращайте сухие регламенты, PDF-отчеты и учебники в живые аудио-диалоги и лекции для сотрудников, клиентов и студентов.'}
+                </p>
+              </div>
+
+              <div className="mt-5 pt-4 border-t border-[rgba(22,21,17,0.1)]">
+                <div className="font-mono text-[11px] text-[#C98A12] font-semibold flex items-center gap-1.5 mb-3">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-[#C98A12]" />
+                  <span>{lang === 'uz' ? '100 betlik kitob 5 daqiqada' : 'Книга за 5 минут в аудио'}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onEnterApp('docs')}
+                  className="w-full py-2 rounded-full text-xs font-semibold bg-[#161511] text-[#F4F1EA] hover:bg-[#C98A12] transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <span>{lang === 'uz' ? 'Hujjat tahlili' : 'Анализ документов'}</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* Product Cards (4-Up) */}
       <section id="mahsulotlar" className="py-20 border-b border-[rgba(22,21,17,0.14)]">
         <div className="max-w-[1280px] mx-auto px-5 sm:px-8">
           <div className="flex items-center gap-3.5 font-mono text-[11.5px] uppercase tracking-[0.14em] text-[#0A5A62] mb-4">
-            <span>01 — Mahsulotlar toʻplami</span>
+            <span>02 — Mahsulotlar toʻplami</span>
             <span className="h-[1px] flex-1 bg-[rgba(22,21,17,0.14)]" />
           </div>
 
@@ -596,7 +834,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                   Podkast studiyasi
                 </b>
                 <span className="block text-sm text-[#5D594E] mt-2 leading-relaxed">
-                  Ssenariydan 1 soatlik songacha: Gemini ssenariy dvigateli, 18 ovoz, jonli emotsiya teglari va musiqa ducking.
+                  Ssenariydan 1 soatlik songacha: AI ssenariy dvigateli, 18 ovoz, jonli emotsiya teglari va musiqa ducking.
                 </span>
               </div>
               <div className="inline-flex items-center gap-2 mt-5 font-mono text-[11px] tracking-[0.12em] uppercase text-[#0A5A62] group-hover:text-[#0E7C86]">
@@ -682,7 +920,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           {/* Left Column: Description & Tag Table */}
           <div>
             <div className="flex items-center gap-3.5 font-mono text-[11.5px] uppercase tracking-[0.14em] text-[#0A5A62] mb-4">
-              <span>02 — Jonli Ovoz Texnologiyasi</span>
+              <span>03 — Jonli Ovoz Texnologiyasi</span>
               <span className="h-[1px] flex-1 bg-[rgba(22,21,17,0.14)]" />
             </div>
 
@@ -766,7 +1004,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
       <section className="py-20 bg-[#ECE7DB] border-b border-[rgba(22,21,17,0.14)] text-center">
         <div className="max-w-[760px] mx-auto px-5 sm:px-8">
           <div className="inline-flex items-center gap-3 font-mono text-[11.5px] uppercase tracking-[0.14em] text-[#0A5A62] mb-3">
-            <span>Biznes va dasturchilar uchun</span>
+            <span>04 — Biznes, API va Integratsiyalar</span>
           </div>
 
           <h2 className="font-serif font-normal text-[clamp(2.1rem,3.8vw,3.2rem)] tracking-[-0.01em] text-[#161511]">
@@ -829,7 +1067,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               Tariflar
             </button>
           </div>
-          <span>24 kHz · MP3 &amp; WAV · Gemini TTS Live</span>
+          <span>24 kHz · MP3 &amp; WAV · OvozStudio Neural HD</span>
         </div>
       </footer>
     </div>

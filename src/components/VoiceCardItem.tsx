@@ -176,10 +176,10 @@ export const VoiceCardItem: React.FC<VoiceCardItemProps> = ({
                 <Volume2 className="w-3 h-3 text-[#0E7C86] animate-pulse shrink-0" />
               )}
             </div>
-            <div className="text-[10px] text-[#5D594E] font-mono uppercase tracking-wider truncate mt-0.5">
+            <div className="text-[10px] text-[#5D594E] font-mono tracking-wider truncate mt-0.5">
               {voice.isReplicatedVoice
-                ? (lang === 'uz' ? 'Replikatsiya' : 'Клон')
-                : (voice.baseVoice?.toUpperCase() || 'STUDIO')}
+                ? (lang === 'uz' ? 'Shaxsiy Replikatsiya' : 'Личный Клон')
+                : (voice.style || (voice.gender === 'female' ? (lang === 'uz' ? 'Ayol ovozi' : 'Женский голос') : (lang === 'uz' ? 'Erkak ovozi' : 'Мужской голос')))}
             </div>
           </div>
         </div>

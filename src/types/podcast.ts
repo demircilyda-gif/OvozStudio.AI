@@ -7,10 +7,10 @@ export interface VoiceProfile {
   name: string;
   baseVoice: BaseVoiceModel;
   gender?: 'female' | 'male';
-  voiceId?: string; // Google AI Studio Voice ID (e.g. "voice_17raj9ewke3g")
+  voiceId?: string; // OvozStudio Voice ID (e.g. "voice_17raj9ewke3g")
   voiceKey?: string; // Client-managed voice key
   voiceType?: VoiceType;
-  model?: string; // e.g. "models/gemini-3.8-flash-tts"
+  model?: string; // e.g. "ovozstudio-neural-hd"
   expireTime?: string;
   timbre: string;
   tempo: string;
@@ -224,7 +224,7 @@ export interface PodcastCategory {
     accent: string;
   };
   topics: PodcastTopic[];
-  suggestedVoice: BaseVoiceModel;
+  suggestedVoice: string;
   suggestedTimbre: string;
   suggestedTempo: string;
   suggestedStyle: string;

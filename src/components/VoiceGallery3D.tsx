@@ -1,8 +1,20 @@
 import React, { useRef, useState, useMemo, useEffect, useCallback } from 'react';
 import * as THREE from 'three';
 import { Canvas, useFrame } from '@react-three/fiber';
-import { Environment, Html } from '@react-three/drei';
-import { Play, Square, Check, Sparkles, Volume2, ShieldCheck, Compass } from 'lucide-react';
+import { Environment } from '@react-three/drei';
+import {
+  Play,
+  Square,
+  Check,
+  Sparkles,
+  Volume2,
+  ShieldCheck,
+  Compass,
+  LayoutGrid,
+  Radio,
+  Sliders,
+  AudioWaveform,
+} from 'lucide-react';
 import { VoiceProfile } from '../types/podcast';
 import { getVoicePreviewUrl } from '../data/voicePreviews';
 import { connectAudioElement } from '../utils/audioReactive';
@@ -24,7 +36,7 @@ export function isWebGLAvailable(): boolean {
 }
 
 // -------------------------------------------------------------
-// Voice 3D Palette Mapping (Prompt specifications)
+// Voice 3D Palette Mapping
 // -------------------------------------------------------------
 export interface VoicePalette {
   tint: string;
@@ -39,32 +51,31 @@ export const VOICE_3D_PALETTES: Record<string, VoicePalette> = {
   'voice_17raj9ewke3g': { tint: '#9FD8DD', core: '#0E7C86', modelLabel: '0% AKSENT · LIVE', shortName: 'SHOKHRUKH' },
 
   // Ulugʻbek: tint #9DB4DC, core #24549C
-  ulugbek: { tint: '#9DB4DC', core: '#24549C', modelLabel: 'GEMINI 3.8 · BAS', shortName: 'Ulugʻbek' },
-  'ulugbek-history': { tint: '#9DB4DC', core: '#24549C', modelLabel: 'GEMINI 3.8 · BAS', shortName: 'Ulugʻbek' },
+  ulugbek: { tint: '#9DB4DC', core: '#24549C', modelLabel: 'STUDIO · BAS', shortName: 'Ulugʻbek' },
+  'ulugbek-history': { tint: '#9DB4DC', core: '#24549C', modelLabel: 'STUDIO · BAS', shortName: 'Ulugʻbek' },
 
   // Aziza: tint #9FE0D6, core #0E9488
-  aziza: { tint: '#9FE0D6', core: '#0E9488', modelLabel: 'GEMINI 3.8 · SOPRANO', shortName: 'Aziza' },
-  'aziza-ai': { tint: '#9FE0D6', core: '#0E9488', modelLabel: 'GEMINI 3.8 · SOPRANO', shortName: 'Aziza' },
+  aziza: { tint: '#9FE0D6', core: '#0E9488', modelLabel: 'STUDIO · SOPRANO', shortName: 'Aziza' },
+  'aziza-ai': { tint: '#9FE0D6', core: '#0E9488', modelLabel: 'STUDIO · SOPRANO', shortName: 'Aziza' },
 
   // Otabek: tint #EFD9A0, core #C98A12
-  otabek: { tint: '#EFD9A0', core: '#C98A12', modelLabel: 'GEMINI 3.8 · TENOR', shortName: 'Otabek' },
-  'otabek-comedy': { tint: '#EFD9A0', core: '#C98A12', modelLabel: 'GEMINI 3.8 · TENOR', shortName: 'Otabek' },
+  otabek: { tint: '#EFD9A0', core: '#C98A12', modelLabel: 'STUDIO · TENOR', shortName: 'Otabek' },
+  'otabek-comedy': { tint: '#EFD9A0', core: '#C98A12', modelLabel: 'STUDIO · TENOR', shortName: 'Otabek' },
 
   // Madina: tint #E9B39C, core #C4552D
-  madina: { tint: '#E9B39C', core: '#C4552D', modelLabel: 'GEMINI 3.8 · VIBRANT', shortName: 'Madina' },
-  'madina-journalist': { tint: '#E9B39C', core: '#C4552D', modelLabel: 'GEMINI 3.8 · VIBRANT', shortName: 'Madina' },
+  madina: { tint: '#E9B39C', core: '#C4552D', modelLabel: 'STUDIO · VIBRANT', shortName: 'Madina' },
+  'madina-journalist': { tint: '#E9B39C', core: '#C4552D', modelLabel: 'STUDIO · VIBRANT', shortName: 'Madina' },
 
-  // Fenrir: tint #B8BCE0, core #3B3F6E
-  fenrir: { tint: '#B8BCE0', core: '#3B3F6E', modelLabel: 'FENRIR · DEEP BAS', shortName: 'Fenrir' },
-  'jasur-business': { tint: '#B8BCE0', core: '#3B3F6E', modelLabel: 'CHARON · BAS', shortName: 'Jasur' },
+  // Jasur: tint #B8BCE0, core #3B3F6E
+  'jasur-business': { tint: '#B8BCE0', core: '#3B3F6E', modelLabel: 'STUDIO · BAS', shortName: 'Jasur' },
 
   // Harmonic defaults for other voices
-  'malika-tech': { tint: '#F5C6D6', core: '#A83261', modelLabel: 'AOEDE · FAST', shortName: 'Malika' },
-  'nodira-analyst': { tint: '#B6E2D3', core: '#0E7C86', modelLabel: 'KORE · CORPORATE', shortName: 'Nodira' },
-  aoede: { tint: '#E9B39C', core: '#C4552D', modelLabel: 'AOEDE · LIVE', shortName: 'Aoede' },
-  charon: { tint: '#D6C7B2', core: '#4A3E31', modelLabel: 'CHARON · BARITON', shortName: 'Charon' },
-  puck: { tint: '#EFD9A0', core: '#C98A12', modelLabel: 'PUCK · TENOR', shortName: 'Puck' },
-  kore: { tint: '#9FE0D6', core: '#0E9488', modelLabel: 'KORE · SOPRANO', shortName: 'Kore' },
+  'malika-tech': { tint: '#F5C6D6', core: '#A83261', modelLabel: 'STUDIO · SOPRANO', shortName: 'Malika' },
+  'nodira-analyst': { tint: '#B6E2D3', core: '#0E7C86', modelLabel: 'STUDIO · BARITON', shortName: 'Nodira' },
+  'sevara-science': { tint: '#9FE0D6', core: '#0E7C86', modelLabel: 'STUDIO · BARITON', shortName: 'Sevara' },
+  'sherzod-investigation': { tint: '#B8BCE0', core: '#3B3F6E', modelLabel: 'STUDIO · BAS', shortName: 'Sherzod' },
+  'javohir-media': { tint: '#D6C7B2', core: '#4A3E31', modelLabel: 'STUDIO · BAS', shortName: 'Javohir' },
+  'sanjar-radio': { tint: '#EFD9A0', core: '#C98A12', modelLabel: 'STUDIO · TENOR', shortName: 'Sanjar' },
 };
 
 export function getPaletteForVoice(v: VoiceProfile): VoicePalette {
@@ -76,17 +87,16 @@ export function getPaletteForVoice(v: VoiceProfile): VoicePalette {
     if (nameKey.includes(k)) return VOICE_3D_PALETTES[k];
   }
 
-  // Fallback palette
   return {
     tint: '#9FD8DD',
     core: '#0E7C86',
-    modelLabel: v.baseVoice ? `${v.baseVoice.toUpperCase()} · TTS` : 'GEMINI 3.8 TTS',
+    modelLabel: v.gender === 'female' ? 'AYOL · NEURAL TTS' : 'ERKAK · NEURAL TTS',
     shortName: v.name.split(' ')[0] || v.name,
   };
 }
 
 // -------------------------------------------------------------
-// Individual 3D Glass Orb with Rotating Icosahedron Core
+// Pure 3D Glass Orb (No messy floating HTML DOM tags inside 3D!)
 // -------------------------------------------------------------
 interface GlassOrbProps {
   voice: VoiceProfile;
@@ -113,23 +123,24 @@ const GlassOrb: React.FC<GlassOrbProps> = ({
   const coreRef = useRef<THREE.Mesh>(null);
   const orbRef = useRef<THREE.Mesh>(null);
 
-  // Geometry and materials (Halved size: sphere radius 0.42, core radius 0.17)
-  const sphereGeo = useMemo(() => new THREE.SphereGeometry(0.42, 36, 36), []);
-  const icosahedronGeo = useMemo(() => new THREE.IcosahedronGeometry(0.17, 0), []);
+  // Smooth geometries
+  const sphereGeo = useMemo(() => new THREE.SphereGeometry(0.48, 48, 48), []);
+  const icosahedronGeo = useMemo(() => new THREE.IcosahedronGeometry(0.2, 0), []);
 
   const glassMat = useMemo(
     () =>
       new THREE.MeshPhysicalMaterial({
         color: new THREE.Color(palette.tint),
-        transmission: 1,
-        thickness: 0.8,
-        roughness: 0.06,
-        ior: 1.45,
-        clearcoat: 1,
+        transmission: 0.95,
+        thickness: 0.85,
+        roughness: 0.04,
+        ior: 1.5,
+        clearcoat: 1.0,
+        clearcoatRoughness: 0.05,
         transparent: true,
-        opacity: 0.92,
+        opacity: isSelected ? 0.96 : 0.85,
       }),
-    [palette.tint]
+    [palette.tint, isSelected]
   );
 
   const coreMat = useMemo(
@@ -137,26 +148,28 @@ const GlassOrb: React.FC<GlassOrbProps> = ({
       new THREE.MeshStandardMaterial({
         color: new THREE.Color(palette.core),
         flatShading: true,
-        roughness: 0.25,
-        metalness: 0.35,
+        roughness: 0.2,
+        metalness: 0.4,
+        emissive: new THREE.Color(palette.core),
+        emissiveIntensity: isSelected ? 0.5 : isHovered ? 0.3 : 0.1,
       }),
-    [palette.core]
+    [palette.core, isSelected, isHovered]
   );
 
   useFrame((_, delta) => {
-    // 1) Inside each orb an icosahedron core slowly rotates
+    // 1) Rotating faceted gem inside
     if (coreRef.current) {
-      coreRef.current.rotation.x += delta * (isPlaying ? 1.8 : 0.4);
-      coreRef.current.rotation.y += delta * (isPlaying ? 2.4 : 0.6);
-      coreRef.current.rotation.z += delta * (isPlaying ? 1.2 : 0.2);
+      coreRef.current.rotation.x += delta * (isPlaying ? 2.5 : 0.5);
+      coreRef.current.rotation.y += delta * (isPlaying ? 3.0 : 0.7);
+      coreRef.current.rotation.z += delta * (isPlaying ? 1.8 : 0.3);
     }
 
-    // 2) Hover scales an orb to 1.12 (lerp .1); selected scales to 1.08
+    // 2) Smooth scale on hover/selected
     if (groupRef.current) {
-      const targetScale = isHovered ? 1.12 : isSelected ? 1.08 : 1.0;
+      const targetScale = isSelected ? 1.15 : isHovered ? 1.08 : 0.95;
       groupRef.current.scale.lerp(
         new THREE.Vector3(targetScale, targetScale, targetScale),
-        0.1
+        0.12
       );
     }
   });
@@ -177,7 +190,7 @@ const GlassOrb: React.FC<GlassOrbProps> = ({
         onHoverChange(null);
       }}
     >
-      {/* Outer Glass Sphere */}
+      {/* Outer Physical Glass Sphere */}
       <mesh
         ref={orbRef}
         geometry={sphereGeo}
@@ -186,54 +199,31 @@ const GlassOrb: React.FC<GlassOrbProps> = ({
         receiveShadow
       />
 
-      {/* Inside Icosahedron Core (radius 0.34, flatShading) */}
+      {/* Glowing Inner Core */}
       <mesh
         ref={coreRef}
         geometry={icosahedronGeo}
         material={coreMat}
       />
 
-      {/* HTML Overlay under each orb (Projected coordinates, adjusted for halved orb size) */}
-      <Html
-        position={[0, -0.72, 0]}
-        center
-        distanceFactor={8}
-        zIndexRange={[100, 0]}
-        style={{ pointerEvents: 'none' }}
-      >
-        <div className="flex flex-col items-center select-none text-center transform -translate-y-1">
-          <div
-            className={`px-3 py-1 rounded-full backdrop-blur-md border transition-all duration-200 flex items-center gap-1.5 shadow-sm ${
-              isSelected
-                ? 'bg-[#161511] text-[#F4F1EA] border-[#0E7C86] ring-2 ring-[#0E7C86]/40 scale-105'
-                : 'bg-white/85 text-[#161511] border-[rgba(22,21,17,0.14)]'
-            }`}
-          >
-            <span
-              className="w-2 h-2 rounded-full shrink-0"
-              style={{ backgroundColor: palette.core }}
-            />
-            <span className="font-serif text-xs font-semibold whitespace-nowrap">
-              {palette.shortName}
-            </span>
-            {isSelected && (
-              <Check className="w-3 h-3 text-[#5CC8CF] stroke-[2.5]" />
-            )}
-          </div>
-          <span
-            className="font-mono text-[9px] uppercase tracking-wider text-[#5D594E] mt-0.5 whitespace-nowrap"
-            style={{ fontFamily: '"IBM Plex Mono", monospace' }}
-          >
-            {palette.modelLabel}
-          </span>
-        </div>
-      </Html>
+      {/* Subtle Halo Ring for Selected Voice */}
+      {isSelected && (
+        <mesh position={[0, -0.55, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+          <ringGeometry args={[0.35, 0.45, 32]} />
+          <meshBasicMaterial
+            color={new THREE.Color(palette.core)}
+            transparent
+            opacity={0.6}
+            side={THREE.DoubleSide}
+          />
+        </mesh>
+      )}
     </group>
   );
 };
 
 // -------------------------------------------------------------
-// Interactive Carousel Row Group (Drag anywhere rotates the whole row)
+// Interactive Carousel Row Group (Smooth rotation & centering)
 // -------------------------------------------------------------
 interface OrbRowGroupProps {
   voices: VoiceProfile[];
@@ -260,27 +250,27 @@ const OrbRowGroup: React.FC<OrbRowGroupProps> = ({
 }) => {
   const groupRef = useRef<THREE.Group>(null);
   const count = Math.min(voices.length, 8);
-  const radius = 3.0; // circular arrangement radius tuned for halved orbs
+  const radius = 2.8;
 
-  useFrame((_, delta) => {
+  useFrame(() => {
     if (!groupRef.current) return;
 
     if (!isDraggingRef.current) {
-      // Damping .08 on inertia
-      dragVelocityRef.current *= 1 - 0.08;
-      // Idle auto-rotation very slow (~0.0018 rad/frame)
-      rotationYRef.current += dragVelocityRef.current + 0.0015;
+      // Natural damping on inertia
+      dragVelocityRef.current *= 0.94;
+      // Gentle idle auto-rotation
+      rotationYRef.current += dragVelocityRef.current + 0.0012;
     }
 
     groupRef.current.rotation.y = rotationYRef.current;
   });
 
   return (
-    <group ref={groupRef} position={[0, 0, 0]}>
+    <group ref={groupRef} position={[0, -0.05, 0]}>
       {voices.slice(0, 8).map((voice, idx) => {
         const angle = (idx / count) * Math.PI * 2;
         const x = radius * Math.sin(angle);
-        const z = radius * Math.cos(angle) - 0.2;
+        const z = radius * Math.cos(angle);
         const palette = getPaletteForVoice(voice);
 
         return (
@@ -288,7 +278,7 @@ const OrbRowGroup: React.FC<OrbRowGroupProps> = ({
             key={voice.id}
             voice={voice}
             palette={palette}
-            position={[x, 0.1, z]}
+            position={[x, 0, z]}
             isSelected={voice.id === selectedVoiceId}
             isPlaying={voice.id === playingVoiceId}
             onSelect={onSelectVoice}
@@ -323,12 +313,12 @@ export const VoiceGallery3D: React.FC<VoiceGallery3DProps> = ({
   className = '',
   title,
   subtitle,
-  compact = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [isInView, setIsInView] = useState(true);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'3d' | 'grid'>('3d');
   const audioInstanceRef = useRef<HTMLAudioElement | null>(null);
 
   // WebGL support state
@@ -338,7 +328,7 @@ export const VoiceGallery3D: React.FC<VoiceGallery3DProps> = ({
     setHasWebGL(isWebGLAvailable());
   }, []);
 
-  // Performance: Pause render loop when canvas is off-screen (IntersectionObserver)
+  // Performance: Pause render loop when canvas is off-screen
   useEffect(() => {
     if (!containerRef.current) return;
     const observer = new IntersectionObserver(
@@ -351,7 +341,7 @@ export const VoiceGallery3D: React.FC<VoiceGallery3DProps> = ({
     return () => observer.disconnect();
   }, []);
 
-  // Drag anywhere rotates the whole row (inertia, damping .08)
+  // Drag anywhere rotates the whole row (inertia, damping)
   const isDraggingRef = useRef(false);
   const prevPointerXRef = useRef(0);
   const dragVelocityRef = useRef(0);
@@ -367,7 +357,7 @@ export const VoiceGallery3D: React.FC<VoiceGallery3DProps> = ({
     if (!isDraggingRef.current) return;
     const deltaX = e.clientX - prevPointerXRef.current;
     prevPointerXRef.current = e.clientX;
-    const dragSensitivity = 0.0055;
+    const dragSensitivity = 0.005;
     rotationYRef.current += deltaX * dragSensitivity;
     dragVelocityRef.current = deltaX * dragSensitivity;
   };
@@ -417,96 +407,182 @@ export const VoiceGallery3D: React.FC<VoiceGallery3DProps> = ({
     return voices.slice(0, 8);
   }, [voices]);
 
-  const selectedVoice = useMemo(() => {
-    return voices.find((v) => v.id === selectedVoiceId) || displayedVoices[0];
-  }, [voices, selectedVoiceId, displayedVoices]);
+  const activeFocusId = hoveredId || selectedVoiceId;
+  const activeFocusVoice = useMemo(() => {
+    return voices.find((v) => v.id === activeFocusId) || displayedVoices[0];
+  }, [voices, activeFocusId, displayedVoices]);
 
   const activePalette = useMemo(() => {
-    return selectedVoice ? getPaletteForVoice(selectedVoice) : VOICE_3D_PALETTES.shokhrukh;
-  }, [selectedVoice]);
+    return activeFocusVoice ? getPaletteForVoice(activeFocusVoice) : VOICE_3D_PALETTES.shokhrukh;
+  }, [activeFocusVoice]);
+
+  // Smoothly center a voice in 3D when chosen from chips
+  const handleSelectAndCenter = (voiceId: string) => {
+    if (onSelectVoice) onSelectVoice(voiceId);
+    const index = displayedVoices.findIndex((v) => v.id === voiceId);
+    if (index >= 0) {
+      const count = Math.min(displayedVoices.length, 8);
+      const targetAngle = (index / count) * Math.PI * 2;
+      // Rotate carousel so this orb faces camera (angle 0)
+      rotationYRef.current = -targetAngle;
+      dragVelocityRef.current = 0;
+    }
+  };
 
   return (
     <div
       ref={containerRef}
-      className={`w-full rounded-[24px] border border-[rgba(22,21,17,0.14)] bg-[#ECE7DB] shadow-[0_20px_40px_-20px_rgba(22,21,17,0.14)] overflow-hidden transition-all duration-300 relative select-none ${className}`}
+      className={`w-full rounded-[24px] border border-[rgba(22,21,17,0.14)] bg-[#ECE7DB] shadow-[0_20px_40px_-20px_rgba(22,21,17,0.14)] overflow-hidden transition-all duration-300 relative select-none isolate ${className}`}
     >
-      {/* Header bar */}
-      <div className="px-5 sm:px-7 pt-5 pb-3 flex flex-wrap items-center justify-between gap-3 border-b border-[rgba(22,21,17,0.08)] bg-[rgba(255,255,255,0.4)] backdrop-blur-sm">
+      {/* 1. Header Bar with Mode Toggle */}
+      <div className="px-5 sm:px-7 py-3.5 flex flex-wrap items-center justify-between gap-3 border-b border-[rgba(22,21,17,0.08)] bg-[rgba(255,255,255,0.6)] backdrop-blur-md">
         <div className="flex items-center gap-3">
           <div
-            className="w-8 h-8 rounded-full flex items-center justify-center text-white shadow-2xs transition-colors duration-300"
+            className="w-8 h-8 rounded-full flex items-center justify-center text-white shadow-2xs transition-colors duration-300 shrink-0"
             style={{ backgroundColor: activePalette.core }}
           >
             <Sparkles className="w-4 h-4" />
           </div>
           <div>
             <h3 className="font-serif text-base sm:text-lg font-normal text-[#161511]">
-              {title || (lang === 'uz' ? '3D Ovozlar Galereyasi' : '3D Галерея Голосов')}
+              {title || (lang === 'uz' ? 'Ovozlar Studiyasi & Galereyasi' : 'Студия и Галерея Голосов')}
             </h3>
-            <p
-              className="font-mono text-[11px] text-[#0A5A62] font-semibold tracking-wider"
-              style={{ fontFamily: '"IBM Plex Mono", monospace' }}
-            >
-              {subtitle || (lang === 'uz' ? '8 TA SHISHA SHAR · REAT-THREE-FIBER + DREI' : '8 СТЕКЛЯННЫХ СФЕР')}
+            <p className="font-mono text-[11px] text-[#0A5A62] font-semibold tracking-wider">
+              {subtitle || (lang === 'uz' ? '8 TA PREMIUM OVOZ · 24kHz HD MASTER' : '8 ПРЕМИУМ ГОЛОСОВ · 24kHz HD')}
             </p>
           </div>
         </div>
 
-        {/* Drag Hint & Active Badge */}
-        <div className="flex items-center gap-2 text-xs font-mono text-[#5D594E]">
-          <span className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/70 border border-[rgba(22,21,17,0.1)] text-[11px]">
-            <Compass className="w-3.5 h-3.5 text-[#0E7C86] animate-spin" style={{ animationDuration: '8s' }} />
-            <span>{lang === 'uz' ? 'Sichqoncha bilan aylantiring' : 'Вращайте мышью'}</span>
-          </span>
-          {selectedVoice && (
-            <span
-              className="px-3 py-1 rounded-full text-white text-xs font-semibold shadow-2xs flex items-center gap-1.5 transition-colors duration-300"
-              style={{ backgroundColor: activePalette.core }}
+        {/* View Toggle & Drag Hint */}
+        <div className="flex items-center gap-2 text-xs font-mono">
+          <div className="flex border border-[rgba(22,21,17,0.14)] rounded-full overflow-hidden bg-white/70 p-0.5">
+            <button
+              type="button"
+              onClick={() => setViewMode('3d')}
+              className={`px-3 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                viewMode === '3d'
+                  ? 'bg-[#161511] text-[#F4F1EA] shadow-2xs'
+                  : 'text-[#5D594E] hover:text-[#161511]'
+              }`}
             >
-              <Check className="w-3.5 h-3.5 stroke-[2.5]" />
-              <span>{activePalette.shortName}</span>
+              <span>🔮 3D Sharlar</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode('grid')}
+              className={`px-3 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                viewMode === 'grid'
+                  ? 'bg-[#161511] text-[#F4F1EA] shadow-2xs'
+                  : 'text-[#5D594E] hover:text-[#161511]'
+              }`}
+            >
+              <LayoutGrid className="w-3.5 h-3.5" />
+              <span>Kartochkalar</span>
+            </button>
+          </div>
+
+          {viewMode === '3d' && (
+            <span className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/70 border border-[rgba(22,21,17,0.1)] text-[11px] text-[#5D594E]">
+              <Compass className="w-3.5 h-3.5 text-[#0E7C86] animate-spin" style={{ animationDuration: '8s' }} />
+              <span>{lang === 'uz' ? 'Aylantiring' : 'Вращайте'}</span>
             </span>
           )}
         </div>
       </div>
 
-      {/* ------------------------------------------------------------- */}
-      {/* 3D CANVAS (Full width, 380-420px tall, DPR capped at 2)        */}
-      {/* ------------------------------------------------------------- */}
-      <div
-        className="w-full h-[380px] sm:h-[410px] relative cursor-grab active:cursor-grabbing touch-none"
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerLeave={handlePointerUp}
-      >
-        {hasWebGL ? (
+      {/* 2. Active Voice Spotlight Bar (Crystal Clear, NEVER floating in 3D!) */}
+      {activeFocusVoice && (
+        <div className="px-5 sm:px-7 py-3 bg-white/70 border-b border-[rgba(22,21,17,0.08)] flex flex-wrap items-center justify-between gap-3 transition-colors duration-300">
+          <div className="flex items-center gap-3">
+            <div
+              className="w-10 h-10 rounded-2xl flex items-center justify-center text-white shadow-sm ring-2 ring-white shrink-0"
+              style={{ backgroundColor: activePalette.core }}
+            >
+              <span className="font-serif font-bold text-base">
+                {activePalette.shortName.charAt(0)}
+              </span>
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-serif text-sm sm:text-base font-semibold text-[#161511]">
+                  {activeFocusVoice.name}
+                </span>
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-[#0E7C86]/10 text-[#0A5A62] border border-[#0E7C86]/25">
+                  {activePalette.modelLabel}
+                </span>
+                {activeFocusVoice.id === selectedVoiceId && (
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-emerald-500/15 text-emerald-700 border border-emerald-500/30 flex items-center gap-1">
+                    <Check className="w-3 h-3 stroke-[2.5]" />
+                    {lang === 'uz' ? 'Faol Ovoz' : 'Активный Голос'}
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-[#5D594E] font-mono">
+                {activeFocusVoice.timbre || '24kHz Lossless · O\'zbek tili'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 ml-auto">
+            <button
+              type="button"
+              onClick={() => handleTogglePlaySample(activeFocusVoice.id)}
+              className="px-4 py-2 rounded-full bg-[#0E7C86] hover:bg-[#0A5A62] text-white text-xs font-semibold flex items-center gap-2 shadow-xs transition-all cursor-pointer"
+            >
+              {playingVoiceId === activeFocusVoice.id ? (
+                <>
+                  <Square className="w-3.5 h-3.5 fill-current" />
+                  <span>{lang === 'uz' ? 'To\'xtatish' : 'Стоп'}</span>
+                </>
+              ) : (
+                <>
+                  <Play className="w-3.5 h-3.5 fill-current translate-x-0.5" />
+                  <span>{lang === 'uz' ? 'Ovozni sinash (Test)' : 'Прослушать'}</span>
+                </>
+              )}
+            </button>
+
+            {activeFocusVoice.id !== selectedVoiceId && (
+              <button
+                type="button"
+                onClick={() => handleSelectAndCenter(activeFocusVoice.id)}
+                className="px-4 py-2 rounded-full bg-[#161511] hover:bg-[#0A5A62] text-white text-xs font-semibold shadow-xs transition-all cursor-pointer"
+              >
+                {lang === 'uz' ? 'Tanlash' : 'Выбрать'}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 3. Main Area: 3D Canvas OR Grid Cards */}
+      {viewMode === '3d' && hasWebGL ? (
+        <div
+          className="w-full h-[320px] sm:h-[350px] relative cursor-grab active:cursor-grabbing touch-none overflow-hidden"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerLeave={handlePointerUp}
+        >
           <Canvas
             frameloop={isInView ? 'always' : 'never'}
-            dpr={[1, 2]} // DPR capped at 2
-            camera={{ position: [0, 0.2, 5.0], fov: 44 }}
+            dpr={[1, 2]}
+            camera={{ position: [0, 0.4, 4.8], fov: 42 }}
             style={{ width: '100%', height: '100%', background: '#ECE7DB' }}
           >
-            {/* Scene background equals page panel color #ECE7DB (no visible canvas edges) */}
             <color attach="background" args={['#ECE7DB']} />
-
-            {/* Studio Environment for Glass Reflections */}
             <Environment preset="studio" />
-
-            {/* Ambient & Directional Lights */}
             <ambientLight intensity={0.8} />
             <directionalLight position={[5, 8, 5]} intensity={1.4} castShadow />
             <directionalLight position={[-5, 5, -5]} intensity={0.6} color="#9FD8DD" />
             <pointLight position={[0, -2, 2]} intensity={0.5} color="#5CC8CF" />
 
-            {/* Orb Row Group with drag inertia & damping */}
             <OrbRowGroup
               voices={displayedVoices}
               selectedVoiceId={selectedVoiceId}
               playingVoiceId={playingVoiceId}
               onSelectVoice={(id) => {
-                if (onSelectVoice) onSelectVoice(id);
-                handleTogglePlaySample(id);
+                handleSelectAndCenter(id);
               }}
               hoveredId={hoveredId}
               setHoveredId={setHoveredId}
@@ -515,107 +591,112 @@ export const VoiceGallery3D: React.FC<VoiceGallery3DProps> = ({
               isDraggingRef={isDraggingRef}
             />
           </Canvas>
-        ) : (
-          /* WebGL Fallback: static radial-gradient tiles with the same voice colors */
-          <div className="w-full h-full p-6 flex flex-col justify-center items-center bg-[#ECE7DB]">
-            <p className="text-xs font-mono text-[#5D594E] mb-4">
-              WebGL faollashtirilmagan. Standart ovoz kartochkalari ko'rsatilmoqda:
-            </p>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 max-w-2xl w-full">
-              {displayedVoices.map((v) => {
-                const palette = getPaletteForVoice(v);
-                const isSelected = v.id === selectedVoiceId;
-                return (
-                  <div
-                    key={v.id}
-                    onClick={() => {
-                      if (onSelectVoice) onSelectVoice(v.id);
-                      handleTogglePlaySample(v.id);
-                    }}
-                    className={`p-4 rounded-2xl border text-center transition-all cursor-pointer shadow-sm ${
-                      isSelected
-                        ? 'border-[#0E7C86] ring-2 ring-[#0E7C86]/30 bg-white'
-                        : 'border-[rgba(22,21,17,0.12)] bg-white/70 hover:bg-white'
-                    }`}
-                  >
-                    <div
-                      className="w-9 h-9 rounded-full mx-auto shadow-sm mb-2 flex items-center justify-center text-white"
-                      style={{
-                        background: `radial-gradient(circle at 35% 35%, ${palette.tint} 0%, ${palette.core} 100%)`,
-                      }}
-                    >
-                      <Sparkles className="w-4 h-4" />
-                    </div>
-                    <p className="font-serif text-xs font-semibold text-[#161511]">
-                      {palette.shortName}
-                    </p>
-                    <p className="font-mono text-[9px] text-[#5D594E] mt-0.5">
-                      {palette.modelLabel}
-                    </p>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* ------------------------------------------------------------- */}
-      {/* Bottom Voice Selector Bar (Quick Switch & Test Audio)          */}
-      {/* ------------------------------------------------------------- */}
-      <div className="p-4 sm:p-5 bg-[rgba(255,255,255,0.65)] border-t border-[rgba(22,21,17,0.08)] backdrop-blur-sm">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
-            {displayedVoices.map((voice) => {
-              const palette = getPaletteForVoice(voice);
-              const isSelected = voice.id === selectedVoiceId;
-              const isPlaying = voice.id === playingVoiceId;
+        </div>
+      ) : (
+        /* Grid Card View (Responsive, rock-solid, ultra-clean) */
+        <div className="p-5 sm:p-6 bg-[#ECE7DB]">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4 max-w-5xl mx-auto">
+            {displayedVoices.map((v) => {
+              const palette = getPaletteForVoice(v);
+              const isSelected = v.id === selectedVoiceId;
+              const isPlaying = v.id === playingVoiceId;
 
               return (
-                <button
-                  key={voice.id}
-                  type="button"
-                  onClick={() => {
-                    if (onSelectVoice) onSelectVoice(voice.id);
-                  }}
-                  className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 shadow-2xs ${
+                <div
+                  key={v.id}
+                  onClick={() => handleSelectAndCenter(v.id)}
+                  className={`p-4 rounded-2xl border transition-all cursor-pointer shadow-xs relative flex flex-col justify-between ${
                     isSelected
-                      ? 'bg-[#161511] text-[#F4F1EA] ring-2 ring-[#0E7C86]/30'
-                      : 'bg-white hover:bg-[#F4F1EA] text-[#5D594E] hover:text-[#161511] border border-[rgba(22,21,17,0.12)]'
+                      ? 'border-[#0E7C86] ring-2 ring-[#0E7C86]/30 bg-white'
+                      : 'border-[rgba(22,21,17,0.12)] bg-white/70 hover:bg-white hover:border-[#0E7C86]/60'
                   }`}
                 >
-                  <span
-                    className="w-2.5 h-2.5 rounded-full shrink-0"
-                    style={{ backgroundColor: palette.core }}
-                  />
-                  <span>{palette.shortName}</span>
-                </button>
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div
+                        className="w-9 h-9 rounded-xl shadow-xs flex items-center justify-center text-white"
+                        style={{ backgroundColor: palette.core }}
+                      >
+                        <span className="font-serif font-bold text-sm">
+                          {palette.shortName.charAt(0)}
+                        </span>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleTogglePlaySample(v.id);
+                        }}
+                        className={`p-1.5 rounded-full transition-colors ${
+                          isPlaying
+                            ? 'bg-[#0E7C86] text-white'
+                            : 'bg-[#ECE7DB] hover:bg-[#161511] text-[#161511] hover:text-white'
+                        }`}
+                        title="Ovozni sinash"
+                      >
+                        {isPlaying ? (
+                          <Square className="w-3 h-3 fill-current" />
+                        ) : (
+                          <Play className="w-3 h-3 fill-current translate-x-0.5" />
+                        )}
+                      </button>
+                    </div>
+
+                    <div>
+                      <p className="font-serif text-xs sm:text-sm font-semibold text-[#161511]">
+                        {palette.shortName}
+                      </p>
+                      <p className="font-mono text-[10px] text-[#0A5A62] mt-0.5 font-bold">
+                        {palette.modelLabel}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 pt-2 border-t border-[rgba(22,21,17,0.06)] flex items-center justify-between">
+                    <span className="text-[10px] font-mono text-[#5D594E] truncate max-w-[90px]">
+                      {v.timbre?.split(' ')[0] || 'Studio HD'}
+                    </span>
+                    {isSelected && (
+                      <span className="text-[10px] font-mono font-bold text-[#0E7C86] flex items-center gap-0.5">
+                        <Check className="w-3 h-3 stroke-[3]" /> Tanlangan
+                      </span>
+                    )}
+                  </div>
+                </div>
               );
             })}
           </div>
+        </div>
+      )}
 
-          {/* Active Voice Test & Info */}
-          {selectedVoice && (
-            <div className="flex items-center gap-2 ml-auto">
+      {/* 4. Bottom Horizontal Voice Chips (Quick jump & 1-click select) */}
+      <div className="p-3 sm:p-4 bg-[rgba(255,255,255,0.7)] border-t border-[rgba(22,21,17,0.08)] backdrop-blur-md">
+        <div className="flex items-center gap-1.5 overflow-x-auto visible-scrollbar pb-1">
+          {displayedVoices.map((voice) => {
+            const palette = getPaletteForVoice(voice);
+            const isSelected = voice.id === selectedVoiceId;
+
+            return (
               <button
+                key={voice.id}
                 type="button"
-                onClick={() => handleTogglePlaySample(selectedVoice.id)}
-                className="px-4 py-2 rounded-full bg-[#0E7C86] hover:bg-[#0A5A62] text-white text-xs font-semibold flex items-center gap-2 shadow-xs transition-all cursor-pointer"
+                onClick={() => handleSelectAndCenter(voice.id)}
+                className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap shrink-0 shadow-2xs ${
+                  isSelected
+                    ? 'bg-[#161511] text-[#F4F1EA] ring-2 ring-[#0E7C86]/30'
+                    : 'bg-white hover:bg-[#F4F1EA] text-[#5D594E] hover:text-[#161511] border border-[rgba(22,21,17,0.12)]'
+                }`}
               >
-                {playingVoiceId === selectedVoice.id ? (
-                  <>
-                    <Square className="w-3.5 h-3.5 fill-current" />
-                    <span>{lang === 'uz' ? 'To\'xtatish' : 'Стоп'}</span>
-                  </>
-                ) : (
-                  <>
-                    <Play className="w-3.5 h-3.5 fill-current translate-x-0.5" />
-                    <span>{lang === 'uz' ? 'Ovozni sinash (Test)' : 'Прослушать'}</span>
-                  </>
-                )}
+                <span
+                  className="w-2.5 h-2.5 rounded-full shrink-0"
+                  style={{ backgroundColor: palette.core }}
+                />
+                <span>{palette.shortName}</span>
+                {isSelected && <Check className="w-3 h-3 text-[#5CC8CF] stroke-[2.5]" />}
               </button>
-            </div>
-          )}
+            );
+          })}
         </div>
       </div>
     </div>

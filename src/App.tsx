@@ -26,9 +26,16 @@ import { PODCAST_CATEGORIES } from './data/categories';
 import { PREBUILT_VOICE_PROFILES, USER_REPLICATED_VOICE, DEFAULT_USER_VOICE } from './data/voices';
 import { VoiceProfile, PodcastCategory, AmbientSoundscape } from './types/podcast';
 import { getAllPodcastsFromDb, savePodcastToDb, deletePodcastFromDb } from './utils/db';
+import { getMappedTimbrePrompt } from './utils/audioUtils';
 import { Zap, FileText, X } from 'lucide-react';
+import { authFetch } from './utils/authFetch';
+import { GenerationCountdownHUD } from './components/GenerationCountdownHUD';
+import {
+  useGenerationCountdown,
+  calculateAudioSynthesizeSeconds,
+} from './hooks/useGenerationCountdown';
 
-const LOCAL_STORAGE_VOICES_KEY = 'podkast_uz_voices_v2';
+const LOCAL_STORAGE_VOICES_KEY = 'podkast_uz_voices_v5';
 const LOCAL_STORAGE_PODCASTS_KEY = 'podkast_uz_library_v2';
 
 export default function App() {
@@ -38,31 +45,135 @@ export default function App() {
     credits,
     requireAuth,
     useCredit,
+    syncCredits,
     addCredits,
     logGeneration,
     openAuthModal,
     openPricingModal,
   } = useAuth();
 
-  // Navigation & Language
+  // Navigation & Language (URL Hash Synced)
   const [activeTab, setActiveTab] = useState<AppTab>(() => {
     if (typeof window !== 'undefined') {
-      if (window.location.hash === '#studio') return 'studio';
-      if (window.location.hash === '#docs') return 'docs';
+      const h = window.location.hash;
+      if (h === '#studio' || h === '#dialogue' || h === '#voiceover') return 'studio';
+      if (h === '#agent') return 'agent';
+      if (h === '#exclusive') return 'exclusive';
+      if (h === '#cms') return 'cms';
+      if (h === '#voices') return 'voices';
+      if (h === '#docs') return 'docs';
     }
     return 'landing';
   });
-  const [studioMode, setStudioMode] = useState<'solo' | 'interview' | 'voiceover'>('solo');
+  const [studioMode, setStudioMode] = useState<'solo' | 'interview' | 'voiceover'>(() => {
+    if (typeof window !== 'undefined') {
+      const h = window.location.hash;
+      if (h === '#dialogue') return 'interview';
+      if (h === '#voiceover') return 'voiceover';
+    }
+    return 'solo';
+  });
   const [lang, setLang] = useState<'uz' | 'ru'>('uz');
 
-  // Voices State
+  // Sync hash changes from browser back/forward or direct URL
+  useEffect(() => {
+    const handleHash = () => {
+      const h = window.location.hash;
+      if (h === '#studio') {
+        setActiveTab('studio');
+        setStudioMode('solo');
+      } else if (h === '#dialogue') {
+        setActiveTab('studio');
+        setStudioMode('interview');
+      } else if (h === '#voiceover') {
+        setActiveTab('studio');
+        setStudioMode('voiceover');
+      } else if (h === '#agent') {
+        setActiveTab('agent');
+      } else if (h === '#exclusive') {
+        setActiveTab('exclusive');
+      } else if (h === '#cms') {
+        setActiveTab('cms');
+      } else if (h === '#voices') {
+        setActiveTab('voices');
+      } else if (h === '#docs') {
+        setActiveTab('docs');
+      } else if (h === '#landing') {
+        setActiveTab('landing');
+      }
+    };
+    window.addEventListener('hashchange', handleHash);
+    return () => window.removeEventListener('hashchange', handleHash);
+  }, []);
+
+  // Update hash when activeTab or studioMode changes
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      let targetHash = '#landing';
+      if (activeTab === 'studio') {
+        targetHash = studioMode === 'solo' ? '#studio' : studioMode === 'interview' ? '#dialogue' : '#voiceover';
+      } else if (activeTab === 'agent') targetHash = '#agent';
+      else if (activeTab === 'exclusive') targetHash = '#exclusive';
+      else if (activeTab === 'cms') targetHash = '#cms';
+      else if (activeTab === 'voices') targetHash = '#voices';
+      else if (activeTab === 'docs') targetHash = '#docs';
+
+      if (window.location.hash !== targetHash && !(activeTab === 'landing' && window.location.hash === '')) {
+        window.history.replaceState(null, '', targetHash);
+      }
+    }
+  }, [activeTab, studioMode]);
+
+  // Voices State: Always ensure all prebuilt catalog voices are present
   const [voices, setVoices] = useState<VoiceProfile[]>(() => {
     try {
+      // Clear stale legacy caches that caused missing voices or 0 voices on gender filter
+      localStorage.removeItem('podkast_uz_voices');
+      localStorage.removeItem('podkast_uz_voices_v1');
+      localStorage.removeItem('podkast_uz_voices_v2');
+      localStorage.removeItem('podkast_uz_voices_v3');
+      localStorage.removeItem('podkast_uz_voices_v4');
+
       const saved = localStorage.getItem(LOCAL_STORAGE_VOICES_KEY);
+      const customVoices: VoiceProfile[] = [];
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed)) {
+          for (const item of parsed) {
+            // Keep ONLY user custom/replicated voices, never override prebuilt voices
+            if (item.isUserCustomVoice || item.isReplicatedVoice) {
+              if (item.id !== USER_REPLICATED_VOICE.id) {
+                customVoices.push(item);
+              }
+            }
+          }
+        }
       }
+
+      // Merge: all prebuilt catalog voices + user custom voices
+      const voiceMap = new Map<string, VoiceProfile>();
+      for (const pv of PREBUILT_VOICE_PROFILES) {
+        const isFemale =
+          pv.gender === 'female' ||
+          ['Kore', 'Aoede', 'Zephyr'].includes(pv.baseVoice) ||
+          /aziza|madina|dilnoza|zarina|nodira|malika|sevara|shahnoza|rayhon|gulzoda|umida|nigora|feruza|ayol/i.test(pv.name || pv.id);
+        voiceMap.set(pv.id, {
+          ...pv,
+          gender: isFemale ? 'female' : 'male',
+        });
+      }
+      for (const cv of customVoices) {
+        const isFemale =
+          cv.gender === 'female' ||
+          ['Kore', 'Aoede', 'Zephyr'].includes(cv.baseVoice) ||
+          /aziza|madina|dilnoza|zarina|nodira|malika|sevara|shahnoza|rayhon|gulzoda|umida|nigora|feruza|ayol/i.test(cv.name || cv.id);
+        voiceMap.set(cv.id, {
+          ...cv,
+          gender: isFemale ? 'female' : 'male',
+        });
+      }
+
+      return Array.from(voiceMap.values());
     } catch (e) {
       console.error(e);
     }
@@ -97,15 +208,15 @@ export default function App() {
     setTargetSeconds(computedDuration);
   }, [computedDuration]);
 
-  // Map timbreValue to descriptive prompt
-  const getMappedTimbrePrompt = (val: number) => {
-    if (val < -0.3) return 'Chuqur jarangdor bas rezonans';
-    if (val > 0.3) return 'Yorqin, tiniq va jarangdor tenor diksiya';
-    return 'Iliq, salobatli va boy bariton';
-  };
-
   // Synthesizing & Audio Result
   const [isSynthesizing, setIsSynthesizing] = useState<boolean>(false);
+  const soloEstimatedGenSeconds = calculateAudioSynthesizeSeconds(wordCount, tempo);
+  const soloAudioCountdown = useGenerationCountdown(
+    isSynthesizing,
+    soloEstimatedGenSeconds,
+    lang,
+    'audio_solo'
+  );
   const [currentAudio, setCurrentAudio] = useState<{
     rawAudioWavBase64: string;
     durationSeconds: number;
@@ -161,19 +272,27 @@ export default function App() {
     const sessionId = params.get('session_id');
 
     if (paymentStatus === 'success' && sessionId) {
-      fetch(`/api/billing/verify-session/${sessionId}`)
+      authFetch(`/api/billing/verify-session/${sessionId}`)
         .then((res) => res.json())
         .then((data) => {
           if (data.paid && data.credits) {
-            addCredits(
-              data.credits,
-              data.planId === 'pro' || data.planId === 'unlimited' ? data.planId : undefined
-            );
-            setPaymentNotice(
-              lang === 'uz'
-                ? `To'lov muvaffaqiyatli qabul qilindi! Hisobingizga +${data.credits} kredit qo'shildi.`
-                : `Оплата прошла успешно! На ваш баланс начислено +${data.credits} кредитов.`
-            );
+            if (data.newlyCredited) {
+              addCredits(
+                data.credits,
+                data.planId === 'pro' || data.planId === 'unlimited' ? data.planId : undefined
+              );
+              setPaymentNotice(
+                lang === 'uz'
+                  ? `To'lov muvaffaqiyatli qabul qilindi! Hisobingizga +${data.credits} kredit qo'shildi.`
+                  : `Оплата прошла успешно! На ваш баланс начислено +${data.credits} кредитов.`
+              );
+            } else {
+              setPaymentNotice(
+                lang === 'uz'
+                  ? `To'lov allaqachon tasdiqlangan. Joriy balansingiz: ${data.creditsRemaining || credits || 0} kredit.`
+                  : `Оплата уже была зачислена. Ваш текущий баланс: ${data.creditsRemaining || credits || 0} кредитов.`
+              );
+            }
             setTimeout(() => setPaymentNotice(null), 7000);
           }
         })
@@ -194,6 +313,22 @@ export default function App() {
 
   const activeVoice = voices.find((v) => v.id === selectedVoiceId) || DEFAULT_USER_VOICE;
 
+  const getBreadcrumbTitle = (): string => {
+    if (activeTab === 'studio') {
+      if (studioMode === 'solo') return lang === 'uz' ? 'YAKKAXON PODKAST (TTS)' : 'ТЕКСТ В РЕЧЬ';
+      if (studioMode === 'interview') return lang === 'uz' ? '2 OVOZLI INTERVYU' : 'ДИАЛОГ';
+      if (studioMode === 'voiceover') return lang === 'uz' ? 'VIDEO DUBLYAJ' : 'ДУБЛЯЖ';
+    }
+    if (activeTab === 'dialogue') return lang === 'uz' ? '2 OVOZLI INTERVYU' : 'ДИАЛОГ';
+    if (activeTab === 'voiceover') return lang === 'uz' ? 'VIDEO DUBLYAJ' : 'ДУБЛЯЖ';
+    if (activeTab === 'agent') return lang === 'uz' ? 'AI QOʻNGʻIROQ AGENTI' : 'ГОЛОСОВОЙ АГЕНТ';
+    if (activeTab === 'exclusive') return lang === 'uz' ? 'EKSKLYUZIV VIP HUB' : 'ЭКСКЛЮЗИВ VIP';
+    if (activeTab === 'cms') return lang === 'uz' ? 'MENING KUTUBXONAM' : 'МЕДИАТЕКА';
+    if (activeTab === 'voices') return lang === 'uz' ? 'OVOZLAR LABORATORIYASI' : 'ЛАБОРАТОРИЯ ГОЛОСОВ';
+    if (activeTab === 'docs') return 'API v1.0 STABLE';
+    return lang === 'uz' ? 'STUDIYA' : 'СТУДИЯ';
+  };
+
   // Synthesize Speech Action
   const handleSynthesize = async () => {
     const isAuthed = requireAuth(
@@ -208,7 +343,7 @@ export default function App() {
     setIsSynthesizing(true);
     try {
       const mappedTimbre = getMappedTimbrePrompt(timbreValue);
-      const res = await fetch('/api/podcast/synthesize', {
+      const res = await authFetch('/api/podcast/synthesize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -226,11 +361,33 @@ export default function App() {
       });
 
       if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || 'Ovoz sintezida xatolik');
+        let errMessage = lang === 'uz' ? 'Ovoz sintezida xatolik' : 'Ошибка при синтезе речи';
+        try {
+          const err = await res.json();
+          errMessage = (lang === 'ru' && err.message_ru) ? err.message_ru : (err.message || err.error || errMessage);
+        } catch {
+          const raw = await res.text().catch(() => '');
+          if (res.status === 504 || res.status === 500) {
+            errMessage = lang === 'uz'
+              ? 'Server javob berish vaqti tugadi yoki server band. Iltimos, qaytadan urinib ko\'ring.'
+              : 'Время ожидания ответа сервера истекло. Пожалуйста, повторите попытку.';
+          } else if (raw) {
+            errMessage = raw;
+          }
+        }
+        throw new Error(errMessage);
       }
 
-      const data = await res.json();
+      let data: any;
+      try {
+        data = await res.json();
+      } catch {
+        throw new Error(
+          lang === 'uz'
+            ? 'Serverdan kutilmagan javob qaytdi. Qaytadan urinib ko\'ring.'
+            : 'Сервер вернул неожиданный ответ. Повторите попытку.'
+        );
+      }
       if (data.audioBase64) {
         const audioItem = {
           rawAudioWavBase64: data.audioBase64,
@@ -267,7 +424,11 @@ export default function App() {
 
         savePodcastToDb(newCmsItem);
         setPodcasts((prev) => [newCmsItem, ...prev]);
-        await useCredit(1);
+        if (typeof data.creditsRemaining === 'number') {
+          syncCredits(data.creditsRemaining);
+        } else {
+          await useCredit(1);
+        }
         await logGeneration('podcast', title || 'O\'zbekcha Podkast', 1);
       }
     } catch (err: any) {
@@ -280,6 +441,17 @@ export default function App() {
   const handleOpenInStudio = (p: CMSPodcastItem) => {
     setTitle(p.title);
     setScriptText(p.script);
+    if (p.rawAudioWavBase64) {
+      setCurrentAudio({
+        title: p.title,
+        voiceName: p.voiceName,
+        category: p.category,
+        durationSeconds: p.durationSeconds,
+        rawAudioWavBase64: p.rawAudioWavBase64,
+        ambientSound: p.ambientSound || 'none',
+        ambientVolume: p.ambientVolume || 20,
+      });
+    }
     setActiveTab('studio');
     setStudioMode('solo');
   };
@@ -331,22 +503,13 @@ export default function App() {
                     : (lang === 'uz' ? 'STUDIYA' : 'СТУДИЯ')}
                 </span>
                 <span className="text-[#161511]/30">·</span>
-                <b className="text-[#161511]">
-                  {activeTab === 'studio' && studioMode === 'solo' && (lang === 'uz' ? 'YAKKAXON PODKAST (TTS)' : 'ТЕКСТ В РЕЧЬ')}
-                  {activeTab === 'studio' && studioMode === 'interview' && (lang === 'uz' ? '2 OVOZLI INTERVYU' : 'ДИАЛОГ')}
-                  {activeTab === 'studio' && studioMode === 'voiceover' && (lang === 'uz' ? 'VIDEO DUBLYAJ' : 'ДУБЛЯЖ')}
-                  {activeTab === 'agent' && (lang === 'uz' ? 'AI QOʻNGʻIROQ AGENTI' : 'ГОЛОСОВОЙ АГЕНТ')}
-                  {activeTab === 'exclusive' && (lang === 'uz' ? 'EKSKLYUZIV VIP HUB' : 'ЭКСКЛЮЗИВ VIP')}
-                  {activeTab === 'cms' && (lang === 'uz' ? 'MENING KUTUBXONAM' : 'МЕДИАТЕКА')}
-                  {activeTab === 'voices' && (lang === 'uz' ? 'OVOZLAR LABORATORIYASI' : 'ЛАБОРАТОРИЯ ГОЛОСОВ')}
-                  {activeTab === 'docs' && 'API v1.0 STABLE'}
-                </b>
+                <b className="text-[#161511]">{getBreadcrumbTitle()}</b>
               </div>
 
-              {/* Gemini 3.8 Live Status Badge */}
+              {/* OvozStudio Neural Engine Status Badge */}
               <div className="hidden sm:inline-flex items-center gap-2 font-mono text-[10.5px] uppercase tracking-[0.12em] text-[#0A5A62] border border-[rgba(14,124,134,0.35)] rounded-full px-3 py-1">
                 <i className="w-1.5 h-1.5 rounded-full bg-[#0E7C86] pulse-teal-dot" />
-                <span>Gemini 3.8 TTS Live</span>
+                <span>OvozStudio Neural Live</span>
               </div>
 
               {/* Topbar Right Controls */}
@@ -409,6 +572,18 @@ export default function App() {
 
             {/* Scrollable Center Workspace */}
             <main className="flex-1 overflow-y-auto px-4 sm:px-6 lg:px-8 py-6 max-w-7xl w-full mx-auto pb-24">
+              {/* Floating Real-time Countdown HUD during Solo Audio Synthesis */}
+              {isSynthesizing && (
+                <GenerationCountdownHUD
+                  countdown={soloAudioCountdown}
+                  isActive={isSynthesizing}
+                  lang={lang}
+                  title={lang === 'uz' ? `${activeVoice.name} bilan podkast ovozi yaratilmoqda` : `Создание подкаста голосом ${activeVoice.name}`}
+                  subtitle={lang === 'uz' ? soloAudioCountdown.phaseNameUz : soloAudioCountdown.phaseNameRu}
+                  mode="floating"
+                />
+              )}
+
               <AnimatePresence mode="wait">
                 <motion.div
                   key={`${activeTab}-${studioMode}`}
@@ -435,11 +610,15 @@ export default function App() {
                           lang={lang}
                         />
 
-                        {/* Live Writing Waveform (During generation) */}
+                        {/* Live Writing Waveform with Real-time Countdown & Progress */}
                         {isSynthesizing && (
                           <LiveWritingWaveform
                             voiceName={activeVoice.name}
                             lang={lang}
+                            wordCount={wordCount}
+                            estimatedAudioSeconds={targetSeconds}
+                            isSynthesizing={isSynthesizing}
+                            countdownState={soloAudioCountdown}
                           />
                         )}
 
@@ -472,6 +651,7 @@ export default function App() {
                                 rawAudioWavBase64: currentAudio.rawAudioWavBase64,
                                 createdAt: new Date().toISOString(),
                               };
+                              savePodcastToDb(newCmsItem);
                               setPodcasts((prev) => [newCmsItem, ...prev]);
                             }}
                             lang={lang}
@@ -659,6 +839,7 @@ export default function App() {
                 isAuthenticated={isAuthenticated}
                 isAdmin={isAdmin}
                 lang={lang}
+                countdownState={soloAudioCountdown}
               />
             )}
           </div>

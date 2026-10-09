@@ -1,5 +1,11 @@
 import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { VoiceProfile, VoiceoverFormat, VideoSourceMode, DubbingTimelineSegment } from '../types/podcast';
+import { authFetch } from '../utils/authFetch';
+import { useGenerationCountdown } from '../hooks/useGenerationCountdown';
+import {
+  GenerationCountdownHUD,
+  PreCalculationBadge,
+} from './GenerationCountdownHUD';
 import {
   Film,
   Sparkles,
@@ -72,7 +78,7 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
   onOpenDocumentModal,
   lang,
 }) => {
-  const { isAuthenticated, requireAuth, useCredit, logGeneration } = useAuth();
+  const { isAuthenticated, requireAuth, useCredit, syncCredits, logGeneration } = useAuth();
 
   // Source Mode: File Upload vs URL vs Text Generator
   const [sourceMode, setSourceMode] = useState<VideoSourceMode>('file_upload');
@@ -122,6 +128,11 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
   const [isGeneratingSubtitles, setIsGeneratingSubtitles] = useState(false);
   const [isSynthesizing, setIsSynthesizing] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
+
+  // Pre-calculate estimated generation duration for dubbing
+  const dubbingWordCount = (script || '').trim().split(/\s+/).filter(Boolean).length;
+  const estimatedDubbingSeconds = Math.max(4, Math.round(3.0 + (dubbingWordCount / 85)));
+  const dubbingCountdown = useGenerationCountdown(isSynthesizing, estimatedDubbingSeconds, lang);
 
   // Audio & Dubbing Playback State
   const [resultAudio, setResultAudio] = useState<string | null>(null);
@@ -287,7 +298,7 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
   const fetchAuditLogs = async () => {
     setIsLoadingAuditLogs(true);
     try {
-      const res = await fetch('/api/voiceover/pipeline-logs');
+      const res = await authFetch('/api/voiceover/pipeline-logs');
       if (res.ok) {
         const data = await res.json();
         setAuditLogsList(data.logs || []);
@@ -315,7 +326,7 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
     const t1 = setTimeout(() => {
       setPipelineCurrentStage('transcribe');
       setAnalysisProgressText(
-        lang === 'uz' ? '2/3. Nutqni so\'zma-so\'z aniqlash & Diarizatsiya (Gemini 3.8)...' : '2/3. Распознавание речи и разделение говорящих...'
+        lang === 'uz' ? '2/3. Nutqni so\'zma-so\'z aniqlash & Diarizatsiya (AI Engine)...' : '2/3. Распознавание речи и разделение говорящих...'
       );
     }, 2500);
 
@@ -327,7 +338,7 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
     }, 6000);
 
     try {
-      const res = await fetch('/api/voiceover/process-pipeline', {
+      const res = await authFetch('/api/voiceover/process-pipeline', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -400,7 +411,7 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
     const t3 = setTimeout(() => setPipelineCurrentStage('translate'), 8000);
 
     try {
-      const res = await fetch('/api/voiceover/fetch-media-url', {
+      const res = await authFetch('/api/voiceover/fetch-media-url', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: inputUrl }),
@@ -472,7 +483,7 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
     if (!customSpeechText.trim()) return;
     setIsTranslatingCustomSpeech(true);
     try {
-      const res = await fetch('/api/voiceover/translate-custom-speech', {
+      const res = await authFetch('/api/voiceover/translate-custom-speech', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -509,7 +520,7 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
     setIsGeneratingSubtitles(true);
     try {
       const topicToUse = overrideTopic || topic || "Video Dublyaji";
-      const res = await fetch('/api/voiceover/generate-video-subtitles', {
+      const res = await authFetch('/api/voiceover/generate-video-subtitles', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -590,7 +601,7 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
 
     setIsGeneratingScript(true);
     try {
-      const res = await fetch('/api/voiceover/generate-script', {
+      const res = await authFetch('/api/voiceover/generate-script', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -638,7 +649,7 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
     setIsSynthesizing(true);
 
     try {
-      const res = await fetch('/api/voiceover/synthesize', {
+      const res = await authFetch('/api/voiceover/synthesize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -655,19 +666,45 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
       });
 
       if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || 'Dublyaj sintezida xatolik');
+        let errMessage = lang === 'uz' ? 'Dublyaj sintezida xatolik yuz berdi' : 'Ошибка при синтезе дубляжа';
+        try {
+          const err = await res.json();
+          errMessage = (lang === 'ru' && err.message_ru) ? err.message_ru : (err.message || err.error || errMessage);
+        } catch {
+          const raw = await res.text().catch(() => '');
+          if (res.status === 504 || res.status === 500) {
+            errMessage = lang === 'uz'
+              ? 'Server javob berish vaqti tugadi yoki server band. Iltimos, qaytadan urinib ko\'ring.'
+              : 'Время ожидания ответа сервера истекло. Пожалуйста, попробуйте еще раз.';
+          } else if (raw) {
+            errMessage = raw;
+          }
+        }
+        throw new Error(errMessage);
       }
 
-      const data = await res.json();
+      let data: any;
+      try {
+        data = await res.json();
+      } catch {
+        throw new Error(
+          lang === 'uz'
+            ? 'Serverdan kutilmagan javob qaytdi. Qaytadan urinib ko\'ring.'
+            : 'Сервер вернул неожиданный ответ. Попробуйте еще раз.'
+        );
+      }
       setResultAudio(data.audioBase64);
       setAudioDuration(data.durationSeconds || 0);
       setSrtSubtitles(data.srtSubtitles || '');
       setVttSubtitles(data.vttSubtitles || '');
       setIsPlaying(false);
 
-      // Deduct credit & record generation
-      await useCredit(1);
+      // Sync remaining credits or fallback
+      if (typeof data.creditsRemaining === 'number') {
+        syncCredits(data.creditsRemaining);
+      } else {
+        await useCredit(1);
+      }
       await logGeneration('dubbing', topic || 'Video Dublyaj', 1);
     } catch (e: any) {
       alert(`Xatolik: ${e.message}`);
@@ -1054,8 +1091,8 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
                       </p>
                       <p className="text-[#5D594E] leading-relaxed text-[11px]">
                         {lang === 'uz'
-                          ? "Gemini rolikdagi nutqni eshitib, xronometraj bo'yicha (taymkodlar) segmentlarga ajratadi va o'zbek tiliga xuddi shu vaqt ichida jaranglaydigan qilib tarjima qiladi."
-                          : 'Gemini анализирует речь, разбивает на таймкоды оригинала и генерирует перевод с идеальной укладкой в губы и длительность фраз.'}
+                          ? "Sun'iy intellekt rolikdagi nutqni eshitib, xronometraj bo'yicha (taymkodlar) segmentlarga ajratadi va o'zbek tiliga xuddi shu vaqt ichida jaranglaydigan qilib tarjima qiladi."
+                          : 'ИИ анализирует речь, разбивает на таймкоды оригинала и генерирует перевод с идеальной укладкой в губы и длительность фраз.'}
                       </p>
                     </div>
 
@@ -1136,7 +1173,7 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
                   <span className="text-[11px] font-mono text-[#0A5A62] font-semibold">
                     {pipelineCurrentStage === 'download' && (lang === 'uz' ? '1/4. Video yuklanmoqda...' : '1/4. Скачивание видео...')}
                     {pipelineCurrentStage === 'extract' && (lang === 'uz' ? '2/4. Audio ajratilmoqda (FFmpeg)...' : '2/4. Извлечение аудио (FFmpeg)...')}
-                    {pipelineCurrentStage === 'transcribe' && (lang === 'uz' ? '3/4. Nutq aniqlanmoqda (Gemini STT)...' : '3/4. Распознавание речи (Gemini STT)...')}
+                    {pipelineCurrentStage === 'transcribe' && (lang === 'uz' ? '3/4. Nutq aniqlanmoqda (Neural STT)...' : '3/4. Распознавание речи (Neural STT)...')}
                     {pipelineCurrentStage === 'translate' && (lang === 'uz' ? '4/4. O\'zbek tiliga sinxron tarjima...' : '4/4. Синхронный перевод на узбекский...')}
                     {pipelineCurrentStage === 'complete' && (lang === 'uz' ? '✅ Konveyer muvaffaqiyatli yakunlandi' : '✅ Конвейер успешно завершен')}
                     {pipelineCurrentStage === 'error' && (lang === 'uz' ? '⚠️ Xatolik yuz berdi' : '⚠️ Ошибка конвейера')}
@@ -1203,7 +1240,7 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
                     )}
                     <div className="min-w-0">
                       <p className="font-bold truncate text-[11px]">3. {lang === 'uz' ? 'Nutqni aniqlash' : 'Распознавание'}</p>
-                      <p className="text-[10px] text-[#5D594E] truncate font-mono">Gemini STT</p>
+                      <p className="text-[10px] text-[#5D594E] truncate font-mono">Neural STT</p>
                     </div>
                   </div>
 
@@ -1238,8 +1275,8 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
                   <Sparkles className="w-4 h-4 shrink-0" />
                   <span>
                     {lang === 'uz'
-                      ? "Matn Gemini video tahlili orqali olindi (transcript_only rejimi)"
-                      : "Транскрипт получен через видеоанализ Gemini (режим transcript_only)"}
+                      ? "Matn video tahlili orqali olindi (transcript_only rejimi)"
+                      : "Транскрипт получен через видеоанализ (режим transcript_only)"}
                   </span>
                 </div>
                 <p className="text-[11px] text-[#5D594E] leading-relaxed">
@@ -1264,7 +1301,7 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
                         {lang === 'uz' ? '🎧 Ajratib olingan asl audio oqim (Original Track)' : '🎧 Извлечённая аудиодорожка оригинала'}
                       </p>
                       <p className="text-[10px] text-[#5D594E]">
-                        {lang === 'uz' ? 'FFmpeg orqali ajratilgan va Gemini STT ga uzatilgan haqiqiy audio' : 'Аудиодорожка, извлечённая через FFmpeg и переданная в Gemini'}
+                        {lang === 'uz' ? 'FFmpeg orqali ajratilgan va STT ga uzatilgan haqiqiy audio' : 'Аудиодорожка, извлечённая через FFmpeg и переданная в анализатор'}
                       </p>
                     </div>
                   </div>
@@ -1789,16 +1826,36 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
                 </span>
               </div>
 
-              <button
-                onClick={handleSynthesize}
-                disabled={isSynthesizing || (!script.trim() && timelineSegments.length === 0)}
-                className="btn-pill btn-solid text-xs sm:text-sm py-2.5 px-6 flex items-center justify-center gap-2 disabled:opacity-50"
-              >
-                <Volume2 className={`w-4 h-4 ${isSynthesizing ? 'animate-pulse text-[#5CC8CF]' : 'text-[#5CC8CF]'}`} />
-                {isSynthesizing
-                  ? (lang === 'uz' ? 'Ovozlashtirilmoqda...' : 'Синтез речи...')
-                  : (lang === 'uz' ? '🎙️ O\'zbekcha Ovozda Dublyaj Qilish (TTS)' : '🎙️ Озвучить на Узбекском')}
-              </button>
+              <div className="flex items-center gap-2.5 flex-wrap">
+                {!isSynthesizing && dubbingWordCount > 0 && (
+                  <PreCalculationBadge
+                    estimatedSeconds={estimatedDubbingSeconds}
+                    audioDurationSeconds={audioDuration || Math.round(dubbingWordCount / 2.2)}
+                    creditsCost={1}
+                    lang={lang}
+                  />
+                )}
+
+                <button
+                  onClick={handleSynthesize}
+                  disabled={isSynthesizing || (!script.trim() && timelineSegments.length === 0)}
+                  className="btn-pill btn-solid text-xs sm:text-sm py-2.5 px-6 flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  <Volume2 className={`w-4 h-4 ${isSynthesizing ? 'animate-pulse text-[#5CC8CF]' : 'text-[#5CC8CF]'}`} />
+                  {isSynthesizing ? (
+                    <>
+                      <span>
+                        {lang === 'uz'
+                          ? `Dublyaj: ${dubbingCountdown.remainingDigits} (~${dubbingCountdown.formattedRemaining})`
+                          : `Дубляж: ${dubbingCountdown.remainingDigits} (~${dubbingCountdown.formattedRemaining})`}
+                      </span>
+                      <span className="font-mono text-[10px] bg-white/20 px-1.5 py-0.5 rounded-full">{dubbingCountdown.progressPercent}%</span>
+                    </>
+                  ) : (
+                    lang === 'uz' ? '🎙️ O\'zbekcha Ovozda Dublyaj Qilish (TTS)' : '🎙️ Озвучить на Узбекском'
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1994,6 +2051,14 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
                   </button>
                 </div>
               </div>
+            ) : isSynthesizing ? (
+              <GenerationCountdownHUD
+                countdown={dubbingCountdown}
+                isActive={isSynthesizing}
+                lang={lang}
+                title={lang === 'uz' ? "Video Dublyaj & Ovozlashtirish" : "Синтез Дубляжа Видео"}
+                subtitle={lang === 'uz' ? dubbingCountdown.phaseNameUz : dubbingCountdown.phaseNameRu}
+              />
             ) : (
               <div className="p-8 rounded-2xl bg-white border border-dashed border-[rgba(22,21,17,0.2)] text-center space-y-2">
                 <Volume2 className="w-8 h-8 text-[#5D594E]/50 mx-auto" />

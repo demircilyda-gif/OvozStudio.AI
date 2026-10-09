@@ -1,7 +1,17 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { VoiceProfile, DialogueTurn, AmbientSoundscape, SoundCueType, AudioSegmentCue } from '../types/podcast';
+import { authFetch } from '../utils/authFetch';
 import { getVoicePreviewUrl } from '../data/voicePreviews';
 import { AMBIENT_SOUNDSCAPES } from '../data/ambientSoundscapes';
+import {
+  useGenerationCountdown,
+  calculateInterviewDialogueSeconds,
+  calculateAiScriptSeconds,
+} from '../hooks/useGenerationCountdown';
+import {
+  GenerationCountdownHUD,
+  PreCalculationBadge,
+} from './GenerationCountdownHUD';
 import {
   generateAmbientAudioBuffer,
   audioBufferToWav,
@@ -59,7 +69,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   onOpenDocumentModal,
   lang,
 }) => {
-  const { isAuthenticated, requireAuth, useCredit, logGeneration } = useAuth();
+  const { isAuthenticated, requireAuth, useCredit, syncCredits, logGeneration } = useAuth();
 
   // Speaker 1 (User's cloned voice)
   const [speaker1VoiceId, setSpeaker1VoiceId] = useState<string>(() => {
@@ -105,7 +115,12 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     setSpeaker2VoiceId(vId);
     const chosen = voices.find((v) => v.id === vId);
     if (chosen) {
-      const isFemale = chosen.gender === 'female' || chosen.baseVoice === 'Kore' || chosen.baseVoice === 'Aoede';
+      const isFemale =
+        chosen.gender === 'female' ||
+        chosen.baseVoice === 'Kore' ||
+        chosen.baseVoice === 'Aoede' ||
+        chosen.baseVoice === 'Zephyr' ||
+        /aziza|madina|dilnoza|zarina|nodira|malika|zephyr|kore|aoede|ayol/i.test(chosen.name || chosen.id);
       setSpeaker2Gender(isFemale ? 'female' : 'male');
       if (chosen.tempo) setSpeaker2Tempo(chosen.tempo.match(/[\d.]+x/)?.[0] || '1.0x');
       if (chosen.timbre) setSpeaker2Timbre(chosen.timbre);
@@ -128,6 +143,27 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       } else if (chosen.name.includes('Malika')) {
         setSpeaker2Name('Malika');
         setSpeaker2Role('Startap & Innovatsiya');
+      } else if (chosen.name.includes('Sevara') || chosen.name.includes('Zephyr')) {
+        setSpeaker2Name('Sevara');
+        setSpeaker2Role('Ilmiy & Texno Ekspert');
+      } else if (chosen.name.includes('Shahnoza')) {
+        setSpeaker2Name('Shahnoza');
+        setSpeaker2Role('Suxandon & Madaniyat');
+      } else if (chosen.name.includes('Rayhon')) {
+        setSpeaker2Name('Rayhon');
+        setSpeaker2Role('Audio-Kitob & Adabiyot');
+      } else if (chosen.name.includes('Gulzoda')) {
+        setSpeaker2Name('Gulzoda');
+        setSpeaker2Role('Pedagog & Ta\'lim');
+      } else if (chosen.name.includes('Umida')) {
+        setSpeaker2Name('Umida');
+        setSpeaker2Role('Tibbiyot & Salomatlik');
+      } else if (chosen.name.includes('Nigora')) {
+        setSpeaker2Name('Nigora');
+        setSpeaker2Role('Bolalar Adabiyoti');
+      } else if (chosen.name.includes('Feruza')) {
+        setSpeaker2Name('Feruza');
+        setSpeaker2Role('Oila & Munosabatlar');
       } else if (chosen.name.includes('Jasur')) {
         setSpeaker2Name('Jasur');
         setSpeaker2Role('Tadbirkor & Biznes Ekspert');
@@ -143,6 +179,27 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       } else if (chosen.name.includes('Bobur')) {
         setSpeaker2Name('Bobur');
         setSpeaker2Role('Motivator & Spiker');
+      } else if (chosen.name.includes('Javohir')) {
+        setSpeaker2Name('Javohir');
+        setSpeaker2Role('Kino & Teatr Diktori');
+      } else if (chosen.name.includes('Sanjar')) {
+        setSpeaker2Name('Sanjar');
+        setSpeaker2Role('Radio Boshlovchi');
+      } else if (chosen.name.includes('Sherzod')) {
+        setSpeaker2Name('Sherzod');
+        setSpeaker2Role('Tahliliy Jurnalist');
+      } else if (chosen.name.includes('Eldor')) {
+        setSpeaker2Name('Eldor');
+        setSpeaker2Role('Moliya Mutaxassisi');
+      } else if (chosen.name.includes('Bekzod')) {
+        setSpeaker2Name('Bekzod');
+        setSpeaker2Role('Sport & Fitnes Murabbiyi');
+      } else if (chosen.name.includes('Alisher')) {
+        setSpeaker2Name('Alisher');
+        setSpeaker2Role('Dasturchi & Kiberxavfsizlik');
+      } else if (chosen.name.includes('Rustam')) {
+        setSpeaker2Name('Rustam');
+        setSpeaker2Role('Agrobiznes & Fermer');
       }
     }
   };
@@ -175,7 +232,12 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       }
 
       const spkName = prof?.name || (isH1 ? speaker1Name : speaker2Name);
-      const isFemaleSpeaker = prof?.gender === 'female' || prof?.baseVoice === 'Kore' || prof?.baseVoice === 'Aoede';
+      const isFemaleSpeaker =
+        prof?.gender === 'female' ||
+        prof?.baseVoice === 'Kore' ||
+        prof?.baseVoice === 'Aoede' ||
+        prof?.baseVoice === 'Zephyr' ||
+        /aziza|madina|dilnoza|zarina|nodira|malika|zephyr|kore|aoede|ayol/i.test(spkName || prof?.id || '');
 
       const sampleText = isH1
         ? `Assalomu alaykum! Men ${spkName}man. Bugungi intervyu podkastimizga xush kelibsiz.`
@@ -183,7 +245,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         ? `Salom! Men ${spkName} bo'laman. Bugungi qiziqarli suhbatda qatnashishdan judayam mamnunman.`
         : `Assalomu alaykum! Men ${spkName}man. Bugungi intervyuda dolzarb savollarga javob berishga tayyorman.`;
 
-      const res = await fetch('/api/podcast/synthesize', {
+      const res = await authFetch('/api/podcast/synthesize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -297,6 +359,19 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     ];
   });
 
+  // Pre-calculate estimated generation duration for dialogue (parallel batches of 3)
+  const estimatedDialogueSeconds = calculateInterviewDialogueSeconds(turns.length);
+  const dialogueCountdown = useGenerationCountdown(isSynthesizing, estimatedDialogueSeconds, lang, 'audio_dialogue');
+
+  // Pre-calculate estimated generation duration for AI interview script
+  const estimatedInterviewScriptSeconds = calculateAiScriptSeconds(targetDuration, 'interview');
+  const interviewScriptCountdown = useGenerationCountdown(
+    isGeneratingScript || isExpandingDialogue,
+    isExpandingDialogue ? 16 : estimatedInterviewScriptSeconds,
+    lang,
+    'script_interview'
+  );
+
   // Sound Director State
   const [soundDirectorStrategy, setSoundDirectorStrategy] = useState<{
     strategyUz: string;
@@ -396,7 +471,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
     setIsGeneratingScript(true);
     try {
-      const res = await fetch('/api/podcast/generate-interview', {
+      const res = await authFetch('/api/podcast/generate-interview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -434,7 +509,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   const handleExpandInterview = async () => {
     setIsExpandingDialogue(true);
     try {
-      const res = await fetch('/api/podcast/expand-interview', {
+      const res = await authFetch('/api/podcast/expand-interview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -531,6 +606,18 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     );
   };
 
+  // Insert vocal tag or Uzbek backchannel into turn text
+  const handleInsertTagToTurn = (turnId: string, tag: string) => {
+    setTurns((prev) =>
+      prev.map((t) => {
+        if (t.id !== turnId) return t;
+        const current = t.text || '';
+        const space = current && !current.endsWith(' ') ? ' ' : '';
+        return { ...t, text: `${current}${space}${tag} ` };
+      })
+    );
+  };
+
   // Synthesize Dialogue
   const handleSynthesizeDialogue = async () => {
     if (
@@ -551,7 +638,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
     setIsSynthesizing(true);
     try {
-      const res = await fetch('/api/podcast/synthesize-dialogue', {
+      const res = await authFetch('/api/podcast/synthesize-dialogue', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -575,19 +662,45 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       });
 
       if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || 'Muloqot sintezida xatolik');
+        let errMessage = lang === 'uz' ? 'Muloqot sintezida xatolik yuz berdi' : 'Ошибка при синтезе диалога';
+        try {
+          const err = await res.json();
+          errMessage = (lang === 'ru' && err.message_ru) ? err.message_ru : (err.message || err.error || errMessage);
+        } catch {
+          const raw = await res.text().catch(() => '');
+          if (res.status === 504 || res.status === 500) {
+            errMessage = lang === 'uz'
+              ? 'Server javob berish vaqti tugadi yoki server band. Iltimos, qaytadan urinib ko\'ring.'
+              : 'Время ожидания ответа сервера истекло. Пожалуйста, попробуйте еще раз.';
+          } else if (raw) {
+            errMessage = raw;
+          }
+        }
+        throw new Error(errMessage);
       }
 
-      const data = await res.json();
+      let data: any;
+      try {
+        data = await res.json();
+      } catch {
+        throw new Error(
+          lang === 'uz'
+            ? 'Serverdan kutilmagan javob qaytdi. Qaytadan urinib ko\'ring.'
+            : 'Сервер вернул неожиданный ответ. Попробуйте еще раз.'
+        );
+      }
       setMasterAudioBase64(data.masterAudioBase64);
       setTotalDuration(data.totalDurationSeconds || 0);
       setSynthesizedTurns(data.turns || []);
       setIsPlaying(false);
       setActiveTurnIndex(-1);
 
-      // Deduct credit & record generation
-      await useCredit(1);
+      // Sync remaining credits or fallback
+      if (typeof data.creditsRemaining === 'number') {
+        syncCredits(data.creditsRemaining);
+      } else {
+        await useCredit(1);
+      }
       await logGeneration('podcast', topic || '2 Ovozli Intervyu', 1);
     } catch (e: any) {
       alert(`Xatolik: ${e.message}`);
@@ -649,7 +762,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   const handlePlanSoundDirector = async () => {
     setIsPlanningSound(true);
     try {
-      const res = await fetch('/api/podcast/sound-director', {
+      const res = await authFetch('/api/podcast/sound-director', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -797,7 +910,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       title: `Intervyu: ${topic.slice(0, 45)}`,
       category: 'Intervyu & Muloqot',
       description: `${speaker1Name} va ${speaker2Name} o'rtasidagi 2 kishilik podkast intervyusi.`,
-      tags: ['Intervyu', 'MultiSpeaker', 'Dialog', 'Gemini38'],
+      tags: ['Intervyu', 'MultiSpeaker', 'Dialog', 'NeuralStudio'],
       script: fullScript,
       voiceName: `${speaker1Name} & ${speaker2Name}`,
       durationSeconds: totalDuration || 60,
@@ -860,7 +973,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 {lang === 'uz' ? 'Multi-Speaker Studiyasi' : 'Мультиспикер Студия'}
               </span>
               <span className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-[#C4552D] border border-[rgba(196,85,45,0.35)] rounded-full px-2.5 py-0.5 bg-[#C4552D]/5">
-                Dual-Voice TTS · Gemini 3.8
+                Dual-Voice Studio · Neural HD
               </span>
             </div>
             <h1 className="font-serif text-3xl sm:text-4xl text-[#161511] font-normal tracking-tight leading-tight">
@@ -950,6 +1063,13 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                     <div>{d.label}</div>
                   </button>
                 ))}
+                {!isGeneratingScript && !isExpandingDialogue && (
+                  <PreCalculationBadge
+                    estimatedSeconds={estimatedInterviewScriptSeconds}
+                    lang={lang}
+                    className="ml-auto"
+                  />
+                )}
               </div>
             </div>
 
@@ -967,7 +1087,14 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 className="btn-pill btn-solid text-xs py-2.5 px-4 flex items-center justify-center gap-1.5 shrink-0"
               >
                 <Sparkles className={`w-3.5 h-3.5 text-[#5CC8CF] ${isGeneratingScript ? 'animate-spin' : ''}`} />
-                {isGeneratingScript ? (lang === 'uz' ? 'Yozilmoqda...' : 'Генерация...') : (lang === 'uz' ? `AI Intervyu Matni (${targetDuration})` : `AI Диалог (${targetDuration})`)}
+                {isGeneratingScript ? (
+                  <>
+                    <span>{lang === 'uz' ? `Yozilmoqda: ~${interviewScriptCountdown.formattedRemaining}` : `Генерация: ~${interviewScriptCountdown.formattedRemaining}`}</span>
+                    <span className="font-mono text-[10px] bg-white/20 px-1.5 py-0.5 rounded-full">{interviewScriptCountdown.progressPercent}%</span>
+                  </>
+                ) : (
+                  lang === 'uz' ? `AI Intervyu Matni (${targetDuration})` : `AI Диалог (${targetDuration})`
+                )}
               </button>
               <button
                 onClick={handleExpandInterview}
@@ -976,9 +1103,33 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 title="Suhbatni yana 15 daqiqaga kengaytirish"
               >
                 <Sparkles className={`w-3.5 h-3.5 ${isExpandingDialogue ? 'animate-spin' : ''}`} />
-                {isExpandingDialogue ? (lang === 'uz' ? 'Kengaytirilmoqda...' : 'Расширение...') : (lang === 'uz' ? '+15 daq' : '+15 мин')}
+                {isExpandingDialogue ? (
+                  <>
+                    <span>{lang === 'uz' ? `+15 daq: ~${interviewScriptCountdown.formattedRemaining}` : `+15 мин: ~${interviewScriptCountdown.formattedRemaining}`}</span>
+                    <span className="font-mono text-[10px] bg-white/20 px-1.5 py-0.5 rounded-full">{interviewScriptCountdown.progressPercent}%</span>
+                  </>
+                ) : (
+                  lang === 'uz' ? '+15 daq' : '+15 мин'
+                )}
               </button>
             </div>
+
+            {/* Live Countdown HUD when generating script */}
+            {(isGeneratingScript || isExpandingDialogue) && (
+              <div className="pt-2">
+                <GenerationCountdownHUD
+                  countdown={interviewScriptCountdown}
+                  isActive={isGeneratingScript || isExpandingDialogue}
+                  lang={lang}
+                  title={
+                    isExpandingDialogue
+                      ? (lang === 'uz' ? "Intervyu yangi replikalar bilan kengaytirilmoqda" : "Расширение интервью новыми репликами")
+                      : (lang === 'uz' ? "2 Kishilik Intervyu Ssenariysi Yaratilmoqda" : "Создание сценария интервью")
+                  }
+                  subtitle={lang === 'uz' ? interviewScriptCountdown.phaseNameUz : interviewScriptCountdown.phaseNameRu}
+                />
+              </div>
+            )}
           </div>
 
           {/* STEP 2: Speakers Selector Card */}
@@ -1090,7 +1241,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           : 'text-[#5D594E] hover:text-[#161511]'
                       }`}
                     >
-                      Barchasi
+                      {lang === 'uz' ? 'Barchasi' : 'Все'}
                     </button>
                     <button
                       type="button"
@@ -1101,7 +1252,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           : 'text-[#5D594E] hover:text-[#161511]'
                       }`}
                     >
-                      Ayollar (Kore)
+                      {lang === 'uz' ? 'Ayollar' : 'Женские'}
                     </button>
                     <button
                       type="button"
@@ -1112,7 +1263,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           : 'text-[#5D594E] hover:text-[#161511]'
                       }`}
                     >
-                      Erkaklar
+                      {lang === 'uz' ? 'Erkaklar' : 'Мужские'}
                     </button>
                   </div>
                 </div>
@@ -1178,16 +1329,30 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                       .filter((v) => {
                         // Exclude the user's custom replicated voice from being selected as the second guest speaker
                         if (v.isReplicatedVoice || v.id.includes('17raj9')) return false;
-                        if (speaker2GenderFilter === 'female') return v.gender === 'female' || v.baseVoice === 'Kore' || v.baseVoice === 'Aoede';
-                        if (speaker2GenderFilter === 'male') return v.gender === 'male' || v.baseVoice === 'Charon' || v.baseVoice === 'Puck' || v.baseVoice === 'Fenrir';
+                        const isFemale =
+                          v.gender === 'female' ||
+                          ['Kore', 'Aoede', 'Zephyr'].includes(v.baseVoice) ||
+                          /aziza|madina|dilnoza|zarina|nodira|malika|sevara|shahnoza|rayhon|gulzoda|umida|nigora|feruza|ayol/i.test(v.name || v.id);
+                        const isMale =
+                          v.gender === 'male' ||
+                          ['Charon', 'Puck', 'Fenrir'].includes(v.baseVoice) ||
+                          /jasur|otabek|ulugbek|farrux|bobur|javohir|sanjar|sherzod|eldor|bekzod|alisher|rustam|erkak/i.test(v.name || v.id);
+                        if (speaker2GenderFilter === 'female') return isFemale;
+                        if (speaker2GenderFilter === 'male') return isMale;
                         return true;
                       })
-                      .map((v) => (
-                        <option key={v.id} value={v.id}>
-                          {v.gender === 'female' ? '♀ ' : '♂ '}
-                          {v.name}
-                        </option>
-                      ))}
+                      .map((v) => {
+                        const isFemale =
+                          v.gender === 'female' ||
+                          ['Kore', 'Aoede', 'Zephyr'].includes(v.baseVoice) ||
+                          /aziza|madina|dilnoza|zarina|nodira|malika|sevara|shahnoza|rayhon|gulzoda|umida|nigora|feruza|ayol/i.test(v.name || v.id);
+                        return (
+                          <option key={v.id} value={v.id}>
+                            {isFemale ? '♀ ' : '♂ '}
+                            {v.name}
+                          </option>
+                        );
+                      })}
                   </select>
                 </div>
 
@@ -1364,6 +1529,46 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                       placeholder="Ushbu spikerning replikasi..."
                     />
 
+                    {/* Quick Uzbek Vocal Tags Strip */}
+                    <div className="flex flex-wrap items-center gap-1.5 mt-1.5 pt-1 text-[11px]">
+                      <span className="font-mono text-[10px] text-[#5D594E] uppercase tracking-wider">
+                        {lang === 'uz' ? 'Teglar:' : 'Теги:'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleInsertTagToTurn(turn.id, '<breath>')}
+                        className="px-2 py-0.5 rounded-full border border-[#0E7C86]/40 bg-[#0E7C86]/5 text-[#0A5A62] hover:bg-[#0E7C86] hover:text-white transition-all text-[10.5px] font-mono cursor-pointer"
+                        title="Tabiiy nafas olish ovozi"
+                      >
+                        🌬️ &lt;breath&gt;
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleInsertTagToTurn(turn.id, '<laugh>')}
+                        className="px-2 py-0.5 rounded-full border border-[#C98A12]/40 bg-[#C98A12]/5 text-[#C98A12] hover:bg-[#C98A12] hover:text-white transition-all text-[10.5px] font-mono cursor-pointer"
+                        title="Tabiiy kulgi tovushi"
+                      >
+                        😄 &lt;laugh&gt;
+                      </button>
+                      {['|ha|', '|mhm|', '|rostanam|'].map((tag) => (
+                        <button
+                          key={tag}
+                          type="button"
+                          onClick={() => handleInsertTagToTurn(turn.id, tag)}
+                          className="px-2 py-0.5 rounded-full border border-[rgba(14,124,134,0.3)] bg-white text-[#0A5A62] hover:bg-[rgba(14,124,134,0.1)] transition-all text-[10.5px] font-mono cursor-pointer"
+                        >
+                          {tag}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => handleInsertTagToTurn(turn.id, '[Pauza 1s]')}
+                        className="px-2 py-0.5 rounded-full border border-[rgba(22,21,17,0.15)] bg-white text-[#5D594E] hover:bg-black/5 transition-all text-[10.5px] font-mono cursor-pointer"
+                      >
+                        ⏱️ [Pauza 1s]
+                      </button>
+                    </div>
+
                     {/* Turn Music Cue Selector Strip */}
                     <div className="mt-2.5 pt-2 border-t border-[rgba(22,21,17,0.08)] flex flex-wrap items-center justify-between gap-2 text-xs">
                       <div className="flex items-center gap-2">
@@ -1448,7 +1653,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
             </div>
 
             {/* Add turn button & Synthesize action */}
-            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-3">
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-3 flex-wrap">
               <button
                 onClick={addTurn}
                 className="btn-pill btn-ghost text-xs px-4 py-2 flex items-center justify-center gap-1.5 w-full sm:w-auto"
@@ -1457,16 +1662,35 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 {lang === 'uz' ? 'Yangi Replika Qoʻshish' : 'Добавить реплику'}
               </button>
 
-              <button
-                onClick={handleSynthesizeDialogue}
-                disabled={isSynthesizing || turns.length === 0}
-                className="btn-pill btn-solid text-xs sm:text-sm py-2.5 px-6 flex items-center justify-center gap-2 w-full sm:w-auto shadow-sm"
-              >
-                <Volume2 className={`w-4 h-4 text-[#5CC8CF] ${isSynthesizing ? 'animate-pulse' : ''}`} />
-                {isSynthesizing
-                  ? (lang === 'uz' ? 'Ikkala Ovoz Sintez Qilinmoqda...' : 'Синтез диалога...')
-                  : (lang === 'uz' ? 'Toʻliq Dialog Podkastni Yaratish (Dual TTS)' : 'Синтезировать Диалог (Dual TTS)')}
-              </button>
+              <div className="flex items-center gap-2.5 w-full sm:w-auto justify-end flex-wrap">
+                {!isSynthesizing && turns.length > 0 && (
+                  <PreCalculationBadge
+                    estimatedSeconds={estimatedDialogueSeconds}
+                    creditsCost={Math.max(1, Math.ceil(turns.length / 3))}
+                    lang={lang}
+                  />
+                )}
+
+                <button
+                  onClick={handleSynthesizeDialogue}
+                  disabled={isSynthesizing || turns.length === 0}
+                  className="btn-pill btn-solid text-xs sm:text-sm py-2.5 px-6 flex items-center justify-center gap-2 w-full sm:w-auto shadow-sm"
+                >
+                  <Volume2 className={`w-4 h-4 text-[#5CC8CF] ${isSynthesizing ? 'animate-pulse' : ''}`} />
+                  {isSynthesizing ? (
+                    <>
+                      <span>
+                        {lang === 'uz'
+                          ? `Sintez: ${dialogueCountdown.remainingDigits} (~${dialogueCountdown.formattedRemaining})`
+                          : `Синтез: ${dialogueCountdown.remainingDigits} (~${dialogueCountdown.formattedRemaining})`}
+                      </span>
+                      <span className="font-mono text-[10px] bg-white/20 px-1.5 py-0.5 rounded-full">{dialogueCountdown.progressPercent}%</span>
+                    </>
+                  ) : (
+                    lang === 'uz' ? 'Toʻliq Dialog Podkastni Yaratish (Dual TTS)' : 'Синтезировать Диалог (Dual TTS)'
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1720,6 +1944,14 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   </button>
                 </div>
               </div>
+            ) : isSynthesizing ? (
+              <GenerationCountdownHUD
+                countdown={dialogueCountdown}
+                isActive={isSynthesizing}
+                lang={lang}
+                title={lang === 'uz' ? `Dual TTS Intervyu (${turns.length} replika)` : `Синтез Интервью (${turns.length} реплик)`}
+                subtitle={lang === 'uz' ? dialogueCountdown.phaseNameUz : dialogueCountdown.phaseNameRu}
+              />
             ) : (
               <div className="p-8 rounded-2xl bg-white border border-dashed border-[rgba(22,21,17,0.2)] text-center space-y-2">
                 <Users2 className="w-8 h-8 text-[#5D594E]/50 mx-auto" />

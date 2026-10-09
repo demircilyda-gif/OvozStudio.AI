@@ -29,16 +29,16 @@ export const AUDIO_BAR_CONFIGS = [
 
 export const GENERATION_STATUS_MESSAGES = [
   'AI ssenariy yozmoqda…',
-  'Gemini boblar boʻyicha boʻlmoqda…',
+  'Boblar va intonatsiyalar tahlil qilinmoqda…',
   'SHOKHRUKH ovozi sintez qilinmoqda…',
-  'Lyria musiqa + ducking…',
+  'Mayin fon musiqasi sozlanmoqda…',
 ];
 
 export const SIMULATION_SCRIPT_UZ_LONG = `[KIRISH]
 Assalomu alaykum va xush kelibsiz! <breath> Bugungi katta podkast sonimizda biz sun'iy intellekt, ovoz sintezi va kelajak texnologiyalarining O'zbekistondagi yangi to'lqini haqida gaplashamiz. [Pauza] Texnologiyalar shunchalik tez sur'atlarda o'zgarmoqdaki, ularni chuqur tahlil qilish har birimiz uchun nihoyatda muhim... <laugh>
 
 [ASOSIY QISM]
-Birinchi navbatda, neyron tarmoqlarning fonetik tahlil imkoniyatlariga to'xtalamiz. <breath> Har bir so'z, har bir urg'u va hatto jumlalar orasidagi nafas olish ritmi inson qulog'iga tabiiy eshitilishi uchun yuzlab parametrlarni hisobga olish kerak. [Pauza] Gemini 3.8 va OvozStudio modellari orqali biz o'zbek tilining boy jilosini to'liq saqlab qolishga muvaffaq bo'ldik. Tinglovchi har bir gap ortidagi his-tuyg'uni his qila oladi.
+Birinchi navbatda, neyron tarmoqlarning fonetik tahlil imkoniyatlariga to'xtalamiz. <breath> Har bir so'z, har bir urg'u va hatto jumlalar orasidagi nafas olish ritmi inson qulog'iga tabiiy eshitilishi uchun yuzlab parametrlarni hisobga olish kerak. [Pauza] OvozStudio neyron modellari orqali biz o'zbek tilining boy jilosini to'liq saqlab qolishga muvaffaq bo'ldik. Tinglovchi har bir gap ortidagi his-tuyg'uni his qila oladi.
 
 [KULMINATSIYA]
 Endi esa eng hayajonli qismga yetib keldik! <breath> Tasavvur qiling, istalgan mavzudagi murakkab ilmiy maqolalar yoki adabiy durdonalar bir necha daqiqada professional studiya sifatidagi podkastga aylanadi. [Pauza] Bu oddiygina mexanik o'qish emas, balki jonli diktor ijrosi bilan tenglashadigan yangi davr san'atidir! <laugh>
@@ -62,7 +62,7 @@ export const SIMULATION_SCRIPT_RU_LONG = `[KIRISH]
 Здравствуйте и добро пожаловать! <breath> В сегодняшнем выпуске подкаста мы обсудим нейросети, голосовой синтез и новые технологии в медиа. [Pauza] Скорость развития искусственного интеллекта впечатляет каждого создателя контента... <laugh>
 
 [ASOSIY QISM]
-В первой главе разберем фонетический анализ и интонации. <breath> Каждое слово, микропаузы и дыхание диктора выстраивают живой эмоциональный контакт со слушателем. [Pauza] Модели Gemini 3.8 передают всю глубину речи с идеальным балансом.
+В первой главе разберем фонетический анализ и интонации. <breath> Каждое слово, микропаузы и дыхание диктора выстраивают живой эмоциональный контакт со слушателем. [Pauza] Нейронные модели OvozStudio передают всю глубину речи с идеальным балансом.
 
 [KULMINATSIYA]
 И вот кульминационный момент нашего выпуска! <breath> Любая тема за считанные мгновения превращается в готовый сценарий с таймкодами и режиссерскими ремарками. [Pauza] Это новый уровень свободы для авторов и подкастеров! <laugh>

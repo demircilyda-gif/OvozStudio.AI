@@ -40,6 +40,13 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { getVoicePreviewUrl } from '../data/voicePreviews';
 import { connectAudioElement } from '../utils/audioReactive';
+import {
+  getAudioContext,
+  getLiveInputAudioContext,
+  getLiveOutputAudioContext,
+  closeLiveAudioContexts,
+} from '../utils/audioUtils';
+import { authFetch, getCurrentIdToken } from '../utils/authFetch';
 
 interface VoiceAgentTabProps {
   voices: VoiceProfile[];
@@ -75,11 +82,11 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
   userClonedVoiceId,
   lang,
 }) => {
-  const { isAuthenticated, requireAuth, useCredit, logGeneration } = useAuth();
+  const { isAuthenticated, requireAuth, useCredit, syncCredits, logGeneration } = useAuth();
   const shokhrukhVoiceId = userClonedVoiceId || 'voice_17raj9ewke3g';
 
-  // Engine: 'shokhrukh_natural' (Recommended, 0% accent, authentic Shahrukh voice) vs 'gemini_live'
-  const [callEngine, setCallEngine] = useState<'shokhrukh_natural' | 'gemini_live'>('shokhrukh_natural');
+  // Engine: 'shokhrukh_natural' (Recommended, 0% accent, authentic Shahrukh voice) vs 'ovoz_live'
+  const [callEngine, setCallEngine] = useState<'shokhrukh_natural' | 'ovoz_live'>('shokhrukh_natural');
 
   // Call Configuration (Defaults to Real Estate Broker with Shahrukh's voice)
   const [selectedPersona, setSelectedPersona] = useState<AgentPersonaType>('tashkent_real_estate');
@@ -172,10 +179,17 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
     conversationHistoryRef.current = transcriptLines;
   }, [transcriptLines]);
 
-  // Play realistic telephone ringtone
+  // Clean up live audio contexts on unmount
+  useEffect(() => {
+    return () => {
+      closeLiveAudioContexts().catch(() => {});
+    };
+  }, []);
+
+  // Play realistic telephone ringtone using centralized WebAudio singleton
   const playRingtone = useCallback(() => {
     try {
-      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const ctx = getAudioContext();
       const osc1 = ctx.createOscillator();
       const osc2 = ctx.createOscillator();
       const gain = ctx.createGain();
@@ -195,7 +209,9 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
         try {
           osc1.stop();
           osc2.stop();
-          ctx.close();
+          osc1.disconnect();
+          osc2.disconnect();
+          gain.disconnect();
         } catch (e) {}
       }, 1200);
     } catch (e) {
@@ -227,15 +243,11 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
     setAudioLevel(0);
   }, []);
 
-  // Play incoming 24kHz live audio chunk from Gemini 3.8 Live API
+  // Play incoming 24kHz live audio chunk from OvozStudio Live Engine
   const playLiveAudioChunk = useCallback((base64Pcm: string) => {
     try {
-      if (!outputAudioCtxRef.current) {
-        outputAudioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({
-          sampleRate: 24000,
-        });
-      }
-      const ctx = outputAudioCtxRef.current;
+      const ctx = getLiveOutputAudioContext();
+      outputAudioCtxRef.current = ctx;
       if (ctx.state === 'suspended') {
         ctx.resume().catch(() => {});
       }
@@ -341,7 +353,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
     setTranscriptLines((prev) => [...prev, userLine]);
 
     try {
-      const res = await fetch('/api/agent/call-turn', {
+      const res = await authFetch('/api/agent/call-turn', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -359,6 +371,9 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
       }
 
       const data = await res.json();
+      if (typeof data.creditsRemaining === 'number') {
+        syncCredits(data.creditsRemaining);
+      }
       const replyText = data.replyText || '';
       setCurrentSubtitle(replyText);
 
@@ -564,14 +579,9 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
       micStreamRef.current.getTracks().forEach((track) => track.stop());
       micStreamRef.current = null;
     }
-    if (inputAudioCtxRef.current) {
-      inputAudioCtxRef.current.close().catch(() => {});
-      inputAudioCtxRef.current = null;
-    }
-    if (outputAudioCtxRef.current) {
-      outputAudioCtxRef.current.close().catch(() => {});
-      outputAudioCtxRef.current = null;
-    }
+    closeLiveAudioContexts().catch(() => {});
+    inputAudioCtxRef.current = null;
+    outputAudioCtxRef.current = null;
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
@@ -602,10 +612,6 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
     setCurrentSubtitle('');
     setTranscriptLines([]);
 
-    // Deduct credit & record generation
-    await useCredit(1);
-    await logGeneration('agent_call', 'AI Realtor Call', 1);
-
     // 1. Graceful microphone permission request
     let stream: MediaStream | null = null;
     try {
@@ -628,7 +634,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
       // ----------------------------------------------------
       try {
         // Fetch opening greeting from broker
-        const res = await fetch('/api/agent/start-call', {
+        const res = await authFetch('/api/agent/start-call', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -648,6 +654,10 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
           callTimerRef.current = setInterval(() => {
             setCallDuration((prev) => prev + 1);
           }, 1000);
+
+          // Deduct credit ONLY after successful connection
+          useCredit(1).catch(() => {});
+          logGeneration('agent_call', 'AI Realtor Call', 1).catch(() => {});
 
           const greeting =
             data.greetingText ||
@@ -685,12 +695,10 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
       }
     } else {
       // ----------------------------------------------------
-      // MODE 2: RAW GEMINI 3.8 LIVE WEBSOCKET STREAMING
+      // MODE 2: HIGH-SPEED OVOZSTUDIO NEURAL LIVE STREAMING
       // ----------------------------------------------------
       if (stream) {
-        const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({
-          sampleRate: 16000,
-        });
+        const inputCtx = getLiveInputAudioContext();
         inputAudioCtxRef.current = inputCtx;
         const source = inputCtx.createMediaStreamSource(stream);
         const processor = inputCtx.createScriptProcessor(4096, 1, 1);
@@ -709,13 +717,12 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
         };
       }
 
-      // Initialize 24kHz AudioContext for model output playback
-      outputAudioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({
-        sampleRate: 24000,
-      });
+      // Initialize 24kHz AudioContext singleton for model output playback
+      outputAudioCtxRef.current = getLiveOutputAudioContext();
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/api/live-call`;
+      const idToken = await getCurrentIdToken();
+      const wsUrl = `${protocol}//${window.location.host}/api/live-call?token=${encodeURIComponent(idToken || '')}`;
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
@@ -741,6 +748,10 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
             callTimerRef.current = setInterval(() => {
               setCallDuration((prev) => prev + 1);
             }, 1000);
+
+            // Deduct credit ONLY after successful connection
+            useCredit(1).catch(() => {});
+            logGeneration('agent_call', 'AI Realtor Live Call', 1).catch(() => {});
           } else if (data.type === 'audio' && data.audio) {
             playLiveAudioChunk(data.audio);
           } else if (data.type === 'text' && data.text) {
@@ -794,7 +805,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
   const handleGenerateSummary = async () => {
     setIsGeneratingSummary(true);
     try {
-      const res = await fetch('/api/agent/generate-summary', {
+      const res = await authFetch('/api/agent/generate-summary', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -901,7 +912,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
     content += `Mavzu: ${callTopic}\n`;
     content += `Persona: ${selectedPersona}\n`;
     content += `Ovoz: ${agentVoiceId}\n`;
-    content += `Dvigatel: ${callEngine === 'shokhrukh_natural' ? 'Shohrux Haqiqiy Ovoz (Ultra-Natural TTS Live)' : 'Gemini 3.8 Live API'}\n`;
+    content += `Dvigatel: ${callEngine === 'shokhrukh_natural' ? 'Shohrux Haqiqiy Ovoz (Ultra-Natural TTS Live)' : 'OvozStudio Real-time API'}\n`;
     content += `Sana: ${new Date().toLocaleString()}\n`;
     content += `Davomiyligi: ${formatTime(callDuration)}\n\n`;
     content += `==============================================\n\n`;
@@ -992,7 +1003,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
               <span className="w-2.5 h-2.5 rounded-full bg-[#0E7C86] animate-pulse" />
               <span className="px-2.5 py-0.5 rounded-full bg-[rgba(14,124,134,0.1)] text-[#0E7C86] text-[11px] font-mono tracking-wider font-semibold border border-[#0E7C86]/30 flex items-center gap-1 uppercase">
                 <Zap className="w-3 h-3 text-[#0E7C86]" />
-                {callEngine === 'shokhrukh_natural' ? 'SHOHRUX HAQIQIY OVOZ LIVE (0% AKSENT)' : 'GEMINI 3.8 LIVE API (SPEECH-TO-SPEECH)'}
+                {callEngine === 'shokhrukh_natural' ? 'SHOHRUX HAQIQIY OVOZ LIVE (0% AKSENT)' : 'OVOZSTUDIO REAL-TIME API'}
               </span>
             </div>
             <h2 className="font-serif text-2xl sm:text-3xl text-[#161511] tracking-tight">
@@ -1047,14 +1058,14 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => setCallEngine('gemini_live')}
+                onClick={() => setCallEngine('ovoz_live')}
                 className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
-                  callEngine === 'gemini_live'
+                  callEngine === 'ovoz_live'
                     ? 'bg-[#161511] text-[#F4F1EA] shadow-2xs'
                     : 'text-[#5D594E] hover:text-[#161511]'
                 }`}
               >
-                <span>⚡ Gemini 3.8 Live API</span>
+                <span>⚡ OvozStudio Real-time API</span>
               </button>
             </div>
 
@@ -1165,7 +1176,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
             }}
             isAuthenticated={isAuthenticated}
             lang={lang}
-            agentVoiceName={agentVoiceId === shokhrukhVoiceId ? 'SHOKHRUKH' : 'Aoede'}
+            agentVoiceName={agentVoiceId === shokhrukhVoiceId ? 'SHOHRUX' : 'MADINA'}
             onSendText={handleSendQuickPrompt}
             micWarning={micWarning}
           />
@@ -1256,7 +1267,15 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                 {agentVoiceId === shokhrukhVoiceId
                   ? 'SHOHRUX'
                   : agentVoiceId === 'Aoede'
-                  ? 'MALIKA'
+                  ? 'MADINA'
+                  : agentVoiceId === 'Charon'
+                  ? 'JASUR'
+                  : agentVoiceId === 'Puck'
+                  ? 'OTABEK'
+                  : agentVoiceId === 'Kore'
+                  ? 'AZIZA'
+                  : agentVoiceId === 'Fenrir'
+                  ? "ULUG'BEK"
                   : agentVoiceId}
               </span>
             </div>
@@ -1348,7 +1367,15 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                     <Volume2 className="w-3.5 h-3.5 animate-pulse text-[#5CC8CF]" />
                     <span>
                       {agentVoiceId === 'Aoede'
-                        ? (lang === 'uz' ? 'Malika gapirmoqda...' : 'Малика говорит...')
+                        ? (lang === 'uz' ? 'Madina gapirmoqda...' : 'Мадина говорит...')
+                        : agentVoiceId === 'Kore'
+                        ? (lang === 'uz' ? 'Aziza gapirmoqda...' : 'Азиза говорит...')
+                        : agentVoiceId === 'Charon'
+                        ? (lang === 'uz' ? 'Jasur gapirmoqda...' : 'Жасур говорит...')
+                        : agentVoiceId === 'Puck'
+                        ? (lang === 'uz' ? 'Otabek gapirmoqda...' : 'Отабек говорит...')
+                        : agentVoiceId === 'Fenrir'
+                        ? (lang === 'uz' ? "Ulug'bek gapirmoqda..." : 'Улугбек говорит...')
                         : (lang === 'uz' ? 'Shohrux gapirmoqda...' : 'Шохрух говорит...')}
                     </span>
                   </>
@@ -1989,7 +2016,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                 }}
                 isAuthenticated={isAuthenticated}
                 lang={lang}
-                agentVoiceName={agentVoiceId === shokhrukhVoiceId ? 'SHOKHRUKH' : 'Aoede'}
+                agentVoiceName={agentVoiceId === shokhrukhVoiceId ? 'SHOHRUX' : 'MADINA'}
                 onSendText={handleSendQuickPrompt}
                 micWarning={micWarning}
               />
@@ -2127,13 +2154,13 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                         id: shokhrukhVoiceId,
                         name: 'SHOKHRUKH (Mening Haqiqiy Ovozim)',
                         tag: '⭐ SHAXSIY REPLIKATSIYA (0% AKSENT)',
-                        desc: 'Google AI Studio orqali yaratilgan haqiqiy shaxsiy ovoz — 100% tabiiy o\'zbekcha talaffuz!',
+                        desc: 'OvozStudio neyron replikatsiyasi — 100% tabiiy o\'zbekcha talaffuz!',
                       },
-                      { id: 'Aoede', name: 'Aoede (Tavsiya)', tag: '🔥 Samimiy & xarizmatik ayol ovozi', desc: 'Juda jonli, iliq, xarizmatik broker' },
-                      { id: 'Charon', name: 'Charon', tag: '🎩 Katta rieltor-broker', desc: 'Vazmin, nufuzli, chuqur bariton' },
-                      { id: 'Puck', name: 'Puck', tag: '⚡ Dinamik & yosh broker', desc: 'Faol, tezkor, optimistik' },
-                      { id: 'Kore', name: 'Kore', tag: '🌸 Muloyim maslahatchi', desc: 'Iliq, ishonchli ayol ovozi' },
-                      { id: 'Fenrir', name: 'Fenrir', tag: '💪 Tajribali ekspert', desc: 'Kuchli, qat\'iy, aniq' },
+                      { id: 'Aoede', name: 'Madina (Tavsiya)', tag: '🔥 Samimiy & xarizmatik ayol ovozi', desc: 'Juda jonli, iliq, xarizmatik broker' },
+                      { id: 'Charon', name: 'Jasur', tag: '🎩 Katta rieltor-broker', desc: 'Vazmin, nufuzli, chuqur bariton' },
+                      { id: 'Puck', name: 'Otabek', tag: '⚡ Dinamik & yosh broker', desc: 'Faol, tezkor, optimistik' },
+                      { id: 'Kore', name: 'Aziza', tag: '🌸 Muloyim maslahatchi', desc: 'Iliq, ishonchli ayol ovozi' },
+                      { id: 'Fenrir', name: 'Ulug\'bek', tag: '💪 Tajribali ekspert', desc: 'Kuchli, qat\'iy, aniq' },
                     ].map((v) => {
                       const isVoicePlaying = previewingVoiceId === v.id;
                       return (
@@ -2222,7 +2249,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                     <span>
                       {callEngine === 'shokhrukh_natural'
                         ? (lang === 'uz' ? 'Shohrux haqiqiy ovozi • 0% aksent' : 'Настоящий голос Шохруха • 0% акцента')
-                        : 'Gemini 3.8 Live API'}
+                        : 'OvozStudio Real-time API'}
                     </span>
                   </div>
                 </div>

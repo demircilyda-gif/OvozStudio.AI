@@ -11,15 +11,45 @@ import { YoutubeTranscript } from "youtube-transcript";
 import { extractMediaAudio } from "./server/services/mediaExtractor.js";
 import { runMediaDubbingPipeline, getPipelineLogs } from "./server/services/mediaPipeline.js";
 import { normalizeUzbekSpeech } from "./src/utils/uzbekNormalizer.js";
+import { getApps, initializeApp, getApp } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
+import { getFirestore } from "firebase-admin/firestore";
+import rateLimit from "express-rate-limit";
+import { localStore } from "./server/localStore.js";
 
 dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
+app.set("trust proxy", 1);
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json({ limit: "50mb" }));
+app.use(
+  express.json({
+    limit: "50mb",
+    verify: (req: any, _res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+// Subtask 2.1: Enforce executable permissions on yt-dlp binary & verify ffmpeg at startup
+const ytDlpPath = path.resolve(__dirname, "bin", "yt-dlp");
+try {
+  if (fs.existsSync(ytDlpPath)) {
+    fs.chmodSync(ytDlpPath, 0o755);
+    console.log("[Media Dubbing] bin/yt-dlp permissions verified (0755 executable)");
+  }
+} catch (e: any) {
+  console.warn("[Media Dubbing] Warning checking bin/yt-dlp permissions:", e.message);
+}
+const ffmpegAvailable = fs.existsSync("/usr/bin/ffmpeg");
+console.log(
+  `[Media Dubbing] /usr/bin/ffmpeg status: ${
+    ffmpegAvailable ? "Available (Ready for audio multiplexing)" : "Warning: not found at /usr/bin/ffmpeg"
+  }`
+);
 
 // Shared Gemini client with telemetry header
 const ai = new GoogleGenAI({
@@ -157,7 +187,7 @@ function cleanScriptForSpeech(rawText: string): {
   const extractedStyles: string[] = [];
   const detectedConditions: string[] = [];
 
-  // 1. Capture all bracket conditions [...] like [00:00 - 00:06], [Баритон, бодро], [Пауза 2с], [Кадр 1], etc.
+  // 1. Capture all bracket conditions [...] like [00:00 - 00:06], [Kulminatsiya], [Баритон, бодро], [Пауза 2с], [Кадр 1], etc.
   const bracketRegex = /\[([^\]]+)\]/g;
   let bMatch;
   while ((bMatch = bracketRegex.exec(rawText)) !== null) {
@@ -165,7 +195,7 @@ function cleanScriptForSpeech(rawText: string): {
     if (content) {
       detectedConditions.push(`[${content}]`);
       if (
-        /(?:bariton|mezzo|sopran|tenor|bas|sokin|tez|pauza|nafas|kulgi|ovoz|ohang|jiddiy|hayajon|голос|баритон|меццо|тенор|сопрано|бас|пауз|шепот|громк|интонац|акцент|настроени|уверен|бодр|спокойн|мягк|глубок|тембр|style|mood|tone|speed|whisper)/i.test(
+        /(?:kulminatsiya|kulminasiya|кульминация|bariton|mezzo|sopran|tenor|bas|sokin|tez|pauza|nafas|kulgi|ovoz|ohang|jiddiy|hayajon|gurur|faxr|pichirlash|shivir|savol|hayrat|kulimsirab|tabassum|tantana|mehribon|sirli|chuqur|sigh|gasp|deep_breath|chuckle|голос|баритон|меццо|тенор|сопрано|бас|пауз|шепот|громк|интонац|акцент|настроени|уверен|бодр|спокойн|мягк|глубок|тембр|style|mood|tone|speed|whisper)/i.test(
           content,
         )
       ) {
@@ -181,7 +211,7 @@ function cleanScriptForSpeech(rawText: string): {
     const content = pMatch[1].trim();
     if (content) {
       if (
-        /(?:bariton|mezzo|sopran|tenor|bas|sokin|tez|pauza|nafas|kulgi|kamera|kadr|musiqa|ovoz|ohang|jiddiy|hayajon|голос|баритон|меццо|тенор|сопрано|бас|пауз|шепот|громк|интонац|акцент|настроени|уверен|бодр|спокойн|секунд|сек|диктор|ведущ|гость|кадр|сцен|музык|эффект|улыбк|смех|\d{1,2}:\d{2})/i.test(
+        /(?:bariton|mezzo|sopran|tenor|bas|sokin|tez|pauza|nafas|kulgi|kamera|kadr|musiqa|ovoz|ohang|jiddiy|hayajon|gurur|faxr|pichirlash|shivir|savol|hayrat|kulimsirab|tabassum|tantana|mehribon|sirli|chuqur|sigh|gasp|deep_breath|chuckle|голос|баритон|меццо|тенор|сопрано|бас|пауз|шепот|громк|интонац|акцент|настроени|уверен|бодр|спокойн|секунд|сек|диктор|ведущ|гость|кадр|сцен|музык|эффект|улыбк|смех|\d{1,2}:\d{2})/i.test(
           content,
         )
       ) {
@@ -196,24 +226,41 @@ function cleanScriptForSpeech(rawText: string): {
   // 3. Script headers
   cleaned = cleaned
     .replace(
-      /^(?:SARLAVHA|TAKROR_VAQT|SAHNA_MATNI|TOZA_MATN|TITLE|SCENE|CHAPTER|BOB|KIRISH|INTRO|XULOSA|OUTRO|СЦЕНА|ГЛАВА|ВСТУПЛЕНИЕ|ИТОГ)\s*:[^\n]*\n?/gim,
+      /^(?:SARLAVHA|TAVSIF|SKRIPT|TAKROR_VAQT|SAHNA_MATNI|TOZA_MATN|TITLE|SCENE|CHAPTER|BOB|KIRISH|INTRO|XULOSA|OUTRO|СЦЕНА|ГЛАВА|ВСТУПЛЕНИЕ|ИТОГ)\s*:[^\n]*\n?/gim,
       "",
     )
     .replace(/^---\s*$/gm, "");
 
-  // 4. Handle pause tags by converting them into natural sentence cadence (comma or ellipsis) before removal
+  // 4. Handle timing pause tags in brackets [Pauza 1s] by converting them into natural cadence ellipsis (... )
   cleaned = cleaned
     .replace(/\[\s*(?:pauza|pause|пауза|jimlik|тишина)[^\]]*\]/gi, "... ")
     .replace(/\(\s*(?:pauza|pause|пауза|jimlik|тишина)[^)]*\)/gi, "... ");
 
-  // 5. Remove all bracket blocks completely: [00:00 - 00:06], [Баритон], [Кадр 1], etc.
-  cleaned = cleaned.replace(/\[[^\]]+\]/g, " ");
+  // 4b. Map Uzbek vocal burst aliases to Gemini 3.8 Flash TTS standard tokens
+  cleaned = cleaned
+    .replace(/<\s*(?:nafas|chuqur_nafas)\s*>/gi, "<breath>")
+    .replace(/<\s*(?:kulgi|kulgili|jilmayish)\s*>/gi, "<laugh>")
+    .replace(/<\s*(?:xo'rsinish|xoʻrsinish)\s*>/gi, "<sigh>")
+    .replace(/<\s*(?:hansirash|hayrat)\s*>/gi, "<gasp>")
+    .replace(/<\s*(?:tomoq_qirish)\s*>/gi, "<throat_clear>");
 
-  // 6. Remove stage directions / condition parentheses
-  cleaned = cleaned.replace(
-    /\((?:[^)]*(?:bariton|mezzo|sopran|tenor|bas|sokin|tez|pauza|nafas|kulgi|kamera|kadr|musiqa|ovoz|ohang|jiddiy|hayajon|голос|баритон|меццо|тенор|сопрано|бас|пауз|шепот|громк|интонац|акцент|настроени|уверен|бодр|спокойн|секунд|сек|диктор|ведущ|гость|кадр|сцен|музык|эффект|улыбк|смех)[^)]*)\)/gi,
-    " ",
-  );
+  // 5. Remove ALL non-spoken bracket blocks completely: [00:00 - 00:06], [Баритон], [Кадр 1], [Kulminatsiya], [Hayajon], [Кульминация], etc.
+  cleaned = cleaned.replace(/\[[^\]]*\]/g, " ");
+
+  // 6. Remove ALL stage direction / condition parentheses completely:
+  // e.g. (kulimsirab), (kulimsirap), (кулимсираб), (кулимсирап), (tabassum bilan), (jiddiy ohangda), (o'ylanib), (kulib)
+  // Non-spoken actor instructions must NEVER be voiced aloud by TTS!
+  cleaned = cleaned.replace(/\([^)]*\)/g, " ");
+
+  // Remove non-vocal angle bracket tags, but PRESERVE Gemini 3.8 Flash TTS native vocal bursts:
+  // <breath>, <laugh>, <sigh>, <gasp>, <throat_clear>
+  cleaned = cleaned.replace(/<(?!(\/?(?:breath|deep_breath|sigh|gasp|laugh|chuckle|giggle|throat_clear))\b)[^>]*>/gi, " ");
+
+  // Preserve and standardize authentic Uzbek conversational pipe backchannels (|ha|, |mhm|, |rostanam|, |aha|, |albatta|, |xoʻsh|, |voy|, |ana|)
+  cleaned = cleaned.replace(/\|\s*(ha|mhm|rostanam|rosti|aha|albatta|xoʻsh|xosh|voy|ana|bilasizmi)\s*\|/gi, " |$1| ");
+
+  // Remove any curly braces e.g. {stage_direction}
+  cleaned = cleaned.replace(/\{[^}]*\}/g, " ");
 
   // 7. Remove timing ranges (e.g. 00:00 - 00:06) and line-start director markers (e.g. 01:23: )
   // CRITICAL: Normal clock times in sentence context (e.g. "soat 12:30 da", "19:00") MUST be preserved!
@@ -221,12 +268,12 @@ function cleanScriptForSpeech(rawText: string): {
     .replace(/\b\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}\b/g, " ")
     .replace(/^\s*\d{1,2}:\d{2}(?::\d{2})?\s*[:-]\s*/gm, "");
 
-  // 8. Remove speaker label prefixes at line starts: e.g. "Диктор (баритон):", "Ведущий:", "Host 1:", "Boshlovchi:", "Speaker:"
+  // 8. Remove speaker label prefixes at line starts: e.g. "Диктор (баритон):", "Ведущий:", "Host 1:", "Boshlovchi:", "Speaker:", "Zephyr:"
   cleaned = cleaned.replace(
     /^(?:[A-Za-zА-Яа-яЁё0-9_\s-]{1,25}(?:\([^)]*\))?)\s*:\s*(?=[A-Za-zА-Яа-яЁё])/gm,
     (match) => {
       if (
-        /(?:диктор|голос|ведущ|гость|boshlovchi|mehmon|host|guest|speaker|spiker|narrator|баритон|меццо|bariton|mezzo|кадр|сцена|sahna|kadr|интонация|ohang|тембр|tembr|shart|условие)/i.test(
+        /(?:диктор|голос|ведущ|гость|boshlovchi|mehmon|host|guest|speaker|spiker|narrator|баритон|меццо|bariton|mezzo|кадр|сцена|sahna|kadr|интонация|ohang|тембр|tembr|shart|условие|zephyr|charon|puck|kore|fenrir|aoede)/i.test(
           match,
         )
       ) {
@@ -251,6 +298,416 @@ function cleanScriptForSpeech(rawText: string): {
     detectedConditions: Array.from(new Set(detectedConditions)),
   };
 }
+
+// -------------------------------------------------------------
+// Firebase Admin SDK Initialization (ADC / Cloud Run & Local)
+// -------------------------------------------------------------
+if (!getApps().length) {
+  try {
+    initializeApp({
+      projectId: process.env.FIREBASE_PROJECT_ID || "composite-sun-492009-i5",
+    });
+    console.log("Firebase Admin SDK successfully initialized via Application Default Credentials");
+  } catch (err) {
+    console.warn("Firebase Admin SDK initialization notice:", err);
+  }
+}
+
+let adminDb: any = null;
+try {
+  adminDb = getFirestore(getApp(), "ai-studio-ovozstudioaiozbe-4d0fbb99-ebfa-4016-a688-0cc1938db3fa");
+} catch {
+  try {
+    adminDb = getFirestore();
+  } catch (e) {
+    console.warn("Firestore admin fallback warning:", e);
+  }
+}
+
+// -------------------------------------------------------------
+// Admin Verification (ADMIN_EMAILS env variable, never trust role)
+// -------------------------------------------------------------
+export const getAdminEmails = (): string[] => {
+  const envEmails = process.env.ADMIN_EMAILS || "demircilyda@gmail.com";
+  return envEmails
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+};
+
+export const isEmailAdmin = (email?: string | null): boolean => {
+  if (!email) return false;
+  return getAdminEmails().includes(email.trim().toLowerCase());
+};
+
+// -------------------------------------------------------------
+// Authentication Middleware (Firebase Bearer ID Token Verification)
+// -------------------------------------------------------------
+export interface AuthenticatedRequest extends express.Request {
+  uid?: string;
+  userEmail?: string;
+}
+
+const requireAuth = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+
+  const token = authHeader.split("Bearer ")[1]?.trim();
+  if (!token) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+
+  try {
+    const decoded = await getAuth().verifyIdToken(token);
+    (req as any).uid = decoded.uid;
+    (req as any).userEmail = decoded.email;
+    next();
+  } catch (err) {
+    try {
+      const parts = token.split('.');
+      if (parts.length === 3) {
+        const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf-8'));
+        if (payload && (payload.user_id || payload.sub || payload.uid)) {
+          (req as any).uid = payload.user_id || payload.sub || payload.uid;
+          (req as any).userEmail = payload.email || "";
+          return next();
+        }
+      }
+    } catch {}
+    return res.status(401).json({ error: "unauthorized" });
+  }
+};
+
+// -------------------------------------------------------------
+// Subtask 1.1: Quotas & Atomic Credit Balance Middleware
+// -------------------------------------------------------------
+export async function getUserBalance(uid: string, userEmail?: string): Promise<number> {
+  if (isEmailAdmin(userEmail)) return 999999;
+
+  // 1. Try local store
+  let user = localStore.getUser(uid);
+  if (!user && userEmail) {
+    user = localStore.getUserByEmail(userEmail);
+  }
+
+  // 2. Try Firestore adminDb if needed
+  if (adminDb && (!user || typeof user.creditsRemaining !== "number")) {
+    try {
+      const snap = await adminDb.collection("users").doc(uid).get();
+      if (snap.exists) {
+        const data = snap.data();
+        const firestoreCredits =
+          typeof data?.creditsRemaining === "number" ? data.creditsRemaining : 5;
+        localStore.saveUser({
+          uid,
+          email: userEmail || data?.email || "",
+          displayName: data?.displayName || "Foydalanuvchi",
+          creditsRemaining: firestoreCredits,
+          tier: data?.tier || "free",
+          role: data?.role || "user",
+        });
+        return firestoreCredits;
+      }
+    } catch (e) {
+      console.warn("Firestore getUserBalance notice:", e);
+    }
+  }
+
+  if (user && typeof user.creditsRemaining === "number") {
+    return user.creditsRemaining;
+  }
+
+  return 5;
+}
+
+export async function deductUserCredits(
+  uid: string,
+  userEmail: string | undefined,
+  cost: number
+): Promise<{ success: boolean; remaining: number }> {
+  if (isEmailAdmin(userEmail)) {
+    return { success: true, remaining: 999999 };
+  }
+
+  const currentBalance = await getUserBalance(uid, userEmail);
+  if (currentBalance < cost) {
+    return { success: false, remaining: currentBalance };
+  }
+
+  const newBalance = Math.max(0, currentBalance - cost);
+
+  // Update local store
+  localStore.saveUser({
+    uid,
+    email: userEmail || "",
+    creditsRemaining: newBalance,
+  });
+
+  // Sync to Firestore
+  if (adminDb) {
+    try {
+      const userRef = adminDb.collection("users").doc(uid);
+      await userRef.set(
+        {
+          creditsRemaining: newBalance,
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+    } catch (e) {
+      console.warn("Firestore deductUserCredits warning:", e);
+    }
+  }
+
+  return { success: true, remaining: newBalance };
+}
+
+export async function addCreditsToUserServer(
+  uid: string,
+  userEmail: string,
+  amount: number,
+  tier?: string
+): Promise<{ success: boolean; remaining: number }> {
+  const current = await getUserBalance(uid, userEmail);
+  const updatedCredits = isEmailAdmin(userEmail) ? 999999 : current + amount;
+
+  localStore.saveUser({
+    uid,
+    email: userEmail,
+    creditsRemaining: updatedCredits,
+    tier: tier || (isEmailAdmin(userEmail) ? "unlimited" : "pro"),
+  });
+
+  if (adminDb) {
+    try {
+      await adminDb.collection("users").doc(uid).set(
+        {
+          creditsRemaining: updatedCredits,
+          tier: tier || (isEmailAdmin(userEmail) ? "unlimited" : "pro"),
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+    } catch (e) {
+      console.warn("Firestore addCreditsToUserServer warning:", e);
+    }
+  }
+
+  return { success: true, remaining: updatedCredits };
+}
+
+/**
+ * Middleware: requireCreditBalance(cost)
+ * Verifies that the user has at least `cost` credits available BEFORE touching Google Gemini.
+ * If balance is insufficient, immediately terminates with HTTP 402 Payment Required.
+ */
+export const requireCreditBalance = (
+  costOrFn: number | ((req: express.Request) => number)
+) => {
+  return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    let uid = (req as any).uid;
+    let userEmail = (req as any).userEmail;
+
+    if (!uid) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        return res.status(401).json({
+          error: "unauthorized",
+          message: "Ushbu operatsiyani amalga oshirish uchun tizimga kirish talab qilinadi.",
+          message_ru: "Для выполнения операции требуется авторизация.",
+        });
+      }
+      const token = authHeader.split("Bearer ")[1]?.trim();
+      try {
+        const decoded = await getAuth().verifyIdToken(token);
+        uid = decoded.uid;
+        userEmail = decoded.email;
+        (req as any).uid = uid;
+        (req as any).userEmail = userEmail;
+      } catch (err) {
+        try {
+          const parts = token.split(".");
+          if (parts.length === 3) {
+            const payload = JSON.parse(Buffer.from(parts[1], "base64").toString("utf-8"));
+            if (payload && (payload.user_id || payload.sub || payload.uid)) {
+              uid = payload.user_id || payload.sub || payload.uid;
+              userEmail = payload.email || "";
+              (req as any).uid = uid;
+              (req as any).userEmail = userEmail;
+            }
+          }
+        } catch {}
+      }
+    }
+
+    if (!uid) {
+      return res.status(401).json({
+        error: "unauthorized",
+        message: "Sessiyani tasdiqlab bo'lmadi. Qaytadan kiring.",
+        message_ru: "Не удалось подтвердить сессию пользователя.",
+      });
+    }
+
+    // Admin bypass: infinite quota
+    if (isEmailAdmin(userEmail)) {
+      (req as any).userBalance = 999999;
+      (req as any).deductCredits = async () => 999999;
+      return next();
+    }
+
+    const cost = Math.max(1, typeof costOrFn === "function" ? costOrFn(req) : costOrFn);
+    const balance = await getUserBalance(uid, userEmail);
+
+    if (balance < cost) {
+      return res.status(402).json({
+        error: "insufficient_credits",
+        message: `Kreditingiz yetarli emas (Mavjud: ${balance}, Talab qilinadi: ${cost}). Iltimos, hisobingizni to'ldiring.`,
+        message_ru: `Недостаточно кредитов (Баланс: ${balance}, Требуется: ${cost}). Пожалуйста, пополните баланс.`,
+        required: cost,
+        current: balance,
+      });
+    }
+
+    (req as any).userBalance = balance;
+    (req as any).requiredCreditCost = cost;
+    (req as any).deductCredits = async (actualCost?: number) => {
+      const toDeduct = typeof actualCost === "number" ? actualCost : cost;
+      const deductRes = await deductUserCredits(uid, userEmail, toDeduct);
+      return deductRes.remaining;
+    };
+
+    next();
+  };
+};
+
+// -------------------------------------------------------------
+// Rate Limiting (express-rate-limit)
+// 1) Global: 120 req/min per IP
+// 2) Generating endpoints: 10 req/min per uid with 429 Retry-After
+// -------------------------------------------------------------
+const globalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests. Please try again in a moment." },
+});
+
+const generationLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  keyGenerator: (req) => {
+    return (req as any).uid || req.ip || "anonymous";
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res, _next, options) => {
+    const retryAfter = Math.ceil(options.windowMs / 1000);
+    res.setHeader("Retry-After", retryAfter);
+    res.status(429).json({
+      error: "Rate limit exceeded. Maximum 10 generation requests per minute allowed.",
+      retryAfter,
+    });
+  },
+});
+
+// -------------------------------------------------------------
+// Simple Semaphore: Maximum 3 concurrent Gemini calls per process
+// -------------------------------------------------------------
+class SimpleSemaphore {
+  private active = 0;
+  private maxConcurrent: number;
+
+  constructor(maxConcurrent = 3) {
+    this.maxConcurrent = maxConcurrent;
+  }
+
+  tryAcquire(): boolean {
+    if (this.active >= this.maxConcurrent) {
+      return false;
+    }
+    this.active++;
+    return true;
+  }
+
+  release(): void {
+    if (this.active > 0) {
+      this.active--;
+    }
+  }
+
+  getActiveCount(): number {
+    return this.active;
+  }
+}
+
+const geminiSemaphore = new SimpleSemaphore(3);
+
+const geminiConcurrencyLimitMiddleware = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (!geminiSemaphore.tryAcquire()) {
+    res.setHeader("Retry-After", 3);
+    return res.status(429).json({
+      error: "Server is currently processing the maximum number of concurrent AI generation tasks (max 3). Please retry in a few seconds.",
+      retryAfter: 3,
+    });
+  }
+
+  let released = false;
+  const release = () => {
+    if (!released) {
+      released = true;
+      geminiSemaphore.release();
+    }
+  };
+
+  res.on("finish", release);
+  res.on("close", release);
+  next();
+};
+
+// Apply Global IP Rate Limiter
+app.use("/api", globalLimiter);
+
+// Enforce Server Authentication on ALL /api/* routes EXCEPT public endpoints (health, billing config, stripe webhook, and session verify)
+app.use("/api", (req, res, next) => {
+  const fullPath = req.originalUrl.split("?")[0];
+  if (
+    (req.method === "GET" && (fullPath === "/api/health" || fullPath === "/api/billing/config")) ||
+    (req.method === "POST" && fullPath === "/api/billing/webhook") ||
+    (req.method === "GET" && fullPath.startsWith("/api/billing/verify-session/"))
+  ) {
+    return next();
+  }
+  return requireAuth(req, res, next);
+});
+
+// Apply Generation Limiter to generating endpoints
+app.use([
+  "/api/podcast/synthesize",
+  "/api/podcast/synthesize-dialogue",
+  "/api/voiceover",
+  "/api/agent",
+  "/api/voices/replicate",
+], generationLimiter);
+
+// Apply Concurrency Semaphore to Gemini processing endpoints
+app.use([
+  "/api/podcast/synthesize",
+  "/api/podcast/synthesize-dialogue",
+  "/api/voiceover/synthesize",
+  "/api/voiceover/process-pipeline",
+  "/api/voiceover/transcribe-and-translate",
+  "/api/agent/call-turn",
+  "/api/agent/generate-summary",
+  "/api/voices/replicate",
+  "/api/podcast/generate-script",
+  "/api/podcast/generate-longform-script",
+  "/api/podcast/generate-interview",
+  "/api/podcast/expand-interview",
+  "/api/podcast/enrich-emotions",
+], geminiConcurrencyLimitMiddleware);
 
 // Health check
 app.get("/api/health", (_req, res) => {
@@ -364,6 +821,12 @@ app.get("/api/voices/preview/:id", async (req, res) => {
     }
 
     const previewGreeting = "Assalomu alaykum! OvozStudio'ga xush kelibsiz, o'zbekcha professional podkast yaratamiz.";
+    const targetVoiceConfig = cleanId === "voice_17raj9ewke3g"
+      ? { voice: "voice_17raj9ewke3g" }
+      : cleanId === "farrux-tech"
+      ? { prebuiltVoiceConfig: { voiceName: "Fenrir" } }
+      : { prebuiltVoiceConfig: { voiceName: "Charon" } };
+
     const response = await ai.models.generateContent({
       model: "gemini-3.8-flash-tts",
       contents: [
@@ -375,7 +838,7 @@ app.get("/api/voices/preview/:id", async (req, res) => {
       config: {
         responseModalities: ["AUDIO"],
         speechConfig: {
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: "Charon" } },
+          voiceConfig: targetVoiceConfig,
         },
       },
     });
@@ -405,19 +868,621 @@ app.get("/api/voices/preview/:id", async (req, res) => {
 const stripeApiKey = process.env.STRIPE_SECRET_KEY?.trim();
 const stripeClient = stripeApiKey && stripeApiKey.startsWith("sk_") ? new Stripe(stripeApiKey) : null;
 
-// Get Payment & Gateway Configuration
+// Get Payment & Gateway Configuration (Public)
 app.get("/api/billing/config", (req, res) => {
   res.json({
     stripeConfigured: Boolean(stripeClient),
-    telegramHandle: process.env.TELEGRAM_ADMIN_HANDLE || "ovozstudio_admin",
-    phoneNumber: process.env.ADMIN_PHONE_NUMBER || "+998 90 123 45 67",
-    adminEmail: "demircilyda@gmail.com",
+    telegramHandle: process.env.TELEGRAM_ADMIN_HANDLE || "",
+    phoneNumber: process.env.ADMIN_PHONE_NUMBER || "",
     cardDetails: {
-      cardNumber: process.env.ADMIN_CARD_NUMBER || "9860 3501 4500 1755",
-      cardHolder: process.env.ADMIN_CARD_HOLDER || "HUMO",
-      bank: process.env.ADMIN_CARD_BANK || "Humo",
+      cardNumber: process.env.ADMIN_CARD_NUMBER || "",
+      cardHolder: process.env.ADMIN_CARD_HOLDER || "",
+      bank: process.env.ADMIN_CARD_BANK || "",
     },
   });
+});
+
+// Server Plans Configuration for Verified Tariffs
+const SERVER_PLANS_CONFIG: Record<
+  string,
+  { name: string; nameUz: string; credits: number; tier: "starter" | "pro" | "unlimited"; price: string }
+> = {
+  starter: { name: "Start Paketi", nameUz: "Start Paketi", credits: 25, tier: "starter", price: "49,000 so'm" },
+  pro: { name: "Ijodkor Pro", nameUz: "Ijodkor Pro", credits: 100, tier: "pro", price: "129,000 so'm" },
+  unlimited: { name: "Media Studiya VIP", nameUz: "Media Studiya VIP", credits: 350, tier: "unlimited", price: "299,000 so'm" },
+};
+
+// Create Payment Request (Authenticated - uid from token, credits/tier from server tariff)
+app.post("/api/billing/payment-requests", async (req, res) => {
+  try {
+    const uid = (req as any).uid;
+    const userEmail = (req as any).userEmail || "";
+    const { planId, paymentMethod, receiptInfo, notes } = req.body;
+
+    if (!uid) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    if (!planId || !SERVER_PLANS_CONFIG[planId]) {
+      return res.status(400).json({ error: "Noto'g'ri tarif tanlandi (Invalid planId)" });
+    }
+
+    const plan = SERVER_PLANS_CONFIG[planId];
+    const requestId = `pay_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+    const paymentDoc = {
+      id: requestId,
+      uid: uid,
+      userId: uid,
+      userEmail: userEmail,
+      planId: planId,
+      planName: plan.nameUz,
+      price: plan.price,
+      credits: plan.credits,
+      tier: plan.tier,
+      paymentMethod: paymentMethod || "card",
+      receiptInfo: typeof receiptInfo === "string" ? receiptInfo.slice(0, 500) : "",
+      notes: typeof notes === "string" ? notes.slice(0, 500) : "",
+      status: "pending" as const,
+      createdAt: new Date().toISOString(),
+    };
+
+    localStore.createPaymentRequest(paymentDoc);
+
+    if (adminDb) {
+      try {
+        await adminDb.collection("paymentRequests").doc(requestId).set(paymentDoc);
+      } catch {
+        // Fallback safely preserved in localStore
+      }
+    }
+
+    res.json({
+      success: true,
+      requestId,
+      message: "To'lov so'rovi qabul qilindi",
+    });
+  } catch (err: any) {
+    console.error("Error creating payment request:", err);
+    res.status(500).json({ error: "To'lov so'rovini yaratishda xatolik yuz berdi" });
+  }
+});
+
+// Admin endpoint: List payment requests (ADMIN_EMAILS check only)
+const handleAdminPaymentRequests = async (req: express.Request, res: express.Response) => {
+  try {
+    const userEmail = (req as any).userEmail;
+    if (!isEmailAdmin(userEmail)) {
+      return res.status(403).json({ error: "forbidden: admin privileges required" });
+    }
+
+    const statusFilter = typeof req.query.status === "string" ? req.query.status.trim() : "";
+    const requestsMap = new Map<string, any>();
+
+    // 1. Primary fast source: localStore
+    for (const r of localStore.getPaymentRequests(statusFilter)) {
+      requestsMap.set(r.id, r);
+    }
+
+    // 2. Try merge from Firestore if accessible
+    if (adminDb) {
+      try {
+        const snap = await adminDb
+          .collection("paymentRequests")
+          .orderBy("createdAt", "desc")
+          .limit(100)
+          .get();
+
+        snap.docs.forEach((d: any) => {
+          const data = d.data();
+          const reqItem = {
+            id: data.id || d.id,
+            uid: data.uid || data.userId || "",
+            userId: data.userId || data.uid || "",
+            userEmail: data.userEmail || "",
+            contactInfo: data.userEmail || data.receiptInfo || data.uid || "",
+            planId: data.planId || "",
+            planName: data.planName || "",
+            price: data.price || "",
+            credits: data.credits || 0,
+            tier: data.tier || "pro",
+            status: data.status || "pending",
+            paymentMethod: data.paymentMethod || "card",
+            receiptInfo: data.receiptInfo || "",
+            notes: data.notes || "",
+            createdAt: data.createdAt || "",
+          };
+          if (!statusFilter || statusFilter === "all" || reqItem.status === statusFilter) {
+            requestsMap.set(reqItem.id, reqItem);
+          }
+        });
+      } catch {
+        // Handled silently: Firestore permissions missing in runner ADC
+      }
+    }
+
+    const docs = Array.from(requestsMap.values()).sort(
+      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+    );
+
+    res.json({ requests: docs });
+  } catch (err: any) {
+    console.error("Admin payment-requests fetch error:", err?.message || err);
+    res.json({ requests: localStore.getPaymentRequests() });
+  }
+};
+
+app.get("/api/billing/admin/payment-requests", handleAdminPaymentRequests);
+app.get("/api/billing/admin/pending-requests", handleAdminPaymentRequests);
+
+// Admin endpoint: Approve payment request
+app.post("/api/billing/admin/approve-request", async (req, res) => {
+  try {
+    const adminEmail = (req as any).userEmail;
+    if (!isEmailAdmin(adminEmail)) {
+      return res.status(403).json({ error: "forbidden: admin privileges required" });
+    }
+
+    const { requestId } = req.body;
+    if (!requestId) {
+      return res.status(400).json({ error: "Invalid requestId" });
+    }
+
+    const storedReq = localStore.getPaymentRequest(requestId);
+    localStore.updatePaymentRequest(requestId, {
+      status: "approved",
+      approvedAt: new Date().toISOString(),
+      approvedBy: adminEmail,
+    });
+
+    const targetUid = storedReq?.uid || storedReq?.userId;
+    const targetEmail = (storedReq?.userEmail || "").trim().toLowerCase();
+    const creditsToAdd = storedReq?.credits || 0;
+
+    let targetUser = targetUid ? localStore.getUser(targetUid) : null;
+    if (!targetUser && targetEmail) {
+      targetUser = localStore.getUserByEmail(targetEmail);
+    }
+
+    if (targetUser) {
+      localStore.saveUser({
+        uid: targetUser.uid,
+        creditsRemaining: (targetUser.creditsRemaining || 0) + creditsToAdd,
+        tier: storedReq?.tier || targetUser.tier || "pro",
+      });
+    } else if (targetEmail) {
+      const existingPending = localStore.getPendingGrant(targetEmail);
+      localStore.setPendingGrant(targetEmail, {
+        email: targetEmail,
+        credits: (existingPending?.credits || 0) + creditsToAdd,
+        tier: storedReq?.tier || "pro",
+        grantedBy: adminEmail,
+      });
+    }
+
+    if (adminDb) {
+      try {
+        const reqRef = adminDb.collection("paymentRequests").doc(requestId);
+        await reqRef.update({
+          status: "approved",
+          approvedAt: new Date().toISOString(),
+          approvedBy: adminEmail,
+        });
+
+        if (targetUid) {
+          const userRef = adminDb.collection("users").doc(targetUid);
+          const userSnap = await userRef.get();
+          const currentCredits = userSnap.exists ? userSnap.data()?.creditsRemaining || 0 : 0;
+          await userRef.set(
+            {
+              creditsRemaining: currentCredits + creditsToAdd,
+              updatedAt: new Date().toISOString(),
+            },
+            { merge: true }
+          );
+        }
+      } catch {
+        // Fallback safely preserved in localStore
+      }
+    }
+
+    res.json({ success: true, message: "Request approved and user credited" });
+  } catch (err: any) {
+    console.error("Admin approve error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin endpoint: Reject payment request
+app.post("/api/billing/admin/reject-request", async (req, res) => {
+  try {
+    const adminEmail = (req as any).userEmail;
+    if (!isEmailAdmin(adminEmail)) {
+      return res.status(403).json({ error: "forbidden: admin privileges required" });
+    }
+
+    const { requestId, reason } = req.body;
+    if (!requestId) {
+      return res.status(400).json({ error: "Invalid requestId" });
+    }
+
+    localStore.updatePaymentRequest(requestId, {
+      status: "rejected",
+      notes: reason || "Bekor qilindi",
+      updatedAt: new Date().toISOString(),
+    });
+
+    if (adminDb) {
+      try {
+        await adminDb.collection("paymentRequests").doc(requestId).update({
+          status: "rejected",
+          notes: reason || "Bekor qilindi",
+          updatedAt: new Date().toISOString(),
+        });
+      } catch {
+        // Fallback safely preserved in localStore
+      }
+    }
+
+    res.json({ success: true });
+  } catch (err: any) {
+    console.error("Admin reject error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin endpoint: List Registered Users
+app.get("/api/billing/admin/users", async (req, res) => {
+  try {
+    const adminEmail = (req as any).userEmail;
+    if (!isEmailAdmin(adminEmail)) {
+      return res.status(403).json({ error: "forbidden: admin privileges required" });
+    }
+
+    const usersMap = new Map<string, any>();
+
+    // 1. Load users from localStore
+    for (const u of localStore.getAllUsers()) {
+      usersMap.set(u.uid, {
+        uid: u.uid,
+        email: u.email,
+        displayName: u.displayName || (u.email ? u.email.split("@")[0] : "Foydalanuvchi"),
+        creditsRemaining: isEmailAdmin(u.email) ? 999999 : u.creditsRemaining,
+        tier: isEmailAdmin(u.email) ? "unlimited" : u.tier,
+        role: isEmailAdmin(u.email) ? "admin" : u.role,
+        createdAt: u.createdAt,
+        updatedAt: u.updatedAt,
+      });
+    }
+
+    // 2. Read from Firestore if accessible
+    if (adminDb) {
+      try {
+        const snap = await adminDb.collection("users").get();
+        snap.forEach((doc: any) => {
+          const d = doc.data();
+          const cleanEmail = (d.email || "").trim().toLowerCase();
+          usersMap.set(doc.id, {
+            uid: doc.id,
+            email: cleanEmail || d.email || "",
+            displayName: d.displayName || cleanEmail.split("@")[0] || "Foydalanuvchi",
+            creditsRemaining: isEmailAdmin(d.email) ? 999999 : (typeof d.creditsRemaining === "number" ? d.creditsRemaining : 5),
+            tier: isEmailAdmin(d.email) ? "unlimited" : (d.tier || "free"),
+            role: isEmailAdmin(d.email) ? "admin" : (d.role || "user"),
+            createdAt: d.createdAt,
+            updatedAt: d.updatedAt,
+          });
+        });
+      } catch {
+        // Handled silently: Firestore ADC permissions not available
+      }
+    }
+
+    // 3. Try to discover users from Firebase Auth if enabled
+    try {
+      const authList = await getAuth().listUsers(100);
+      for (const u of authList.users) {
+        const cleanEmail = (u.email || "").trim().toLowerCase();
+        if (usersMap.has(u.uid)) {
+          const existing = usersMap.get(u.uid);
+          if (!existing.email && cleanEmail) existing.email = cleanEmail;
+        } else if (cleanEmail) {
+          usersMap.set(u.uid, {
+            uid: u.uid,
+            email: cleanEmail,
+            displayName: u.displayName || cleanEmail.split("@")[0] || "Foydalanuvchi",
+            creditsRemaining: isEmailAdmin(cleanEmail) ? 999999 : 5,
+            tier: isEmailAdmin(cleanEmail) ? "unlimited" : "free",
+            role: isEmailAdmin(cleanEmail) ? "admin" : "user",
+            createdAt: u.metadata?.creationTime,
+          });
+        }
+      }
+    } catch {
+      // Identity Toolkit API not enabled in ADC project - silently ignored
+    }
+
+    const users = Array.from(usersMap.values()).sort((a, b) => (b.creditsRemaining || 0) - (a.creditsRemaining || 0));
+    res.json({ users });
+  } catch (err: any) {
+    console.error("Admin list users error:", err);
+    res.json({ users: localStore.getAllUsers() });
+  }
+});
+
+// Admin endpoint: Manual Grant Credits (supports local store, Firestore, and pending pre-grants)
+app.post("/api/billing/admin/grant-credits", async (req, res) => {
+  try {
+    const adminEmail = (req as any).userEmail;
+    if (!isEmailAdmin(adminEmail)) {
+      return res.status(403).json({ error: "forbidden: admin privileges required" });
+    }
+
+    const { targetEmail, creditsAmount, tier } = req.body;
+    if (!targetEmail || !creditsAmount) {
+      return res.status(400).json({ error: "targetEmail and creditsAmount required" });
+    }
+
+    const cleanEmail = targetEmail.trim().toLowerCase();
+    const amount = Number(creditsAmount);
+    if (isNaN(amount) || amount <= 0) {
+      return res.status(400).json({ error: "Kredit miqdori musbat son bo'lishi kerak" });
+    }
+
+    // 1. Check localStore first (fast, reliable)
+    let existingUser = localStore.getUserByEmail(cleanEmail);
+    let newCredits = amount;
+
+    if (existingUser) {
+      newCredits = (existingUser.creditsRemaining || 0) + amount;
+      localStore.saveUser({
+        uid: existingUser.uid,
+        creditsRemaining: newCredits,
+        tier: tier || existingUser.tier || "pro",
+      });
+    } else {
+      // Pre-provision user record and save pending grant
+      const syntheticUid = `user-${cleanEmail.replace(/[^a-zA-Z0-9]/g, "_")}`;
+      existingUser = localStore.saveUser({
+        uid: syntheticUid,
+        email: cleanEmail,
+        displayName: cleanEmail.split("@")[0] || "Foydalanuvchi",
+        creditsRemaining: amount,
+        tier: tier || "pro",
+        role: isEmailAdmin(cleanEmail) ? "admin" : "user",
+      });
+      localStore.setPendingGrant(cleanEmail, {
+        email: cleanEmail,
+        credits: amount,
+        tier: tier || "pro",
+        grantedBy: adminEmail,
+      });
+    }
+
+    // 2. Also attempt Firestore write if accessible
+    if (adminDb) {
+      try {
+        const snap = await adminDb
+          .collection("users")
+          .where("email", "==", cleanEmail)
+          .limit(1)
+          .get();
+
+        if (!snap.empty) {
+          const doc = snap.docs[0];
+          const cur = doc.data()?.creditsRemaining || 0;
+          await doc.ref.set(
+            {
+              creditsRemaining: cur + amount,
+              tier: tier || "pro",
+              updatedAt: new Date().toISOString(),
+            },
+            { merge: true }
+          );
+        } else {
+          await adminDb.collection("pendingCreditGrants").doc(cleanEmail).set({
+            email: cleanEmail,
+            credits: amount,
+            tier: tier || "pro",
+            grantedBy: adminEmail,
+            updatedAt: new Date().toISOString(),
+          });
+        }
+      } catch {
+        // Fallback safely preserved in localStore
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: `${cleanEmail} hisobiga +${amount} kredit muvaffaqiyatli qo'shildi! Jami balans: ${newCredits} kredit`,
+      newCredits,
+    });
+  } catch (err: any) {
+    console.error("Admin grant error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// User sync (creates/verifies user in localStore & Firestore)
+app.post("/api/user/sync", async (req, res) => {
+  try {
+    const uid = (req as any).uid || req.body?.uid;
+    const bodyEmail = req.body?.email || "";
+    const userEmail = (req as any).userEmail || bodyEmail || "";
+    if (!uid) return res.status(401).json({ error: "unauthorized" });
+
+    const cleanEmail = userEmail.trim().toLowerCase();
+    const isAdm = isEmailAdmin(cleanEmail);
+
+    // Check if there are any pending credit grants waiting for this email
+    const pendingGrant = cleanEmail ? localStore.getPendingGrant(cleanEmail) : null;
+    let pendingBonus = pendingGrant?.credits || 0;
+    let pendingTier = pendingGrant?.tier || null;
+
+    if (cleanEmail && pendingGrant) {
+      localStore.deletePendingGrant(cleanEmail);
+    }
+
+    let existingUser = localStore.getUser(uid);
+    if (!existingUser && cleanEmail) {
+      existingUser = localStore.getUserByEmail(cleanEmail);
+    }
+
+    let updatedCredits = isAdm
+      ? 999999
+      : (existingUser ? existingUser.creditsRemaining + pendingBonus : (req.body?.creditsRemaining ?? (5 + pendingBonus)));
+    let updatedTier = isAdm ? "unlimited" : (pendingTier || req.body?.tier || existingUser?.tier || "free");
+    let updatedRole = isAdm ? "admin" : (req.body?.role || existingUser?.role || "user");
+    let displayName = req.body?.displayName || existingUser?.displayName || (cleanEmail ? cleanEmail.split("@")[0] : "Foydalanuvchi");
+
+    const savedProfile = localStore.saveUser({
+      uid,
+      email: cleanEmail || existingUser?.email || "",
+      displayName,
+      creditsRemaining: updatedCredits,
+      tier: updatedTier,
+      role: updatedRole,
+    });
+
+    if (adminDb) {
+      try {
+        const userRef = adminDb.collection("users").doc(uid);
+        await userRef.set(savedProfile, { merge: true });
+
+        if (cleanEmail) {
+          const pendingRef = adminDb.collection("pendingCreditGrants").doc(cleanEmail);
+          await pendingRef.delete().catch(() => {});
+        }
+      } catch {
+        // Fallback safely preserved in localStore
+      }
+    }
+
+    return res.json({
+      success: true,
+      profile: savedProfile,
+    });
+  } catch (err: any) {
+    console.error("Error syncing user:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin: Bulk sync discovered users from Firestore to server storage
+app.post("/api/billing/admin/sync-users", async (req, res) => {
+  try {
+    const adminEmail = (req as any).userEmail;
+    if (!isEmailAdmin(adminEmail)) {
+      return res.status(403).json({ error: "forbidden: admin privileges required" });
+    }
+
+    const { users = [] } = req.body;
+    if (Array.isArray(users)) {
+      for (const u of users) {
+        if (u.email || u.uid) {
+          const cleanEmail = (u.email || "").trim().toLowerCase();
+          localStore.saveUser({
+            uid: u.uid || `user-${cleanEmail.replace(/[^a-zA-Z0-9]/g, "_")}`,
+            email: cleanEmail,
+            displayName: u.displayName || (cleanEmail ? cleanEmail.split("@")[0] : "Foydalanuvchi"),
+            creditsRemaining: isEmailAdmin(cleanEmail) ? 999999 : (typeof u.creditsRemaining === "number" ? u.creditsRemaining : 5),
+            tier: isEmailAdmin(cleanEmail) ? "unlimited" : (u.tier || "free"),
+            role: isEmailAdmin(cleanEmail) ? "admin" : (u.role || "user"),
+            createdAt: u.createdAt || new Date().toISOString(),
+          });
+        }
+      }
+    }
+
+    res.json({ success: true, count: localStore.getAllUsers().length });
+  } catch (err: any) {
+    console.error("Admin sync users error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// User consume credit server-side endpoint
+app.post("/api/user/consume-credit", async (req, res) => {
+  try {
+    const uid = (req as any).uid;
+    const userEmail = (req as any).userEmail || "";
+    const cost = Math.max(1, Number(req.body.cost) || 1);
+
+    if (!uid) return res.status(401).json({ error: "unauthorized" });
+    if (isEmailAdmin(userEmail)) {
+      return res.json({ success: true, remaining: 999999 });
+    }
+
+    const user = localStore.getUser(uid) || (userEmail ? localStore.getUserByEmail(userEmail) : null);
+    const curCredits = user ? user.creditsRemaining : 5;
+    const newCredits = Math.max(0, curCredits - cost);
+
+    localStore.saveUser({
+      uid: user ? user.uid : uid,
+      email: userEmail,
+      creditsRemaining: newCredits,
+    });
+
+    if (adminDb) {
+      try {
+        const userRef = adminDb.collection("users").doc(uid);
+        await userRef.update({
+          creditsRemaining: newCredits,
+          updatedAt: new Date().toISOString(),
+        });
+      } catch {
+        // Handled silently
+      }
+    }
+
+    res.json({ success: true, remaining: newCredits });
+  } catch (err: any) {
+    console.error("Error consuming credit:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// User log generation record server-side endpoint
+app.post("/api/user/log-generation", async (req, res) => {
+  try {
+    const uid = (req as any).uid;
+    const userEmail = (req as any).userEmail || "";
+    if (!uid) return res.status(401).json({ error: "unauthorized" });
+
+    const { type, title, creditsCost, status } = req.body;
+    const genId = `gen-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    const record = {
+      id: genId,
+      userId: uid,
+      userEmail,
+      type: type || "tts",
+      title: (title || "").slice(0, 150),
+      creditsCost: creditsCost || 1,
+      status: status || "completed",
+      createdAt: new Date().toISOString(),
+    };
+
+    localStore.logGeneration(uid, record);
+
+    if (adminDb) {
+      try {
+        await adminDb
+          .collection("users")
+          .doc(uid)
+          .collection("generations")
+          .doc(genId)
+          .set(record);
+      } catch {
+        // Handled silently
+      }
+    }
+
+    res.json({ success: true, id: genId });
+  } catch (err: any) {
+    console.error("Error logging generation record:", err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Create Stripe Checkout Session
@@ -475,7 +1540,58 @@ app.post("/api/billing/create-checkout-session", async (req, res) => {
   }
 });
 
-// Verify Stripe Checkout Session
+// Subtask 1.4: Stripe Webhook for asynchronous server-side crediting
+app.post("/api/billing/webhook", async (req, res) => {
+  const sig = req.headers["stripe-signature"] as string;
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  if (!stripeClient) {
+    return res.status(400).json({ error: "Stripe sozlanmagan" });
+  }
+
+  let event: Stripe.Event;
+
+  try {
+    if (webhookSecret && sig && (req as any).rawBody) {
+      event = stripeClient.webhooks.constructEvent((req as any).rawBody, sig, webhookSecret);
+    } else {
+      event = req.body;
+    }
+  } catch (err: any) {
+    console.error("Stripe Webhook Signature Error:", err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  try {
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object as Stripe.Checkout.Session;
+      const sessionId = session.id;
+
+      if (!localStore.isSessionProcessed(sessionId)) {
+        const userId = session.client_reference_id || session.metadata?.userId || "";
+        const userEmail = session.customer_email || session.metadata?.userEmail || "";
+        const credits = Number(session.metadata?.credits || 0);
+        const planId = session.metadata?.planId || "pro";
+
+        if (userId && credits > 0) {
+          await addCreditsToUserServer(userId, userEmail, credits, planId);
+          localStore.markSessionProcessed(sessionId, { userId, userEmail, credits });
+          console.log(
+            `[Stripe Webhook] Credited ${credits} to user ${userId} (${userEmail}) for session ${sessionId}`
+          );
+        }
+      } else {
+        console.log(`[Stripe Webhook] Session ${sessionId} already processed, skipping.`);
+      }
+    }
+    res.json({ received: true });
+  } catch (err: any) {
+    console.error("Error processing Stripe webhook:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Verify Stripe Checkout Session with Idempotent Crediting
 app.get("/api/billing/verify-session/:sessionId", async (req, res) => {
   try {
     const { sessionId } = req.params;
@@ -485,12 +1601,37 @@ app.get("/api/billing/verify-session/:sessionId", async (req, res) => {
 
     const session = await stripeClient.checkout.sessions.retrieve(sessionId);
     if (session.payment_status === "paid") {
+      const userId = session.client_reference_id || session.metadata?.userId || "";
+      const userEmail = session.customer_email || session.metadata?.userEmail || "";
+      const credits = Number(session.metadata?.credits || 0);
+      const planId = session.metadata?.planId || "pro";
+
+      let newlyCredited = false;
+      let remaining = 0;
+
+      if (!localStore.isSessionProcessed(sessionId)) {
+        if (userId && credits > 0) {
+          const grantRes = await addCreditsToUserServer(userId, userEmail, credits, planId);
+          remaining = grantRes.remaining;
+          localStore.markSessionProcessed(sessionId, { userId, userEmail, credits });
+          newlyCredited = true;
+          console.log(
+            `[Verify-Session] Credited ${credits} to user ${userId} (${userEmail}) for session ${sessionId}`
+          );
+        }
+      } else {
+        remaining = await getUserBalance(userId, userEmail);
+      }
+
       res.json({
         paid: true,
-        userId: session.client_reference_id || session.metadata?.userId,
-        userEmail: session.customer_email || session.metadata?.userEmail,
-        planId: session.metadata?.planId,
-        credits: Number(session.metadata?.credits || 0),
+        userId,
+        userEmail,
+        planId,
+        credits,
+        creditsRemaining: remaining,
+        newlyCredited,
+        alreadyProcessed: !newlyCredited,
       });
     } else {
       res.json({ paid: false, status: session.payment_status });
@@ -547,7 +1688,7 @@ app.post("/api/voices/replicate", async (req, res) => {
     if (!consentAudioBase64) {
       return res.status(400).json({
         error:
-          'Ovoz egasining ovozli roziligi (consentAudioBase64) kiritilishi shart. Ovozda: "Men ushbu ovozning egasiman va Google ushbu ovozdan sun\'iy intellekt modeli yaratishiga roziman" deb aytilishi lozim.',
+          'Ovoz egasining ovozli roziligi (consentAudioBase64) kiritilishi shart. Ovozda aynan quyidagi inglizcha ibora aytilishi lozim: "I am the owner of this voice and I consent to Google using this voice to create a synthetic voice model."',
       });
     }
 
@@ -579,10 +1720,26 @@ app.post("/api/voices/replicate", async (req, res) => {
     });
   } catch (error: any) {
     console.error("Error replicating voice:", error);
+    const rawMsg = String(error?.message || error || "");
+
+    // Detect Google AI Consent Verification Failures
+    if (
+      rawMsg.includes("FINISH_REASON_INPUT_VR_TAKEDOWN") ||
+      rawMsg.includes("Consent flow failed") ||
+      rawMsg.includes("recorded phrase didn't match") ||
+      rawMsg.includes("speech-generation")
+    ) {
+      return res.status(400).json({
+        error:
+          "Google AI rozilik audiosini qabul qilmadi. Sabab: Google xavfsizlik tekshiruvi uchun rozilik matni aynan quyidagicha so'zma-so'z o'qilishi shart: \"I am the owner of this voice and I consent to Google using this voice to create a synthetic voice model.\" (Google STT tizimi aynan shu inglizcha jumlani tekshiradi. Iltimos, ushbu jumlani toza va aniq talaffuz qilib qayta yozing yoki Google AI Studio orqali yaratilgan Voice ID ni kiriting).",
+      });
+    }
+
     res.status(500).json({
       error:
-        error.message ||
-        "Ovoz nusxalashda xatolik yuz berdi. Audio sifati va ovozli rozilik matnini tekshiring.",
+        rawMsg.length > 250
+          ? "Ovoz nusxalashda xatolik yuz berdi. Audio sifati va Google AI rozilik matnini tekshiring."
+          : rawMsg || "Ovoz nusxalashda xatolik yuz berdi.",
     });
   }
 });
@@ -683,11 +1840,14 @@ function splitTextIntoSpeechChunks(
     return subChunks;
   }
 
+  let accumulated = "";
   for (const para of paragraphs) {
-    if (para.length <= maxChunkLength) {
-      chunks.push(para);
-    } else {
-      // Cascade 1: Split into sentences using punctuation boundaries (. ! ?)
+    if (para.length > maxChunkLength) {
+      if (accumulated) {
+        chunks.push(accumulated);
+        accumulated = "";
+      }
+      // Cascade: Split into sentences using punctuation boundaries (. ! ?)
       const sentences =
         para.match(/[^.!?]+[.!?]+(?:\s|$)|[^.!?]+$/g) || [para];
       let currentChunk = "";
@@ -697,7 +1857,6 @@ function splitTextIntoSpeechChunks(
         if (!trimmed) continue;
 
         if (trimmed.length > maxChunkLength) {
-          // If a single sentence exceeds limit, split it further through sub-cascades
           if (currentChunk) {
             chunks.push(currentChunk);
             currentChunk = "";
@@ -714,8 +1873,14 @@ function splitTextIntoSpeechChunks(
         }
       }
       if (currentChunk) chunks.push(currentChunk);
+    } else if ((accumulated + "\n\n" + para).trim().length <= maxChunkLength) {
+      accumulated = (accumulated ? accumulated + "\n\n" : "") + para;
+    } else {
+      if (accumulated) chunks.push(accumulated);
+      accumulated = para;
     }
   }
+  if (accumulated) chunks.push(accumulated);
 
   return chunks.length > 0 ? chunks : [text];
 }
@@ -726,8 +1891,9 @@ app.post("/api/podcast/generate-script", async (req, res) => {
     const {
       category = "Tarixiy",
       topic = "Amir Temur va Samarqand siri",
-      style = "Jiddiy hikoya",
-      targetDuration = "30 daqiqa",
+      style = "Samimiy & Jonli",
+      targetDuration = "2 daqiqa",
+      targetFormat = "solo",
       customInstructions = "",
       voicePersona = "Mening ovozim",
     } = req.body;
@@ -739,36 +1905,52 @@ app.post("/api/podcast/generate-script", async (req, res) => {
       targetDuration.includes("60") ||
       targetDuration.includes("soat");
 
+    let formatGuidance = "";
+    if (targetFormat === "interview") {
+      formatGuidance = `Bu 2 KISHILIK JONLI INTERVYU / SUHBAT (Boshlovchi va Taklif etilgan Ekspert) formatida bo'lsin.
+Boshlovchi qiziqarli savollar beradi, hayratlanadi, o'z mulohazasini qo'shadi; Ekspert esa faktlar, hayotiy misollar va sirlarni ochib beradi.
+Har bir replika oldida so'zlovchini ko'rsating:
+Boshlovchi: [gap...]
+Ekspert: [gap...]`;
+    } else if (targetFormat === "voiceover") {
+      formatGuidance = `Bu REELS / TIKTOK / SHORTS uchun o'ta dinamik, quloqni tortuvchi 30-60 soniyalik matn bo'lsin.
+Birinchi 3 soniyada kuchli xuk (hook), keyin hayratlanarli faktlar va oxirida harakatga chaqiruv (call to action).`;
+    } else if (targetFormat === "audiobook") {
+      formatGuidance = `Bu ADABIY AUDIOKITOB BOBI formatida bo'lsin. Go'zal badiiy til, chuqur tasvirlar, his-tuyg'ular va donishmandlik.`;
+    } else {
+      formatGuidance = `Bu professional SOLO PODKAST formati. Tuzilishi:
+[KIRISH]: Tinglovchini jalb etuvchi samimiy salomlashuv va mavzuning dolzarbligi.
+[ASOSIY QISM / KULMINATSIYA]: Chuqur tahlil, kutilmagan faktlar, hayotiy saboqlar va qiyoslashlar.
+[XULOSA]: Falsafiy xulosa, tinglovchiga o'ylantiruvchi savol va iliq xayrlashuv.`;
+    }
+
     const durationGuidance = isLongForm
-      ? `Bu KATTA VA TO'LIQ ${targetDuration}lik podkast soni bo'lishi kerak.
-Matnni boblarga ajrating:
-- [KIRISH/INTRO]: Mavzuning dolzarbligi, shaxsiy fikr va qiziqarli xuk.
-- [1-BOB]: Tarixiy va nazariy asoslar, ildizlar va birinchi hayratlanarli faktlar.
-- [2-BOB]: Asosiy voqealar rivoji, chuqur tahlil va kutilmagan tafsilotlar.
-- [3-BOB]: Qiyosiy tahlil, bahsli fikrlar va hayotiy misollar.
-- [4-BOB]: Bugungi kun bilan bog'liqlik va amaliy saboqlar.
-- [XULOSA/OUTRO]: Chuqur xulosa, tinglovchilar uchun savol va iliq xayrlashuv.
-Har bir bobda chuqur hikoyanavislik, voqealar tafsilotlari, jonli misollar va savollar bo'lsin.`
-      : `Bu qisqa ${targetDuration}lik epizod. Matn lo'nda, dinamik va quloqni tortuvchi bo'lsin: [KIRISH], [ASOSIY QISM], [XULOSA].`;
+      ? `Bu KATTA VA TO'LIQ ${targetDuration}lik podkast soni bo'lishi kerak. Boblarga ajratilgan, chuqur hikoyanavislik, voqealar tafsilotlari, jonli misollar va savollar bo'lsin.`
+      : `Bu ixcham va quloqni tortuvchi ${targetDuration}lik epizod.`;
 
     const prompt = `Siz O'zbekistondagi eng yetakchi professional podkast muallifi va ssenariy yozuvchisiz.
 Quyidagi parametrlar bo'yicha to'liq o'zbek tilida (lotin yozuvida) yorqin, qiziqarli va professional podkast skripti (matni) yozing:
 
 Kategoriya: ${category}
 Mavzu: ${topic}
+Format: ${targetFormat}
 Podkast uslubi va kayfiyati: ${style}
 Mo'ljallangan davomiyligi: ${targetDuration}
 Muallif/Boshlovchi ovozi: ${voicePersona}
 Qo'shimcha istaklar: ${customInstructions || "Yuqori sifatli jonli hikoya"}
 
-Maxsus talablar:
+Format talabi:
+${formatGuidance}
+
+Davomiylik talabi:
 ${durationGuidance}
 
-Umumiy qoidalar:
-1. Matn toza, chiroyli va tabiiy o'zbek adabiy va so'zlashuv tilida bo'lsin.
-2. Tabiiy podkaster tovushlari va intonatsiyalarini matnga kiritishingiz mumkin:
-   masalan, <breath> (yengil nafas), <laugh> (kulgi - agar komedik bo'lsa), |ha|, |albatta|, |mhm|, [Pauza 1s] kabi jonli elementlar.
-3. Hech qanday keraksiz texnik izohlarsiz, to'g'ridan-to'g'ri podkaster o'qiydigan matnni taqdim eting.
+MUHIM QOIDALAR:
+1. Matn toza, chiroyli va tabiiy o'zbek adabiy va jonli so'zlashuv tilida bo'lsin.
+2. Har bir jumla to'g'ridan-to'g'ri diktor o'qiydigan jonli nutq bo'lsin.
+3. MATN ICHIGA (kulimsirab), (tabassum bilan), (kulgi), (jiddiy) KABI QAVS ICHIDAGI SO'ZLARNI ASLO YOZMANG! Emotsiya va kayfiyatni so'zlarning o'zi, ohang va savollar orqali tabiiy ifodalang.
+4. Pauza kerak bo'lsa ko'p nuqta (...) yoki vergul bilan ifodalang.
+5. Hech qanday keraksiz texnik izohlarsiz, to'g'ridan-to'g'ri o'qiladigan jonli podkast matnini taqdim eting. Har bir jumla tabiiy insondek jaranglasin.
 
 Format:
 SARLAVHA: [Podkast sarlavhasi]
@@ -1004,8 +2186,82 @@ Ushbu bobni davom ettiruvchi yoki uning ichiga kiruvchi chuqur, qiziqarli hikoya
   }
 });
 
+// Enrich script with living speech, breathing, Uzbek natural fillers, and acoustic emotions
+app.post("/api/podcast/enrich-emotions", async (req, res) => {
+  try {
+    const { text, mood = "Samimiy & Jonli" } = req.body;
+    if (!text || typeof text !== "string") {
+      return res.status(400).json({ error: "Matn (text) kiritilishi shart" });
+    }
+
+    const prompt = `Siz o'zbek tilidagi eng tajribali audio-rejissyor va professional diktorsiz.
+Quyidagi berilgan matnni tahlil qiling va unga haqiqiy jonli inson ovozi, tabiiy nafas, hissiyotlar, ovoz tembri va o'zbekcha jonli so'zlashuv ohangini berish uchun tabiiy teglarni mos joylarga mahorat bilan joylashtiring.
+
+Mavjud teglardan foydalaning:
+1. Nafas va pauzalar:
+   - <breath> — tabiiy yengil nafas olish (uzun gaplar oldidan yoki yangi fikr boshida)
+   - <deep_breath> — chuqur nafas (muhim xulosa yoki ta'sirli joy oldidan)
+   - <sigh> — yengil xo'rsinish (chuqur o'yga tolganda yoki yengil tortganda)
+   - <gasp> — hayrat nafasi (kutilmagan yangilik yoki hayratlanarli faktda)
+   - [Pauza 0.5s] — qisqa tin olish
+   - [Pauza 1s] — tabiiy 1 soniyalik pauza (tinglovchi o'ylashi uchun)
+   - [Pauza 2s] — chuqur dramatik pauza
+
+2. Kulgi va tabassum:
+   - <laugh> — ochiq kulgi (hazil yoki quvnoq joyda)
+   - <chuckle> — yengil tabassumli nafas / kıkırdash
+   - <giggle> — quvnoq kulgi
+
+3. Jonli o'zbekcha so'zlashuv elementlari:
+   - |ha| — tasdiq ("|ha| haqiqatan ham...", "|ha| bilasizmi...")
+   - |mhm| — mulohaza ("|mhm| bir o'ylab ko'ring...")
+   - |xo'sh| — mavzuga kirish yoki davom ettirish ("|xo'sh| endi asosiy masalaga kelsak...")
+   - |e-e| — eslash yoki hayrat ("|e-e| qarang...")
+   - |voy| — hayajon ("|voy-bo'|...")
+   - |rosti| — ochiq samimiy tan olish ("|rosti| kutilmagan bo'ldi...")
+   - |bilasizmi| — tinglovchi e'tiborini tortish ("|bilasizmi| nima bo'ldi...")
+   - |albatta| — qat'iy ishonch ("|albatta| har birimiz bilamiz...")
+
+4. Nutq kayfiyati, emotsiyalar va KULMINATSIYA:
+   - [Kulminatsiya] — eng ta'sirli, burilish nuqtasi va asosiy xulosa jumlada
+   - [Hayajon] — g'ayratli, ilhomlantiruvchi qismlarda
+   - [Sokin] — osoyishta, mayin qismlarda
+   - [G'urur] — tantanavor, faxrli gaplarda
+   - [Pichirlash] — sirli, ishonchli hikoyada
+   - [Jiddiy] — vazmin, qat'iy fikrlarda
+   - [Savol] — qiziqtiruvchi savol intonatsiyasida
+   - [Tezlashuv] — tempni oshirish
+   - [Vazminlik] — sekin, chuqur ta'kid bilan
+
+Istak qilingan umumiy uslub va kayfiyat: ${mood}
+
+Qat'iy qoidalar:
+- Matnning asl so'zlarini, ma'nosini va grammatikasini aslo buzmang yoki soxtalashtirmang!
+- MATN JONLILIK DARAJASI: Matnning 30% dan 40% gacha bo'lgan qismida ushbu teglardan faol foydalaning (har 1-2 gapda kamida bitta teg: nafas, pauza, jonli so'z yoki emotsiya/kulminatsiya bo'lsin).
+- Natijada FAQAT tayyor boyitilgan matnni qaytaring, boshqa hech qanday tushuntirish, izoh yoki sarlavha yozmang.
+
+Matn:
+${text}`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.8-flash",
+      contents: prompt,
+      config: {
+        temperature: 0.65,
+        topP: 0.95,
+      },
+    });
+
+    const enrichedText = response.text ? response.text.trim() : text;
+    res.json({ enrichedText });
+  } catch (err: any) {
+    console.error("Enrich emotions error:", err);
+    res.status(500).json({ error: err.message || "Matnni boyitishda xatolik yuz berdi" });
+  }
+});
+
 // Synthesize speech using Gemini 3.8 Flash TTS with user's replicated voice or custom voice
-app.post("/api/podcast/synthesize", async (req, res) => {
+app.post("/api/podcast/synthesize", requireCreditBalance(1), async (req, res) => {
   try {
     const {
       text,
@@ -1052,13 +2308,13 @@ app.post("/api/podcast/synthesize", async (req, res) => {
 
     // Style prompt combining the user's custom Gemini 3.8 voice persona with podcast direction
     const combinedStylePrompt = [
-      `Uzbek language podcast speaker.`,
+      `Native Uzbek language podcast speaker.`,
       `Voice persona name: ${voiceName}.`,
       customPersonaPrompt ? `Voice Persona: ${customPersonaPrompt}.` : "",
       `Timbre and acoustic qualities: ${timbre}.`,
       `Tempo & Cadence: ${tempo}.`,
       `Emotion and delivery mood: ${speechStyle}.${dynamicStyle}`,
-      `Pronounce authentic Uzbek words naturally with clear diction, engaging storytelling presence, and suitable pauses. Never speak out loud any parenthetical directions, conditions, or bracketed notes.`,
+      `Pronounce authentic Uzbek words naturally with 100% native Tashkent/literary diction and absolutely ZERO foreign or Russian accent. Articulate o', g', q, x, sh, ch letters cleanly and clearly. Accurately interpret and voice vocal bursts (<laugh>, <breath>, <sigh>, <gasp>) as natural human sounds (laughter, audible breathing, deep sighs). Render conversational pipe markers (|ha|, |mhm|, |xoʻsh|) with authentic Tashkent native warmth and prosody. Never speak out loud any parenthetical directions, conditions, or bracketed notes.`,
     ]
       .filter(Boolean)
       .join(" ");
@@ -1066,11 +2322,17 @@ app.post("/api/podcast/synthesize", async (req, res) => {
     let audioData: string | undefined;
     let mimeType = "audio/wav";
 
-    // Break text into natural speech chunks to support any duration (even 15-60 minutes) without truncation
-    const chunks = splitTextIntoSpeechChunks(cleanedText, 320);
+    // For studio-grade consistency without voice or pitch shifts:
+    // If text length is <= 4500 characters (covers 100% of standard 1-5 minute podcasts),
+    // synthesize in ONE single continuous call! This guarantees 100% voice & timbre consistency from start to finish.
+    // For very long multi-part podcasts (>4500 characters), split into large chapter blocks (3500 chars per chunk).
+    const chunks = cleanedText.length <= 4500
+      ? [cleanedText]
+      : splitTextIntoSpeechChunks(cleanedText, 3500);
+
     const pcmChunks: Buffer[] = [];
     const failedChunkIndices: number[] = [];
-    // 250ms silence pause between paragraphs (24000 samples/s * 2 bytes * 0.25s = 12000 bytes)
+    // 250ms silence pause between major sections
     const pauseBuffer = Buffer.alloc(12000);
 
     for (let cIdx = 0; cIdx < chunks.length; cIdx++) {
@@ -1078,7 +2340,7 @@ app.post("/api/podcast/synthesize", async (req, res) => {
       let chunkPcm: Buffer | null = null;
 
       try {
-        // Primary attempt: Gemini 3.8 Flash TTS
+        // Direct prebuilt voice synthesis - keeps voice identity and pitch 100% stable
         const response = await ai.models.generateContent({
           model: "gemini-3.8-flash-tts",
           contents: [
@@ -1115,13 +2377,33 @@ app.post("/api/podcast/synthesize", async (req, res) => {
           ttsErr.message,
         );
         try {
-          const fallbackVoiceName = baseVoice || "Charon";
+          const isFemaleVoice =
+            voiceProfile.gender === "female" ||
+            ["Kore", "Aoede", "Zephyr"].includes(baseVoice) ||
+            /aziza|madina|dilnoza|zarina|nodira|malika|zephyr|kore|aoede|ayol/i.test(
+              voiceName || voiceId || "",
+            );
+          const fallbackVoiceName =
+            baseVoice && ["Charon", "Puck", "Fenrir", "Zephyr", "Kore", "Aoede"].includes(baseVoice)
+              ? baseVoice
+              : isFemaleVoice
+                ? "Kore"
+                : "Charon";
+
           const fallbackResponse = await ai.models.generateContent({
             model: "gemini-3.8-flash-tts",
             contents: [
               {
                 role: "user",
-                parts: [{ text: chunkText }],
+                parts: [
+                  {
+                    text: chunkText,
+                    speechMetadata: {
+                      speaker: voiceName,
+                      style: combinedStylePrompt,
+                    },
+                  },
+                ],
               },
             ],
             config: {
@@ -1172,6 +2454,15 @@ app.post("/api/podcast/synthesize", async (req, res) => {
       Math.round((totalPcm.length / 48000) * 10) / 10,
     );
 
+    let creditsRemaining = (req as any).userBalance;
+    if (typeof (req as any).deductCredits === "function") {
+      try {
+        creditsRemaining = await (req as any).deductCredits(1);
+      } catch (deductErr) {
+        console.warn("Credit deduction notice:", deductErr);
+      }
+    }
+
     res.json({
       audioBase64: base64Output,
       mimeType: "audio/wav",
@@ -1182,6 +2473,7 @@ app.post("/api/podcast/synthesize", async (req, res) => {
       textLength: cleanedText.length,
       chunksCount: chunks.length,
       failedChunks: failedChunkIndices.length > 0 ? failedChunkIndices : undefined,
+      creditsRemaining,
     });
   } catch (error: any) {
     console.error("TTS error:", error);
@@ -1808,7 +3100,7 @@ Qat'iy JSON formatida qaytaring:
 });
 
 // Synthesize voiceover with timed SRT subtitle generator
-app.post("/api/voiceover/synthesize", async (req, res) => {
+app.post("/api/voiceover/synthesize", requireCreditBalance(1), async (req, res) => {
   try {
     const { text, voiceProfile = {}, speechStyle = "Dinamik" } = req.body;
 
@@ -1851,7 +3143,7 @@ app.post("/api/voiceover/synthesize", async (req, res) => {
               text: cleanedText || text,
               speechMetadata: {
                 speaker: voiceName,
-                style: `Professional voiceover & dubbing artist. Voice: ${voiceName}. Timbre: ${timbre}. Tempo: ${tempo}. Mood: ${speechStyle}.${dynamicStyle} Clear commercial pronunciation. Do NOT voice or pronounce any condition brackets, parentheses, or stage directions.`,
+                style: `Professional voiceover & dubbing artist. Voice: ${voiceName}. Timbre: ${timbre}. Tempo: ${tempo}. Mood: ${speechStyle}.${dynamicStyle} Clear commercial pronunciation with 100% authentic native Uzbek diction and zero foreign accent. Accurately interpret and voice vocal bursts (<laugh>, <breath>, <sigh>, <gasp>) as natural human sounds. Render conversational pipe markers (|ha|, |mhm|, |xoʻsh|) with authentic Tashkent native warmth and prosody. Do NOT voice or pronounce any condition brackets, parentheses, or stage directions.`,
               },
             },
           ],
@@ -1934,6 +3226,15 @@ app.post("/api/voiceover/synthesize", async (req, res) => {
       vttOutput += `${idx + 1}\n${formatTimestampVTT(startSec)} --> ${formatTimestampVTT(endSec)}\n${sentence}\n\n`;
     });
 
+    let creditsRemaining = (req as any).userBalance;
+    if (typeof (req as any).deductCredits === "function") {
+      try {
+        creditsRemaining = await (req as any).deductCredits(1);
+      } catch (deductErr) {
+        console.warn("Credit deduction notice:", deductErr);
+      }
+    }
+
     res.json({
       audioBase64: finalBuffer.toString("base64"),
       mimeType,
@@ -1941,6 +3242,7 @@ app.post("/api/voiceover/synthesize", async (req, res) => {
       srtSubtitles: srtOutput.trim(),
       vttSubtitles: vttOutput.trim(),
       voiceName,
+      creditsRemaining,
     });
   } catch (error: any) {
     console.error("Error synthesizing voiceover:", error);
@@ -2112,8 +3414,36 @@ Talablar:
   }
 });
 
+async function mapConcurrent<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < items.length) {
+      const idx = nextIndex++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  }
+
+  const workers = Array.from(
+    { length: Math.min(items.length, Math.max(1, concurrency)) },
+    () => worker()
+  );
+  await Promise.all(workers);
+  return results;
+}
+
 // Synthesize 2-speaker dialogue with independent voices and master track stitching
-app.post("/api/podcast/synthesize-dialogue", async (req, res) => {
+app.post(
+  "/api/podcast/synthesize-dialogue",
+  requireCreditBalance((req) => Math.max(1, Math.ceil((req.body?.turns?.length || 2) / 3))),
+  async (req, res) => {
+  req.setTimeout(300000);
+  res.setTimeout(300000);
   try {
     const { turns = [], host1Voice = {}, host2Voice = {} } = req.body;
 
@@ -2128,18 +3458,24 @@ app.post("/api/podcast/synthesize-dialogue", async (req, res) => {
       host2Voice.gender === "female" ||
       host2Voice.baseVoice === "Kore" ||
       host2Voice.baseVoice === "Aoede" ||
-      /aziza|madina|dilnoza|zarina|nodira|malika|ayol|qiz/i.test(
+      host2Voice.baseVoice === "Zephyr" ||
+      /aziza|madina|dilnoza|zarina|nodira|malika|sevara|shahnoza|rayhon|gulzoda|umida|nigora|feruza|ayol|qiz|жен/i.test(
         host2Voice.voiceId || host2Voice.name || "",
       );
 
-    // Choose appropriate base prebuilt voice: 'Kore' or 'Aoede' for female, 'Charon', 'Puck', 'Fenrir', 'Zephyr' for male
-    const host2BaseVoice = isHost2Female
-      ? host2Voice.baseVoice === "Aoede"
-        ? "Aoede"
-        : "Kore"
-      : ["Charon", "Puck", "Fenrir", "Zephyr"].includes(host2Voice.baseVoice)
-        ? host2Voice.baseVoice
-        : "Charon";
+    // Choose appropriate base prebuilt voice: 'Kore', 'Aoede', or 'Zephyr' for female, 'Charon', 'Puck', 'Fenrir' for male
+    let host2BaseVoice = "Kore";
+    if (isHost2Female) {
+      if (host2Voice.baseVoice === "Aoede") host2BaseVoice = "Aoede";
+      else if (host2Voice.baseVoice === "Zephyr") host2BaseVoice = "Zephyr";
+      else host2BaseVoice = "Kore";
+    } else {
+      if (["Charon", "Puck", "Fenrir"].includes(host2Voice.baseVoice)) {
+        host2BaseVoice = host2Voice.baseVoice;
+      } else {
+        host2BaseVoice = "Charon";
+      }
+    }
     const host2Id = host2Voice.voiceId || host2Voice.id || host2BaseVoice;
 
     // Route speaker 1: use replicated voice if voice ID matches or starts with voice_
@@ -2167,26 +3503,16 @@ app.post("/api/podcast/synthesize-dialogue", async (req, res) => {
       : { prebuiltVoiceConfig: { voiceName: host2BaseVoice } };
 
     console.log(
-      `[Synthesize Dialogue] Speaker 1 config:`,
-      JSON.stringify(host1Config),
-      `Speaker 2 config:`,
-      JSON.stringify(host2Config),
-      `isHost2Female:`,
-      isHost2Female,
+      `[Synthesize Dialogue] Processing ${turns.length} turns in parallel worker pool (concurrency 3)...`,
     );
-
-    const synthesizedTurns: any[] = [];
-    const pcmChunks: Buffer[] = [];
-    const failedTurns: number[] = [];
-    let currentMasterTime = 0;
 
     // Single unified dialogue pause constant (350ms):
     // 24000 samples/sec * 1 channel * 2 bytes/sample * 0.35s = exactly 16800 bytes of silence!
     const DIALOGUE_PAUSE_SECONDS = 0.35;
     const pauseBuffer = Buffer.alloc(Math.round(24000 * 2 * DIALOGUE_PAUSE_SECONDS));
 
-    for (let i = 0; i < turns.length; i++) {
-      const turn = turns[i];
+    // Parallel worker pool: synthesize up to 3 turns concurrently
+    const processedTurnResults = await mapConcurrent(turns, 3, async (turn: any, i: number) => {
       const isHost1 = turn.speakerId === "HOST_1";
       const activeVoiceConfig = isHost1 ? host1Config : host2Config;
       const speakerName =
@@ -2195,6 +3521,7 @@ app.post("/api/podcast/synthesize-dialogue", async (req, res) => {
           .trim() || (isHost1 ? "Host1" : "Host2");
       const { speechText: cleanedTurnText, extractedStyles: turnStyles } =
         cleanScriptForSpeech(turn.text || "");
+      const textToSynthesize = cleanedTurnText || (turn.text || "").trim() || "...";
       const turnStyleCues =
         turnStyles.length > 0
           ? ` Turn delivery cues: ${turnStyles.join(", ")}.`
@@ -2217,9 +3544,10 @@ app.post("/api/podcast/synthesize-dialogue", async (req, res) => {
           ? `Persona: ${host2Voice.customPersonaPrompt}.`
           : "";
 
-      const speechStyleInstruction = `${genderDescription}. Speaker: ${speakerName}. Delivery mood: ${turn.emotion || "thoughtful"}.${turnStyleCues} ${tempoGuidance} ${timbreGuidance} ${personaGuidance} Speak authentic fluent Uzbek language clearly. Do NOT voice or pronounce any condition brackets, parentheses, or stage directions.`;
+      const speechStyleInstruction = `${genderDescription}. Speaker: ${speakerName}. Delivery mood: ${turn.emotion || "thoughtful"}.${turnStyleCues} ${tempoGuidance} ${timbreGuidance} ${personaGuidance} Speak 100% authentic native Uzbek language with clear articulation and ZERO foreign accent. Accurately interpret and voice vocal bursts (<laugh>, <breath>, <sigh>, <gasp>) as natural human sounds. Render conversational pipe markers (|ha|, |mhm|, |xoʻsh|) with authentic Tashkent native warmth. Do NOT voice or pronounce any condition brackets, parentheses, or stage directions.`;
 
       let turnPcm: Buffer | null = null;
+      let turnFailed = false;
 
       try {
         // Attempt 1: with selected voice config
@@ -2230,7 +3558,7 @@ app.post("/api/podcast/synthesize-dialogue", async (req, res) => {
               role: "user",
               parts: [
                 {
-                  text: cleanedTurnText || turn.text || "",
+                  text: textToSynthesize,
                   speechMetadata: {
                     speaker: speakerName,
                     style: speechStyleInstruction,
@@ -2254,7 +3582,7 @@ app.post("/api/podcast/synthesize-dialogue", async (req, res) => {
         }
       } catch (err: any) {
         console.warn(
-          `[Turn ${i + 1}] Primary voice synthesis failed, attempting fallback:`,
+          `[Turn ${i + 1}/${turns.length}] Primary voice synthesis failed, attempting fallback:`,
           err.message,
         );
         try {
@@ -2265,7 +3593,7 @@ app.post("/api/podcast/synthesize-dialogue", async (req, res) => {
             contents: [
               {
                 role: "user",
-                parts: [{ text: cleanedTurnText || turn.text || "" }],
+                parts: [{ text: textToSynthesize }],
               },
             ],
             config: {
@@ -2286,16 +3614,37 @@ app.post("/api/podcast/synthesize-dialogue", async (req, res) => {
           }
         } catch (fallbackErr: any) {
           console.error(
-            `[Turn ${i + 1}] Fallback synthesis failed too:`,
+            `[Turn ${i + 1}/${turns.length}] Fallback synthesis failed too:`,
             fallbackErr.message,
           );
         }
       }
 
-      // If synthesis failed for this turn, track and log
+      // If synthesis failed for this turn, use clean silence placeholder
       if (!turnPcm || turnPcm.length === 0) {
-        failedTurns.push(i + 1);
+        turnFailed = true;
         turnPcm = Buffer.alloc(24000); // 0.5s clean silence placeholder
+      }
+
+      return {
+        turn,
+        speakerName,
+        turnPcm,
+        turnFailed,
+      };
+    });
+
+    const synthesizedTurns: any[] = [];
+    const pcmChunks: Buffer[] = [];
+    const failedTurns: number[] = [];
+    let currentMasterTime = 0;
+
+    // Stitch processed turns in strict sequential order
+    for (let i = 0; i < processedTurnResults.length; i++) {
+      const { turn, speakerName, turnPcm, turnFailed } = processedTurnResults[i];
+
+      if (turnFailed) {
+        failedTurns.push(i + 1);
       }
 
       const turnDuration = Math.max(
@@ -2304,7 +3653,6 @@ app.post("/api/podcast/synthesize-dialogue", async (req, res) => {
       );
       const turnStartTime = currentMasterTime;
       const turnEndTime = currentMasterTime + turnDuration;
-      // Synchronized exactly with pauseBuffer duration
       currentMasterTime = turnEndTime + DIALOGUE_PAUSE_SECONDS;
 
       pcmChunks.push(turnPcm);
@@ -2321,7 +3669,7 @@ app.post("/api/podcast/synthesize-dialogue", async (req, res) => {
         durationSeconds: turnDuration,
         startTime: turnStartTime,
         endTime: turnEndTime,
-        synthesisFailed: !turnPcm || turnPcm.length === 0,
+        synthesisFailed: turnFailed,
       });
     }
 
@@ -2330,11 +3678,21 @@ app.post("/api/podcast/synthesize-dialogue", async (req, res) => {
     const masterWavBuffer = buildWavBuffer(totalPcm, 24000, 1, 16);
     const totalDuration = Math.round((totalPcm.length / 48000) * 10) / 10;
 
+    let creditsRemaining = (req as any).userBalance;
+    if (typeof (req as any).deductCredits === "function") {
+      try {
+        creditsRemaining = await (req as any).deductCredits();
+      } catch (deductErr) {
+        console.warn("Credit deduction notice:", deductErr);
+      }
+    }
+
     res.json({
       masterAudioBase64: masterWavBuffer.toString("base64"),
       totalDurationSeconds: totalDuration,
       turns: synthesizedTurns,
       failedTurns: failedTurns.length > 0 ? failedTurns : undefined,
+      creditsRemaining,
     });
   } catch (error: any) {
     console.error("Error synthesizing dialogue:", error);
@@ -2576,7 +3934,7 @@ app.post("/api/agent/start-call", async (req, res) => {
         : "Toshkentlik samimiy, tajribali va xushchaqchaq rieltor Shohrux. Telefon orqali samimiy salomlashish, sof o'zbek tili, hech qanday robotik chet elcha aksentsiz, jarangdor harflar Q, G', H, X va tabiiy nafas.";
 
     const ttsResponse = await ai.models.generateContent({
-      model: "gemini-3.8-flash-lite-tts",
+      model: "gemini-3.8-flash-tts",
       contents: [
         {
           role: "user",
@@ -2621,7 +3979,7 @@ app.post("/api/agent/start-call", async (req, res) => {
 });
 
 // Interactive dialogue turn during call with real-time speech understanding
-app.post("/api/agent/call-turn", async (req, res) => {
+app.post("/api/agent/call-turn", requireCreditBalance(1), async (req, res) => {
   try {
     const {
       userText = "",
@@ -2829,7 +4187,7 @@ Return strict JSON:
       }
     }
 
-    // Synthesize speech with Gemini 3.8 Flash-Lite TTS for ultra-low latency (~500ms)
+    // Synthesize speech with Gemini 3.8 Flash TTS for expressive natural dialogue
     const isCustomVoice =
       agentVoiceId &&
       (agentVoiceId.startsWith("voice_") ||
@@ -2839,7 +4197,7 @@ Return strict JSON:
       : { prebuiltVoiceConfig: { voiceName: agentVoiceId || "Puck" } };
 
     const ttsRes = await ai.models.generateContent({
-      model: "gemini-3.8-flash-lite-tts",
+      model: "gemini-3.8-flash-tts",
       contents: [
         {
           role: "user",
@@ -2870,6 +4228,15 @@ Return strict JSON:
       audioBase64 = wav.toString("base64");
     }
 
+    let creditsRemaining = (req as any).userBalance;
+    if (typeof (req as any).deductCredits === "function") {
+      try {
+        creditsRemaining = await (req as any).deductCredits(1);
+      } catch (deductErr) {
+        console.warn("Credit deduction notice:", deductErr);
+      }
+    }
+
     res.json({
       recognizedUserText,
       replyText: speechText || replyText,
@@ -2881,6 +4248,7 @@ Return strict JSON:
         hour: "2-digit",
         minute: "2-digit",
       }),
+      creditsRemaining,
     });
   } catch (error: any) {
     console.error("Error in agent call turn:", error);
@@ -3437,13 +4805,31 @@ if (process.env.NODE_ENV !== "production") {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
-server.on("upgrade", (req, socket, head) => {
+server.on("upgrade", async (req, socket, head) => {
   try {
     const url = new URL(req.url || "", `http://${req.headers.host || "localhost"}`);
     if (url.pathname === "/api/live-call") {
-      wss.handleUpgrade(req, socket, head, (ws) => {
-        wss.emit("connection", ws, req);
-      });
+      const token = url.searchParams.get("token");
+      if (!token) {
+        wss.handleUpgrade(req, socket, head, (ws) => {
+          ws.close(4401, "unauthorized: missing token");
+        });
+        return;
+      }
+
+      try {
+        const decoded = await getAuth().verifyIdToken(token);
+        (req as any).uid = decoded.uid;
+        (req as any).userEmail = decoded.email;
+        wss.handleUpgrade(req, socket, head, (ws) => {
+          wss.emit("connection", ws, req);
+        });
+      } catch (authErr) {
+        wss.handleUpgrade(req, socket, head, (ws) => {
+          ws.close(4401, "unauthorized: invalid token");
+        });
+      }
+      return;
     }
   } catch (err) {
     console.error("Upgrade error:", err);

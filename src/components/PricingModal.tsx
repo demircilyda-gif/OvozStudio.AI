@@ -19,15 +19,17 @@ import {
   HelpCircle,
   CheckCircle2,
   RefreshCw,
+  Edit3,
 } from 'lucide-react';
 import {
-  createPaymentRequest,
-  getPendingPaymentRequests,
+  PaymentRequest,
+  adminFetchAllUsers,
+  adminFetchPaymentRequests,
   approvePaymentRequest,
   rejectPaymentRequest,
   adminManualGrantCredits,
-  PaymentRequest,
 } from '../firebase';
+import { authFetch } from '../utils/authFetch';
 
 interface PricingModalProps {
   lang: 'uz' | 'ru';
@@ -59,12 +61,12 @@ export const PricingModal: React.FC<PricingModalProps> = ({ lang }) => {
     cardDetails: { cardNumber: string; cardHolder: string; bank: string };
   }>({
     stripeConfigured: false,
-    telegramHandle: 'ovozstudio_admin',
-    phoneNumber: '+998 90 123 45 67',
+    telegramHandle: '',
+    phoneNumber: '',
     cardDetails: {
-      cardNumber: '9860 3501 4500 1755',
-      cardHolder: 'HUMO',
-      bank: 'Humo',
+      cardNumber: '',
+      cardHolder: '',
+      bank: '',
     },
   });
 
@@ -82,6 +84,10 @@ export const PricingModal: React.FC<PricingModalProps> = ({ lang }) => {
   // Admin Panel states
   const [pendingRequests, setPendingRequests] = useState<PaymentRequest[]>([]);
   const [isLoadingRequests, setIsLoadingRequests] = useState(false);
+  const [adminUsers, setAdminUsers] = useState<any[]>([]);
+  const [isLoadingUsers, setIsLoadingUsers] = useState(false);
+  const [userSearchQuery, setUserSearchQuery] = useState('');
+  const [grantingUserEmail, setGrantingUserEmail] = useState<string | null>(null);
   const [adminTargetEmail, setAdminTargetEmail] = useState('');
   const [adminTargetCredits, setAdminTargetCredits] = useState<number>(100);
   const [adminTargetTier, setAdminTargetTier] = useState<'free' | 'pro' | 'unlimited'>('pro');
@@ -90,7 +96,7 @@ export const PricingModal: React.FC<PricingModalProps> = ({ lang }) => {
   // Fetch gateway configuration on open
   useEffect(() => {
     if (isPricingModalOpen) {
-      fetch('/api/billing/config')
+      authFetch('/api/billing/config')
         .then((res) => res.json())
         .then((data) => {
           if (data) setGatewayConfig(data);
@@ -99,22 +105,35 @@ export const PricingModal: React.FC<PricingModalProps> = ({ lang }) => {
     }
   }, [isPricingModalOpen]);
 
-  // Load pending requests if Admin
+  // Load pending requests and registered users if Admin
   useEffect(() => {
     if (isPricingModalOpen && isAdmin && activeTab === 'admin') {
       loadPendingRequests();
+      loadAdminUsers();
     }
   }, [isPricingModalOpen, isAdmin, activeTab]);
 
   const loadPendingRequests = async () => {
     setIsLoadingRequests(true);
     try {
-      const requests = await getPendingPaymentRequests();
+      const requests = await adminFetchPaymentRequests('pending');
       setPendingRequests(requests);
     } catch (e) {
-      console.warn(e);
+      console.warn('Error loading pending requests:', e);
     } finally {
       setIsLoadingRequests(false);
+    }
+  };
+
+  const loadAdminUsers = async () => {
+    setIsLoadingUsers(true);
+    try {
+      const users = await adminFetchAllUsers();
+      setAdminUsers(users);
+    } catch (e) {
+      console.warn('Error loading admin users:', e);
+    } finally {
+      setIsLoadingUsers(false);
     }
   };
 
@@ -227,7 +246,7 @@ export const PricingModal: React.FC<PricingModalProps> = ({ lang }) => {
     setErrorMessage(null);
 
     try {
-      const res = await fetch('/api/billing/create-checkout-session', {
+      const res = await authFetch('/api/billing/create-checkout-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -254,7 +273,7 @@ export const PricingModal: React.FC<PricingModalProps> = ({ lang }) => {
     }
   };
 
-  // Submit Payment Request for Admin Verification
+  // Submit Payment Request for Admin Verification via server endpoint
   const handleSubmitPaymentRequest = async () => {
     if (!user) {
       closePricingModal();
@@ -266,17 +285,20 @@ export const PricingModal: React.FC<PricingModalProps> = ({ lang }) => {
     setErrorMessage(null);
 
     try {
-      await createPaymentRequest({
-        userId: user.uid,
-        userEmail: user.email || 'no-email',
-        userName: user.displayName || undefined,
-        planId: selectedPlan,
-        planName: currentPlan.nameUz,
-        price: currentPlan.priceUz,
-        credits: currentPlan.credits,
-        paymentMethod: selectedPayment,
-        receiptInfo: transferDetails.trim() || 'Chek Telegram orqali yuborildi',
+      const res = await authFetch('/api/billing/payment-requests', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          planId: selectedPlan,
+          paymentMethod: selectedPayment,
+          receiptInfo: transferDetails.trim() || 'Chek Telegram orqali yuborildi',
+        }),
       });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Server error');
+      }
 
       setRequestSubmitted(true);
       setIsProcessing(false);
@@ -291,20 +313,21 @@ export const PricingModal: React.FC<PricingModalProps> = ({ lang }) => {
     }
   };
 
-  // Admin: Approve Request
+  // Admin: Approve Request (Direct Firestore + server sync)
   const handleApproveRequest = async (req: PaymentRequest) => {
     try {
-      await approvePaymentRequest(req, user?.email || 'admin');
+      await approvePaymentRequest(req, user?.email || undefined);
       setPendingRequests((prev) => prev.filter((r) => r.id !== req.id));
       setAdminActionMsg(`So'rov tasdiqlandi: ${req.userEmail} (+${req.credits} kredit)`);
       setTimeout(() => setAdminActionMsg(null), 3000);
+      await loadAdminUsers();
       await refreshProfile();
     } catch (e: any) {
       setAdminActionMsg(`Xato: ${e.message}`);
     }
   };
 
-  // Admin: Reject Request
+  // Admin: Reject Request (Direct Firestore + server sync)
   const handleRejectRequest = async (reqId: string) => {
     try {
       await rejectPaymentRequest(reqId, 'Bekor qilindi');
@@ -316,23 +339,50 @@ export const PricingModal: React.FC<PricingModalProps> = ({ lang }) => {
     }
   };
 
-  // Admin: Manual Grant Credits
+  // Admin: Quick Grant directly from Users List (Direct Firestore + server sync)
+  const handleQuickGrant = async (targetEmail: string, amount: number) => {
+    setGrantingUserEmail(targetEmail);
+    try {
+      const res = await adminManualGrantCredits(targetEmail, amount, 'pro');
+      if (!res.success) {
+        setAdminActionMsg(res.message || 'Xatolik yuz berdi');
+      } else {
+        setAdminActionMsg(res.message || `${targetEmail} hisobiga +${amount} kredit qo'shildi`);
+        await loadAdminUsers();
+        await refreshProfile();
+      }
+    } catch (e: any) {
+      setAdminActionMsg(`Xato: ${e.message}`);
+    } finally {
+      setGrantingUserEmail(null);
+    }
+    setTimeout(() => setAdminActionMsg(null), 4000);
+  };
+
+  // Admin: Manual Grant Credits (Direct Firestore + server sync)
   const handleAdminManualGrant = async () => {
     if (!adminTargetEmail.trim()) {
       setAdminActionMsg('Foydalanuvchi emailini kiriting');
       return;
     }
-    const result = await adminManualGrantCredits(adminTargetEmail, adminTargetCredits, adminTargetTier);
-    setAdminActionMsg(result.message);
-    if (result.success) {
-      setAdminTargetEmail('');
-      await refreshProfile();
+    try {
+      const res = await adminManualGrantCredits(adminTargetEmail, adminTargetCredits, adminTargetTier);
+      if (!res.success) {
+        setAdminActionMsg(res.message || 'Xatolik yuz berdi');
+      } else {
+        setAdminActionMsg(res.message || 'Kreditlar qo\'shildi');
+        setAdminTargetEmail('');
+        await loadAdminUsers();
+        await refreshProfile();
+      }
+    } catch (e: any) {
+      setAdminActionMsg(`Xato: ${e.message}`);
     }
     setTimeout(() => setAdminActionMsg(null), 4000);
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-[#161511]/60 backdrop-blur-sm animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-[9999] isolate flex items-center justify-center p-3 sm:p-4 bg-[#161511]/75 backdrop-blur-md animate-in fade-in duration-200">
       <div className="relative w-full max-w-2xl bg-[#F4F1EA] text-[#161511] border border-[rgba(22,21,17,0.18)] rounded-[24px] p-5 sm:p-7 shadow-[0_50px_90px_-40px_rgba(22,21,17,0.55)] overflow-hidden space-y-5 max-h-[92vh] overflow-y-auto no-scrollbar">
         {/* Soft Ambient Glow (Teal) */}
         <div className="absolute top-0 right-0 w-64 h-64 bg-[#0E7C86]/10 blur-3xl pointer-events-none" />
@@ -481,7 +531,7 @@ export const PricingModal: React.FC<PricingModalProps> = ({ lang }) => {
 
               <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
                 {[
-                  { id: 'card' as const, label: 'Uzcard / Humo', badge: '9860 3501...' },
+                  { id: 'card' as const, label: 'Uzcard / Humo', badge: "Karta o'tkazmasi" },
                   { id: 'payme' as const, label: 'Payme', badge: 'O\'zbekiston' },
                   { id: 'click' as const, label: 'Click Up', badge: '1-click' },
                   { id: 'uzum' as const, label: 'Uzum Bank', badge: '0% komissiya' },
@@ -795,6 +845,137 @@ export const PricingModal: React.FC<PricingModalProps> = ({ lang }) => {
                   </div>
                 ))
               )}
+            </div>
+
+            {/* Registered Users List & 1-Click Credit Grants */}
+            <div className="bg-white border border-[rgba(22,21,17,0.12)] rounded-2xl p-4 space-y-3 shadow-2xs">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-[#161511] flex items-center gap-1.5">
+                  <ShieldCheck className="w-3.5 h-3.5 text-[#0E7C86]" />
+                  <span>
+                    {lang === 'uz'
+                      ? `Ro'yxatdan o'tgan mijozlar / Hisoblar (${adminUsers.length})`
+                      : `Зарегистрированные пользователи / Аккаунты (${adminUsers.length})`}
+                  </span>
+                </span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={userSearchQuery}
+                    onChange={(e) => setUserSearchQuery(e.target.value)}
+                    placeholder={lang === 'uz' ? "Email qidirish..." : "Поиск по email..."}
+                    className="bg-[#F4F1EA] text-[11px] text-[#161511] px-2.5 py-1 rounded-lg border border-[rgba(22,21,17,0.1)] outline-none focus:border-[#0E7C86]"
+                  />
+                  <button
+                    type="button"
+                    onClick={loadAdminUsers}
+                    disabled={isLoadingUsers}
+                    className="text-[11px] text-[#0E7C86] hover:underline flex items-center gap-1 font-semibold cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isLoadingUsers ? 'animate-spin' : ''}`} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Users list items */}
+              <div className="space-y-2 max-h-52 overflow-y-auto pr-1 no-scrollbar">
+                {isLoadingUsers && adminUsers.length === 0 ? (
+                  <div className="py-4 text-center text-xs text-[#5D594E]">Yuklanmoqda...</div>
+                ) : adminUsers.filter((u) => {
+                    const q = userSearchQuery.toLowerCase();
+                    return !q || (u.email && u.email.toLowerCase().includes(q)) || (u.displayName && u.displayName.toLowerCase().includes(q));
+                  }).length === 0 ? (
+                  <div className="py-4 text-center text-xs text-[#5D594E]">
+                    {userSearchQuery ? "Bunday foydalanuvchi topilmadi" : "Hozircha foydalanuvchilar yo'q"}
+                  </div>
+                ) : (
+                  adminUsers
+                    .filter((u) => {
+                      const q = userSearchQuery.toLowerCase();
+                      return !q || (u.email && u.email.toLowerCase().includes(q)) || (u.displayName && u.displayName.toLowerCase().includes(q));
+                    })
+                    .map((u) => (
+                      <div
+                        key={u.uid}
+                        className="bg-[#F4F1EA]/60 hover:bg-[#F4F1EA] border border-[rgba(22,21,17,0.08)] rounded-xl p-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs transition-colors"
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-semibold text-[#161511] truncate max-w-[220px]" title={u.email}>
+                              {u.email}
+                            </span>
+                            {u.displayName && u.displayName !== u.email?.split('@')[0] && (
+                              <span className="text-[10.5px] text-[#5D594E] truncate max-w-[140px]">
+                                ({u.displayName})
+                              </span>
+                            )}
+                            {u.role === 'admin' ? (
+                              <span className="px-1.5 py-0.2 rounded text-[9.5px] font-mono bg-[#0E7C86]/10 text-[#0E7C86] font-bold">
+                                ADMIN (Cheksiz)
+                              </span>
+                            ) : (
+                              <span className="px-1.5 py-0.2 rounded text-[9.5px] font-mono bg-amber-500/10 text-amber-800 font-bold">
+                                {u.tier?.toUpperCase() || 'FREE'}
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2 mt-0.5 text-[11px] text-[#5D594E] font-mono">
+                            <span>
+                              Balans: <strong className="text-[#0E7C86]">{u.role === 'admin' ? 'Cheksiz' : `${u.creditsRemaining} kredit`}</strong>
+                            </span>
+                            {u.createdAt && (
+                              <>
+                                <span>•</span>
+                                <span className="text-[10px] text-[#7D7A70]">
+                                  {new Date(u.createdAt).toLocaleDateString()}
+                                </span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Quick 1-click grant buttons */}
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handleQuickGrant(u.email, 25)}
+                            disabled={grantingUserEmail === u.email}
+                            className="px-2 py-1 rounded-lg bg-white hover:bg-[#0E7C86] hover:text-white border border-[rgba(22,21,17,0.12)] text-[10.5px] font-mono font-semibold transition-all cursor-pointer"
+                            title="25 kredit qo'shish"
+                          >
+                            +25
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleQuickGrant(u.email, 100)}
+                            disabled={grantingUserEmail === u.email}
+                            className="px-2 py-1 rounded-lg bg-[#0E7C86]/10 hover:bg-[#0E7C86] text-[#0A5A62] hover:text-white border border-[#0E7C86]/30 text-[10.5px] font-mono font-bold transition-all cursor-pointer"
+                            title="100 kredit qo'shish"
+                          >
+                            +100
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleQuickGrant(u.email, 350)}
+                            disabled={grantingUserEmail === u.email}
+                            className="px-2 py-1 rounded-lg bg-[#161511] hover:bg-[#0A5A62] text-[#F4F1EA] text-[10.5px] font-mono font-semibold transition-all cursor-pointer"
+                            title="350 kredit qo'shish"
+                          >
+                            +350
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setAdminTargetEmail(u.email)}
+                            className="p-1 rounded-lg hover:bg-black/5 text-[#5D594E] transition-colors cursor-pointer"
+                            title="Pastdagi maydonga tanlash"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                )}
+              </div>
             </div>
 
             {/* Manual Grant Section for Admin */}

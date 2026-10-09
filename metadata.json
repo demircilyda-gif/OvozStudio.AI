@@ -1,6 +1,6 @@
 {
   "name": "OvozStudio AI - O'zbekcha Podkast Yaratish",
-  "description": "Gemini 3.8 TTS Live orqali o'z ovozingizda professional o'zbekcha podkastlar yaratish, tembr, temp, toifa va ssenariylarni sozlash hamda yuklab olish platformasi.",
+  "description": "OvozStudio Neural TTS Live orqali o'z ovozingizda professional o'zbekcha podkastlar yaratish, tembr, temp, toifa va ssenariylarni sozlash hamda yuklab olish platformasi.",
   "requestFramePermissions": ["CAMERA_MIC"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

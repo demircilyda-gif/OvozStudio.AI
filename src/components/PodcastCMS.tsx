@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   FolderKanban,
   Search,
@@ -8,6 +8,7 @@ import {
   Trash2,
   Edit3,
   Play,
+  Pause,
   Download,
   Calendar,
   Clock,
@@ -16,11 +17,16 @@ import {
   FileAudio,
   CheckCircle2,
   FileText,
-  Volume2
+  Volume2,
+  VolumeX,
+  X,
+  Radio,
+  Sliders,
+  RotateCcw,
 } from 'lucide-react';
 import { GeneratedPodcast } from '../types/podcast';
 import { PODCAST_CATEGORIES } from '../data/categories';
-import { exportAudioWithQuality, base64ToArrayBuffer } from '../utils/audioUtils';
+import { exportAudioWithQuality, base64ToArrayBuffer, getAudioContext } from '../utils/audioUtils';
 
 export interface CMSPodcastItem extends GeneratedPodcast {
   description: string;
@@ -58,6 +64,158 @@ export const PodcastCMS: React.FC<PodcastCMSProps> = ({
   const [exportFormat, setExportFormat] = useState<'wav' | 'mp3'>('wav');
   const [exportQuality, setExportQuality] = useState<'lossless' | '320k' | '192k' | '128k'>('lossless');
   const [isExporting, setIsExporting] = useState(false);
+
+  // In-library audio playback state
+  const [activePodcast, setActivePodcast] = useState<CMSPodcastItem | null>(null);
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [currentTime, setCurrentTime] = useState<number>(0);
+  const [duration, setDuration] = useState<number>(0);
+  const [volume, setVolume] = useState<number>(1);
+  const [isMuted, setIsMuted] = useState<boolean>(false);
+  const [playbackRate, setPlaybackRate] = useState<number>(1.0);
+  const [audioUrl, setAudioUrl] = useState<string>('');
+  const [playbackNotice, setPlaybackNotice] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioBlobUrlRef = useRef<string | null>(null);
+
+  const formatSeconds = (sec: number) => {
+    if (isNaN(sec) || sec < 0) return '0:00';
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${s < 10 ? '0' : ''}${s}`;
+  };
+
+  const stopAudio = () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
+    if (audioBlobUrlRef.current) {
+      URL.revokeObjectURL(audioBlobUrlRef.current);
+      audioBlobUrlRef.current = null;
+    }
+    setAudioUrl('');
+    setIsPlaying(false);
+    setCurrentTime(0);
+  };
+
+  useEffect(() => {
+    return () => {
+      stopAudio();
+    };
+  }, []);
+
+  const handleTogglePlay = async (podcast: CMSPodcastItem) => {
+    if (!podcast.rawAudioWavBase64) {
+      setPlaybackNotice(
+        lang === 'uz'
+          ? "Ushbu podkastda audio ma'lumot topilmadi"
+          : 'Аудиоданные не найдены'
+      );
+      setTimeout(() => setPlaybackNotice(null), 3500);
+      return;
+    }
+
+    // Toggle same podcast
+    if (activePodcast?.id === podcast.id && audioRef.current) {
+      if (isPlaying) {
+        audioRef.current.pause();
+        setIsPlaying(false);
+      } else {
+        try {
+          const ctx = getAudioContext();
+          if (ctx.state === 'suspended') {
+            await ctx.resume().catch(() => {});
+          }
+        } catch {}
+        audioRef.current
+          .play()
+          .then(() => setIsPlaying(true))
+          .catch((err) => {
+            console.warn('Playback resume error:', err);
+            setIsPlaying(false);
+          });
+      }
+      return;
+    }
+
+    // New podcast selected
+    stopAudio();
+    setActivePodcast(podcast);
+    setDuration(podcast.durationSeconds || 0);
+    setCurrentTime(0);
+
+    try {
+      const buffer = base64ToArrayBuffer(podcast.rawAudioWavBase64);
+      const blob = new Blob([buffer], { type: 'audio/wav' });
+      const url = URL.createObjectURL(blob);
+      audioBlobUrlRef.current = url;
+      setAudioUrl(url);
+
+      try {
+        const ctx = getAudioContext();
+        if (ctx.state === 'suspended') {
+          await ctx.resume().catch(() => {});
+        }
+      } catch {}
+
+      // Play as soon as element receives the src
+      setTimeout(() => {
+        if (audioRef.current) {
+          audioRef.current.volume = isMuted ? 0 : volume;
+          audioRef.current.playbackRate = playbackRate;
+          audioRef.current
+            .play()
+            .then(() => setIsPlaying(true))
+            .catch((err) => {
+              console.warn('Initial play error:', err);
+              setIsPlaying(false);
+            });
+        }
+      }, 50);
+    } catch (err: any) {
+      console.error('Audio initialization failed:', err);
+      setPlaybackNotice(
+        lang === 'uz' ? "Audioni tinglashda xatolik yuz berdi" : 'Ошибка при воспроизведении аудио'
+      );
+      setTimeout(() => setPlaybackNotice(null), 3500);
+    }
+  };
+
+  const handleSeek = (newTime: number) => {
+    if (audioRef.current) {
+      audioRef.current.currentTime = newTime;
+      setCurrentTime(newTime);
+    }
+  };
+
+  const handleVolumeChange = (newVol: number) => {
+    setVolume(newVol);
+    setIsMuted(newVol === 0);
+    if (audioRef.current) {
+      audioRef.current.volume = newVol;
+    }
+  };
+
+  const handleToggleMute = () => {
+    if (isMuted) {
+      setIsMuted(false);
+      if (audioRef.current) audioRef.current.volume = volume || 0.8;
+    } else {
+      setIsMuted(true);
+      if (audioRef.current) audioRef.current.volume = 0;
+    }
+  };
+
+  const handleCycleSpeed = () => {
+    const speeds = [1.0, 1.25, 1.5, 2.0];
+    const nextIdx = (speeds.indexOf(playbackRate) + 1) % speeds.length;
+    const nextSpeed = speeds[nextIdx];
+    setPlaybackRate(nextSpeed);
+    if (audioRef.current) {
+      audioRef.current.playbackRate = nextSpeed;
+    }
+  };
 
   // Filtered Podcasts
   const filteredPodcasts = podcasts.filter((p) => {
@@ -99,6 +257,50 @@ export const PodcastCMS: React.FC<PodcastCMSProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Hidden DOM Audio Element for Native Reliable Playback */}
+      <audio
+        ref={audioRef}
+        src={audioUrl || undefined}
+        preload="auto"
+        onTimeUpdate={() => {
+          if (audioRef.current) setCurrentTime(audioRef.current.currentTime);
+        }}
+        onLoadedMetadata={() => {
+          if (audioRef.current) {
+            const d = audioRef.current.duration;
+            if (d && !isNaN(d) && d !== Infinity) {
+              setDuration(d);
+            } else if (activePodcast) {
+              setDuration(activePodcast.durationSeconds || 0);
+            }
+          }
+        }}
+        onPlay={() => setIsPlaying(true)}
+        onPause={() => setIsPlaying(false)}
+        onEnded={() => {
+          setIsPlaying(false);
+          setCurrentTime(0);
+        }}
+        onError={(e) => {
+          console.warn('Audio playback error:', e);
+          setIsPlaying(false);
+        }}
+      />
+
+      {/* Playback Toast Notice (replaces window.alert) */}
+      {playbackNotice && (
+        <div className="p-3 bg-[#C4552D]/10 border border-[#C4552D]/30 rounded-xl text-xs text-[#C4552D] font-mono flex items-center justify-between animate-fadeIn">
+          <span>{playbackNotice}</span>
+          <button
+            type="button"
+            onClick={() => setPlaybackNotice(null)}
+            className="text-[#C4552D] hover:underline cursor-pointer ml-3 font-sans"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Top Banner / Actions */}
       <div className="border border-[rgba(22,21,17,0.14)] rounded-[22px] bg-[rgba(255,255,255,0.65)] backdrop-blur-md p-6 sm:p-7 shadow-[0_20px_40px_-20px_rgba(22,21,17,0.18)]">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -263,20 +465,65 @@ export const PodcastCMS: React.FC<PodcastCMSProps> = ({
                     {Math.round(podcast.durationSeconds)}s
                   </span>
                 </div>
+
+                {/* Inline Progress Bar when playing this podcast */}
+                {activePodcast?.id === podcast.id && (
+                  <div className="pt-2">
+                    <div className="flex items-center justify-between text-[10px] font-mono text-[#0E7C86] mb-1">
+                      <span className="flex items-center gap-1">
+                        <span className="w-2 h-2 rounded-full bg-[#0E7C86] animate-pulse" />
+                        {isPlaying ? (lang === 'uz' ? 'Tinglanmoqda' : 'Играет') : (lang === 'uz' ? 'Pauza' : 'Пауза')}
+                      </span>
+                      <span>{formatSeconds(currentTime)} / {formatSeconds(duration || podcast.durationSeconds)}</span>
+                    </div>
+                    <div className="w-full bg-[#E5E0D5] rounded-full h-1.5 overflow-hidden">
+                      <div
+                        className="bg-[#0E7C86] h-full transition-all duration-150"
+                        style={{
+                          width: `${Math.min(100, Math.max(0, (currentTime / (duration || podcast.durationSeconds || 1)) * 100))}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Bottom Card Actions */}
               <div className="flex items-center justify-between gap-2 mt-4 pt-3 border-t border-[rgba(22,21,17,0.1)]">
                 <div className="flex items-center gap-1.5">
+                  {/* Direct Play/Pause Audio in Library */}
+                  <button
+                    type="button"
+                    onClick={() => handleTogglePlay(podcast)}
+                    className={`p-2 rounded-full transition-all cursor-pointer shadow-xs ${
+                      activePodcast?.id === podcast.id && isPlaying
+                        ? 'bg-[#0E7C86] text-white ring-2 ring-[#0E7C86]/30'
+                        : 'bg-[#161511] text-[#F4F1EA] hover:bg-[#0A5A62]'
+                    }`}
+                    title={
+                      activePodcast?.id === podcast.id && isPlaying
+                        ? (lang === 'uz' ? "Pauza" : 'Пауза')
+                        : (lang === 'uz' ? "Kutubxonada tinglash" : 'Слушать в библиотеке')
+                    }
+                  >
+                    {activePodcast?.id === podcast.id && isPlaying ? (
+                      <Pause className="w-3.5 h-3.5 fill-current" />
+                    ) : (
+                      <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
+                    )}
+                  </button>
+
+                  {/* Open in Studio */}
                   <button
                     type="button"
                     onClick={() => onOpenInStudio(podcast)}
-                    className="p-2 rounded-full bg-[#161511] text-[#F4F1EA] hover:bg-[#0A5A62] transition-colors cursor-pointer shadow-2xs"
-                    title={lang === 'uz' ? 'Studiyada ochish / Tinglash' : 'Открыть в студии'}
+                    className="p-2 rounded-full bg-[#F4F1EA] hover:bg-[#ECE7DB] text-[#161511] border border-[rgba(22,21,17,0.14)] transition-colors cursor-pointer"
+                    title={lang === 'uz' ? 'Studiyada ochish' : 'Открыть в студии'}
                   >
-                    <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
+                    <Layers className="w-3.5 h-3.5" />
                   </button>
 
+                  {/* Export / Download */}
                   <button
                     type="button"
                     onClick={() => setExportModalItem(podcast)}
@@ -286,6 +533,7 @@ export const PodcastCMS: React.FC<PodcastCMSProps> = ({
                     <Download className="w-3.5 h-3.5" />
                   </button>
 
+                  {/* Edit Metadata */}
                   <button
                     type="button"
                     onClick={() => setEditingItem(podcast)}
@@ -300,6 +548,10 @@ export const PodcastCMS: React.FC<PodcastCMSProps> = ({
                   type="button"
                   onClick={() => {
                     if (confirm(lang === 'uz' ? 'Ushbu podkastni o\'chirishni xohlaysizmi?' : 'Удалить этот подкаст?')) {
+                      if (activePodcast?.id === podcast.id) {
+                        stopAudio();
+                        setActivePodcast(null);
+                      }
                       onDeletePodcast(podcast.id);
                     }
                   }}
@@ -531,6 +783,138 @@ export const PodcastCMS: React.FC<PodcastCMSProps> = ({
                   </>
                 )}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Floating Sticky Audio Player for Library Playback */}
+      {activePodcast && (
+        <div className="fixed bottom-4 left-4 right-4 sm:left-6 sm:right-6 md:left-24 md:right-8 z-40 bg-[#161511]/95 text-[#F4F1EA] backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl p-3 sm:p-4 animate-in slide-in-from-bottom-4 duration-200">
+          <div className="flex flex-col gap-2.5">
+            {/* Top row: Track Info & Controls */}
+            <div className="flex items-center justify-between gap-3">
+              {/* Left Track Info */}
+              <div className="flex items-center gap-3 min-w-0 flex-1">
+                <div className="w-10 h-10 rounded-xl bg-[#0E7C86]/20 border border-[#0E7C86]/40 flex items-center justify-center shrink-0">
+                  <Radio className={`w-5 h-5 text-[#5CC8CF] ${isPlaying ? 'animate-pulse' : ''}`} />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded-full bg-white/10 text-[#5CC8CF]">
+                      {activePodcast.category}
+                    </span>
+                    <span className="text-[11px] font-mono text-[#EDEAE2]/60 hidden sm:inline">
+                      {activePodcast.voiceName}
+                    </span>
+                  </div>
+                  <h4 className="text-xs sm:text-sm font-semibold truncate text-[#F4F1EA] mt-0.5">
+                    {activePodcast.title}
+                  </h4>
+                </div>
+              </div>
+
+              {/* Center Controls */}
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleCycleSpeed}
+                  className="px-2 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-[11px] font-mono font-bold text-[#5CC8CF] transition-colors cursor-pointer"
+                  title={lang === 'uz' ? 'Tezlik' : 'Скорость'}
+                >
+                  {playbackRate}x
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleTogglePlay(activePodcast)}
+                  className="w-10 h-10 rounded-full bg-[#0E7C86] hover:bg-[#119CA8] text-white flex items-center justify-center transition-all cursor-pointer shadow-md"
+                >
+                  {isPlaying ? (
+                    <Pause className="w-4 h-4 fill-current" />
+                  ) : (
+                    <Play className="w-4 h-4 fill-current ml-0.5" />
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => onOpenInStudio(activePodcast)}
+                  className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-[#EDEAE2] transition-colors cursor-pointer hidden sm:flex items-center gap-1.5 text-xs font-semibold"
+                  title={lang === 'uz' ? 'Studiyada ochish' : 'Открыть в студии'}
+                >
+                  <Layers className="w-3.5 h-3.5 text-[#5CC8CF]" />
+                  <span>{lang === 'uz' ? 'Studiya' : 'Студия'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setExportModalItem(activePodcast)}
+                  className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-[#EDEAE2] transition-colors cursor-pointer hidden sm:flex items-center gap-1.5 text-xs"
+                  title={lang === 'uz' ? 'Yuklab olish' : 'Скачать'}
+                >
+                  <Download className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {/* Right: Volume & Dismiss */}
+              <div className="flex items-center gap-2 shrink-0">
+                <div className="hidden md:flex items-center gap-2 mr-2">
+                  <button
+                    type="button"
+                    onClick={handleToggleMute}
+                    className="p-1.5 text-[#EDEAE2]/80 hover:text-white cursor-pointer"
+                  >
+                    {isMuted || volume === 0 ? (
+                      <VolumeX className="w-4 h-4 text-[#C4552D]" />
+                    ) : (
+                      <Volume2 className="w-4 h-4 text-[#5CC8CF]" />
+                    )}
+                  </button>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={isMuted ? 0 : volume}
+                    onChange={(e) => handleVolumeChange(Number(e.target.value))}
+                    className="w-16 h-1 bg-white/20 rounded-lg appearance-none cursor-pointer accent-[#0E7C86]"
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    stopAudio();
+                    setActivePodcast(null);
+                  }}
+                  className="p-1.5 rounded-full hover:bg-white/10 text-[#EDEAE2]/60 hover:text-white transition-colors cursor-pointer"
+                  title={lang === 'uz' ? 'Yopish' : 'Закрыть'}
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Bottom Scrubber */}
+            <div className="flex items-center gap-3">
+              <span className="text-[10.5px] font-mono text-[#EDEAE2]/60 w-10 text-right shrink-0">
+                {formatSeconds(currentTime)}
+              </span>
+              <div className="relative flex-1 flex items-center">
+                <input
+                  type="range"
+                  min={0}
+                  max={duration || activePodcast.durationSeconds || 1}
+                  step={0.1}
+                  value={currentTime}
+                  onChange={(e) => handleSeek(Number(e.target.value))}
+                  className="w-full h-1.5 bg-white/20 rounded-lg appearance-none cursor-pointer accent-[#5CC8CF]"
+                />
+              </div>
+              <span className="text-[10.5px] font-mono text-[#EDEAE2]/60 w-10 shrink-0">
+                {formatSeconds(duration || activePodcast.durationSeconds)}
+              </span>
             </div>
           </div>
         </div>

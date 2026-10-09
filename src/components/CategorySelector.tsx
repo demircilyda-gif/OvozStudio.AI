@@ -136,7 +136,7 @@ export const CategorySelector: React.FC<CategorySelectorProps> = ({
                   </p>
                 </div>
                 <div className="mt-2 pt-1.5 border-t border-[rgba(22,21,17,0.08)] flex items-center justify-between text-[9px] font-mono text-[#7D7A70]">
-                  <span>{cat.suggestedVoice}</span>
+                  <span>{lang === 'uz' ? `Ovoz: ${cat.suggestedVoice}` : `Голос: ${cat.suggestedVoice}`}</span>
                   <span>{cat.suggestedTempo}</span>
                 </div>
               </button>

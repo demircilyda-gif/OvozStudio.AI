@@ -2,25 +2,93 @@ import { AmbientSoundscape, AudioSegmentCue, SoundCueType } from '../types/podca
 // @ts-ignore - lamejs may not have complete TS definitions
 import { Mp3Encoder } from '@breezystack/lamejs';
 
-// Web Audio Context singleton
+// Centralized Web Audio Context singletons
 let audioCtx: AudioContext | null = null;
+let liveInputAudioCtx: AudioContext | null = null;
+let liveOutputAudioCtx: AudioContext | null = null;
 
+/**
+ * Primary 24kHz AudioContext singleton for audio previews, playback, and synthesis monitoring
+ */
 export function getAudioContext(): AudioContext {
-  if (!audioCtx) {
+  if (!audioCtx || audioCtx.state === 'closed') {
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
     audioCtx = new AudioContextClass({ sampleRate: 24000 });
   }
   if (audioCtx.state === 'suspended') {
-    audioCtx.resume();
+    audioCtx.resume().catch(() => {});
   }
   return audioCtx;
+}
+
+/**
+ * Shared singleton accessor for unified WebAudio management across all components
+ */
+export const getSharedAudioContext = getAudioContext;
+
+/**
+ * 16kHz AudioContext singleton dedicated to Live Agent microphone capture
+ */
+export function getLiveInputAudioContext(): AudioContext {
+  if (!liveInputAudioCtx || liveInputAudioCtx.state === 'closed') {
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    liveInputAudioCtx = new AudioContextClass({ sampleRate: 16000 });
+  }
+  if (liveInputAudioCtx.state === 'suspended') {
+    liveInputAudioCtx.resume().catch(() => {});
+  }
+  return liveInputAudioCtx;
+}
+
+/**
+ * 24kHz AudioContext singleton dedicated to Live Agent neural playback
+ */
+export function getLiveOutputAudioContext(): AudioContext {
+  if (!liveOutputAudioCtx || liveOutputAudioCtx.state === 'closed') {
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    liveOutputAudioCtx = new AudioContextClass({ sampleRate: 24000 });
+  }
+  if (liveOutputAudioCtx.state === 'suspended') {
+    liveOutputAudioCtx.resume().catch(() => {});
+  }
+  return liveOutputAudioCtx;
+}
+
+/**
+ * Cleanly suspends or terminates Live Audio contexts to avoid exceeding browser limits
+ */
+export async function closeLiveAudioContexts(): Promise<void> {
+  if (liveInputAudioCtx && liveInputAudioCtx.state !== 'closed') {
+    try {
+      await liveInputAudioCtx.close();
+    } catch {}
+    liveInputAudioCtx = null;
+  }
+  if (liveOutputAudioCtx && liveOutputAudioCtx.state !== 'closed') {
+    try {
+      await liveOutputAudioCtx.close();
+    } catch {}
+    liveOutputAudioCtx = null;
+  }
+}
+
+/**
+ * Maps timbre slider value (-1.0 to +1.0) into authentic acoustic prompt
+ */
+export function getMappedTimbrePrompt(val: number): string {
+  if (val < -0.3) return 'Chuqur jarangdor bas rezonans';
+  if (val > 0.3) return 'Yorqin, tiniq va jarangdor tenor diksiya';
+  return 'Iliq, salobatli va boy bariton';
 }
 
 /**
  * Base64 string to ArrayBuffer helper
  */
 export function base64ToArrayBuffer(base64: string): ArrayBuffer {
-  const binaryString = window.atob(base64);
+  if (!base64 || typeof base64 !== 'string') return new ArrayBuffer(0);
+  const cleanBase64 = base64.includes(',') ? base64.split(',')[1] : base64;
+  const sanitized = cleanBase64.replace(/\s+/g, '');
+  const binaryString = window.atob(sanitized);
   const len = binaryString.length;
   const bytes = new Uint8Array(len);
   for (let i = 0; i < len; i++) {
@@ -793,7 +861,7 @@ export interface CleanScriptResult {
 
 /**
  * Cleans a script of stage directions, timestamps, speaker tags, and voice conditions (e.g. Baritone, Mezzo, Pause, Frame cues)
- * so that Gemini TTS only voices the actual human speech without reading technical conditions aloud.
+ * so that OvozStudio TTS only voices the actual human speech without reading technical conditions aloud.
  * Automatically extracts the voice conditions to pass into speechMetadata / style prompt.
  */
 export function cleanScriptForSpeech(rawText: string): CleanScriptResult {
@@ -812,7 +880,7 @@ export function cleanScriptForSpeech(rawText: string): CleanScriptResult {
     if (content) {
       detectedConditions.push(`[${content}]`);
       if (
-        /(?:bariton|mezzo|sopran|tenor|bas|sokin|tez|pauza|nafas|kulgi|ovoz|ohang|jiddiy|hayajon|голос|баритон|меццо|тенор|сопрано|бас|пауз|шепот|громк|интонац|акцент|настроени|уверен|бодр|спокойн|мягк|глубок|тембр|style|mood|tone|speed|whisper)/i.test(
+        /(?:kulminatsiya|kulminasiya|кульминация|bariton|mezzo|sopran|tenor|bas|sokin|tez|pauza|nafas|kulgi|ovoz|ohang|jiddiy|hayajon|gurur|faxr|pichirlash|shivir|savol|hayrat|kulimsirab|tabassum|tantana|mehribon|sirli|chuqur|sigh|gasp|deep_breath|chuckle|голос|баритон|меццо|тенор|сопрано|бас|пауз|шепот|громк|интонац|акцент|настроени|уверен|бодр|спокойн|мягк|глубок|тембр|style|mood|tone|speed|whisper)/i.test(
           content
         )
       ) {
@@ -828,7 +896,7 @@ export function cleanScriptForSpeech(rawText: string): CleanScriptResult {
     const content = pMatch[1].trim();
     if (content) {
       if (
-        /(?:bariton|mezzo|sopran|tenor|bas|sokin|tez|pauza|nafas|kulgi|kamera|kadr|musiqa|ovoz|ohang|jiddiy|hayajon|голос|баритон|меццо|тенор|сопрано|бас|пауз|шепот|громк|интонац|акцент|настроени|уверен|бодр|спокойн|секунд|сек|диктор|ведущ|гость|кадр|сцен|музык|эффект|улыбк|смех|\d{1,2}:\d{2})/i.test(
+        /(?:kulminatsiya|kulminasiya|кульминация|bariton|mezzo|sopran|tenor|bas|sokin|tez|pauza|nafas|kulgi|kamera|kadr|musiqa|ovoz|ohang|jiddiy|hayajon|gurur|faxr|pichirlash|shivir|savol|hayrat|kulimsirab|tabassum|tantana|mehribon|sirli|chuqur|sigh|gasp|deep_breath|chuckle|голос|баритон|меццо|тенор|сопрано|бас|пауз|шепот|громк|интонац|акцент|настроени|уверен|бодр|спокойн|секунд|сек|диктор|ведущ|гость|кадр|сцен|музык|эффект|улыбк|смех|\d{1,2}:\d{2})/i.test(
           content
         )
       ) {
@@ -848,19 +916,35 @@ export function cleanScriptForSpeech(rawText: string): CleanScriptResult {
     )
     .replace(/^---\s*$/gm, '');
 
-  // 4. Handle pause tags by converting them into natural sentence cadence (comma or ellipsis) before removal
+  // 4. Handle timing pause tags in brackets [Pauza 1s] by converting them into cadence ellipsis (... )
   cleaned = cleaned
     .replace(/\[\s*(?:pauza|pause|пауза|jimlik|тишина)[^\]]*\]/gi, '... ')
     .replace(/\(\s*(?:pauza|pause|пауза|jimlik|тишина)[^)]*\)/gi, '... ');
 
-  // 5. Remove all bracket blocks completely: [00:00 - 00:06], [Баритон], [Кадр 1], etc.
-  cleaned = cleaned.replace(/\[[^\]]+\]/g, ' ');
+  // 4b. Map Uzbek vocal burst aliases to Gemini 3.8 Flash TTS standard tokens
+  cleaned = cleaned
+    .replace(/<\s*(?:nafas|chuqur_nafas)\s*>/gi, '<breath>')
+    .replace(/<\s*(?:kulgi|kulgili|jilmayish)\s*>/gi, '<laugh>')
+    .replace(/<\s*(?:xo'rsinish|xoʻrsinish)\s*>/gi, '<sigh>')
+    .replace(/<\s*(?:hansirash|hayrat)\s*>/gi, '<gasp>');
 
-  // 6. Remove stage directions / condition parentheses
-  cleaned = cleaned.replace(
-    /\((?:[^)]*(?:bariton|mezzo|sopran|tenor|bas|sokin|tez|pauza|nafas|kulgi|kamera|kadr|musiqa|ovoz|ohang|jiddiy|hayajon|голос|баритон|меццо|тенор|сопрано|бас|пауз|шепот|громк|интонац|акцент|настроени|уверен|бодр|спокойн|секунд|сек|диктор|ведущ|гость|кадр|сцен|музык|эффект|улыбк|смех|\d{1,2}:\d{2})[^)]*)\)/gi,
-    ' '
-  );
+  // 5. Remove non-spoken actor brackets: [00:00 - 00:06], [Баритон], [Кадр 1], [Kulminatsiya], [Hayajon], etc.
+  cleaned = cleaned.replace(/\[[^\]]*\]/g, ' ');
+
+  // 6. Remove non-spoken actor direction parentheses:
+  // e.g. (kulimsirab), (tabassum bilan), (jiddiy ohangda), (o'ylanib), (kulib)
+  cleaned = cleaned.replace(/\([^)]*\)/g, ' ');
+
+  // Remove non-vocal angle bracket tags, but PRESERVE Gemini 3.8 Flash TTS vocal bursts:
+  // <breath>, <laugh>, <sigh>, <gasp>, <throat_clear>
+  cleaned = cleaned.replace(/<(?!(\/?(?:breath|deep_breath|sigh|gasp|laugh|chuckle|giggle|throat_clear))\b)[^>]*>/gi, ' ');
+
+  // Preserve authentic Uzbek conversational pipe backchannels (|ha|, |mhm|, |rostanam|, |aha|, |albatta|, |xoʻsh|, etc.)
+  // Format them with consistent single spacing
+  cleaned = cleaned.replace(/\|\s*(ha|mhm|rostanam|rosti|aha|albatta|xoʻsh|xosh|voy|ana|bilasizmi)\s*\|/gi, ' |$1| ');
+
+  // Remove any curly braces e.g. {stage_direction}
+  cleaned = cleaned.replace(/\{[^}]*\}/g, ' ');
 
   // 7. Remove timing ranges (e.g. 00:00 - 00:06) and line-start director markers (e.g. 01:23: )
   // CRITICAL: Normal clock times in sentence context (e.g. "soat 12:30 da", "19:00") MUST be preserved!

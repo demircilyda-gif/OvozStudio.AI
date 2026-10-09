@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { connectAudioElement } from '../utils/audioReactive';
+import { authFetch } from '../utils/authFetch';
 import {
   Mic,
   MicOff,
@@ -49,10 +50,9 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
   lang,
 }) => {
   const { isAuthenticated, requireAuth } = useAuth();
-  if (!isOpen) return null;
 
   // Tabs:
-  // 1: 'studio-voices' -> Connect / use Google AI Studio Voice Replication ID
+  // 1: 'studio-voices' -> Connect / use OvozStudio Neural Voice Replication ID
   // 2: 'replication' -> Official Voice Replication (Sample + Mandatory Verbal Consent)
   // 3: 'voice-design' -> Create voice via text description (Voice Design)
   // 4: 'parameters' -> Adjust timbre, pitch, tempo
@@ -62,13 +62,13 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
   const [voiceName, setVoiceName] = useState(editingVoice?.name || 'SHOKHRUKH (Mening Haqiqiy Ovozim)');
   const [voiceId, setVoiceId] = useState(editingVoice?.voiceId || 'voice_17raj9ewke3g');
   const [baseVoice, setBaseVoice] = useState<BaseVoiceModel>(editingVoice?.baseVoice || 'Charon');
-  const [timbre, setTimbre] = useState(editingVoice?.timbre || 'Haqiqiy shaxsiy tembr (Google AI Studio Voice Replication)');
+  const [timbre, setTimbre] = useState(editingVoice?.timbre || 'Haqiqiy shaxsiy tembr (OvozStudio Voice Replication)');
   const [tempo, setTempo] = useState(editingVoice?.tempo || 'Vazmin (1.0x)');
   const [style, setStyle] = useState(editingVoice?.style || 'Samimiy & Jonli podkaster');
   const [pitchLevel, setPitchLevel] = useState<VoiceProfile['pitchLevel']>(editingVoice?.pitchLevel || "O'rta (Bariton)");
   const [personaPrompt, setPersonaPrompt] = useState(
     editingVoice?.customPersonaPrompt ||
-      "Google AI Studio Voice Replication orqali yaratilgan haqiqiy individual ovoz nusxasi."
+      "OvozStudio Voice Replication orqali yaratilgan haqiqiy individual ovoz nusxasi."
   );
 
   // Status banners
@@ -98,17 +98,35 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
   const timerRef = useRef<any>(null);
 
   useEffect(() => {
-    fetchStudioVoices();
+    if (isOpen) {
+      fetchStudioVoices();
+    }
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (testAudioInstance) testAudioInstance.pause();
     };
-  }, []);
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (editingVoice) {
+      setVoiceName(editingVoice.name || 'SHOKHRUKH (Mening Haqiqiy Ovozim)');
+      setVoiceId(editingVoice.voiceId || '');
+      setBaseVoice(editingVoice.baseVoice || 'Charon');
+      setTimbre(editingVoice.timbre || 'Haqiqiy shaxsiy tembr (OvozStudio Voice Replication)');
+      setTempo(editingVoice.tempo || 'Vazmin (1.0x)');
+      setStyle(editingVoice.style || 'Samimiy & Jonli podkaster');
+      setPitchLevel(editingVoice.pitchLevel || "O'rta (Bariton)");
+      setPersonaPrompt(
+        editingVoice.customPersonaPrompt ||
+          "OvozStudio Voice Replication orqali yaratilgan haqiqiy individual ovoz nusxasi."
+      );
+    }
+  }, [editingVoice]);
 
   const fetchStudioVoices = async () => {
     setIsLoadingVoices(true);
     try {
-      const res = await fetch('/api/voices');
+      const res = await authFetch('/api/voices');
       if (res.ok) {
         const data = await res.json();
         setDetectedVoices(data.voices || []);
@@ -216,10 +234,10 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
     try {
       const sampleText =
         lang === 'uz'
-          ? `Salom! Men ${vName}man. Google AI Studio Voice Replication texnologiyasi orqali sintez qilingan haqiqiy ovozman.`
-          : `Здравствуйте! Это ${vName}. Настоящая голосовая копия через Google AI Studio Voice Replication.`;
+          ? `Salom! Men ${vName}man. OvozStudio Voice Replication texnologiyasi orqali sintez qilingan haqiqiy ovozman.`
+          : `Здравствуйте! Это ${vName}. Настоящая голосовая копия через OvozStudio Voice Replication.`;
 
-      const res = await fetch('/api/podcast/synthesize', {
+      const res = await authFetch('/api/podcast/synthesize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -265,6 +283,19 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
     }
   };
 
+  // Play Native English Voice Consent pronunciation guide via Web Speech API
+  const handlePlayConsentGuide = () => {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(
+        "I am the owner of this voice and I consent to Google using this voice to create a synthetic voice model."
+      );
+      utterance.lang = "en-US";
+      utterance.rate = 0.88;
+      window.speechSynthesis.speak(utterance);
+    }
+  };
+
   // Create new Voice Replication via API
   const handleCreateVoiceReplication = async () => {
     if (!sourceAudioBase64) {
@@ -281,7 +312,7 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
     setUiSuccess(null);
 
     try {
-      const res = await fetch('/api/voices/replicate', {
+      const res = await authFetch('/api/voices/replicate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -310,7 +341,20 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
       // Refresh voice list
       await fetchStudioVoices();
     } catch (err: any) {
-      setUiError(`Ovoz nusxalash xatosi: ${err.message}`);
+      const msg = String(err?.message || err || '');
+      if (
+        msg.includes('Consent flow failed') ||
+        msg.includes('recorded phrase') ||
+        msg.includes('FINISH_REASON_INPUT_VR_TAKEDOWN')
+      ) {
+        setUiError(
+          lang === 'uz'
+            ? "Ovozli rozilik audiosi qabul qilinmadi. Iltimos, 2-bosqichdagi xavfsizlik jumlasini aynan so'zma-so'z o'qib yozing: \"I am the owner of this voice and I consent to Google using this voice to create a synthetic voice model.\" (Xalqaro audio xavfsizlik filtri faqat ushbu standart matnni qabul qiladi). Yoki 1-bo'limda shaxsiy tayyor Voice ID ni kiriting."
+            : 'Аудио согласия не принято. Произнесите точную контрольную фразу: "I am the owner of this voice and I consent to Google using this voice to create a synthetic voice model." Или подключите готовый Voice ID в шаге 1.'
+        );
+      } else {
+        setUiError(`Ovoz nusxalash xatosi: ${msg}`);
+      }
     } finally {
       setIsReplicating(false);
     }
@@ -324,7 +368,7 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
       name: voiceName,
       baseVoice,
       voiceType: voiceId ? 'replicated' : 'prebuilt',
-      model: 'models/gemini-3.8-flash-tts',
+      model: 'ovozstudio-neural-hd',
       timbre,
       tempo,
       pitchLevel,
@@ -332,15 +376,17 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
       customPersonaPrompt: personaPrompt,
       isUserCustomVoice: true,
       isReplicatedVoice: Boolean(voiceId && (voiceId.startsWith('voice_') || voiceId.startsWith('voicekey_'))),
-      sampleNotes: voiceId ? `Google AI Studio ID: ${voiceId}` : undefined,
+      sampleNotes: voiceId ? `OvozStudio ID: ${voiceId}` : undefined,
     };
 
     onSaveVoice(profile);
     onClose();
   };
 
+  if (!isOpen) return null;
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-[#161511]/60 backdrop-blur-sm animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-[9999] isolate flex items-center justify-center p-3 sm:p-5 bg-[#161511]/75 backdrop-blur-md animate-in fade-in duration-200">
       <div className="bg-[#F4F1EA] text-[#161511] border border-[rgba(22,21,17,0.14)] rounded-[26px] max-w-3xl w-full max-h-[92vh] flex flex-col shadow-[0_30px_50px_-30px_rgba(22,21,17,0.35)] overflow-hidden">
         {/* Header */}
         <div className="p-5 sm:p-6 border-b border-[rgba(22,21,17,0.1)] flex items-center justify-between bg-white/70 backdrop-blur-md">
@@ -351,7 +397,7 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <span className="text-[10.5px] font-mono font-semibold px-2 py-0.5 rounded-full bg-[#0E7C86]/10 text-[#0A5A62] border border-[#0E7C86]/30">
-                  Gemini 3.8 Flash TTS
+                  OvozStudio Neural HD
                 </span>
                 <span className="text-xs text-[#5D594E]/40">•</span>
                 <span className="text-xs text-[#5D594E] font-mono">Voice Replication</span>
@@ -384,7 +430,7 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
             }`}
           >
             <ShieldCheck className="w-4 h-4 text-[#0E7C86]" />
-            <span>{lang === 'uz' ? '1. Google AI Studio Ovozi (Voice ID)' : '1. Голос Google AI Studio (Voice ID)'}</span>
+            <span>{lang === 'uz' ? '1. OvozStudio Neyron Ovoz (Voice ID)' : '1. Нейронный голос OvozStudio (Voice ID)'}</span>
           </button>
 
           <button
@@ -437,7 +483,7 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
             </div>
           )}
 
-          {/* TAB 1: CONNECT GOOGLE AI STUDIO VOICE */}
+          {/* TAB 1: CONNECT OVOZSTUDIO VOICE */}
           {activeTab === 'studio-voices' && (
             <div className="space-y-6">
               {/* Explanation Card */}
@@ -445,22 +491,22 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
                 <div className="flex items-center gap-2">
                   <ShieldCheck className="w-5 h-5 text-emerald-400" />
                   <h4 className="font-bold text-white text-sm sm:text-base">
-                    {lang === 'uz' ? 'Google AI Studio Voice Replication Qanday Ishlaydi?' : 'Как работает Voice Replication в Google AI Studio?'}
+                    {lang === 'uz' ? 'OvozStudio Voice Replication Qanday Ishlaydi?' : 'Как работает OvozStudio Voice Replication?'}
                   </h4>
                 </div>
                 <p className="text-xs sm:text-sm text-zinc-300 leading-relaxed">
                   {lang === 'uz'
-                    ? 'Google AI Studio-da siz 30 soniyalik ovoz namunasi va rozilik bildirishi orqali shaxsiy ovozingizni nusxalagansiz (Replication). Ushbu tizim sizning unikal Voice ID (masalan, voice_17raj9ewke3g) orqali aynan sizning ovozingizda podkast sintez qiladi.'
-                    : 'В Google AI Studio вы создали копию своего голоса (Voice Replication). Система использует уникальный идентификатор голоса Voice ID (например, voice_17raj9ewke3g), чтобы подкасты звучали точно вашим голосом.'}
+                    ? 'OvozStudio platformasida 30 soniyalik ovoz namunasi va biometrik tasdiq orqali shaxsiy ovozingiz nusxalanadi (Replication). Tizim sizning unikal Voice ID (masalan, voice_17raj9ewke3g) orqali aynan sizning ovozingizda kontent sintez qiladi.'
+                    : 'В OvozStudio создана точная цифровая копия вашего голоса (Voice Replication). Система использует уникальный Voice ID (например, voice_17raj9ewke3g), чтобы аудио звучало точно вашим тембром и манерой.'}
                 </p>
               </div>
 
-              {/* Detected Voices List from Gemini API */}
+              {/* Detected Voices List */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-bold text-zinc-300 flex items-center gap-2">
                     <Fingerprint className="w-4 h-4 text-amber-400" />
-                    <span>{lang === 'uz' ? 'AI Studio Loyihangizdagi Ovozlar:' : 'Голоса вашего проекта в Google AI Studio:'}</span>
+                    <span>{lang === 'uz' ? 'Loyihangizdagi Neyron Ovozlar:' : 'Нейронные голоса вашего проекта:'}</span>
                   </label>
                   <button
                     onClick={fetchStudioVoices}
@@ -502,7 +548,7 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
                                 </span>
                               </div>
                               <div className="text-xs font-mono text-[#5D594E]">
-                                ID: <span className="text-[#0E7C86]">{v.id}</span> • {v.model || 'gemini-3.8-flash-tts'}
+                                ID: <span className="text-[#0E7C86]">{v.id}</span> • {v.model || 'ovozstudio-neural-hd'}
                               </div>
                             </div>
 
@@ -541,37 +587,53 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
                 </div>
               </div>
 
-              {/* Manual Voice ID Input */}
-              <div className="p-5 rounded-2xl bg-white border border-[rgba(22,21,17,0.14)] space-y-3 shadow-xs">
-                <div className="flex items-center gap-2">
-                  <Key className="w-4 h-4 text-[#0E7C86]" />
-                  <label className="text-xs font-mono uppercase tracking-wider text-[#5D594E]">
-                    {lang === 'uz' ? 'Boshqa Voice ID yoki Voice Key kiritish:' : 'Ввести другой Voice ID или Voice Key:'}
-                  </label>
+              {/* Google AI Studio & Manual Voice ID Input */}
+              <div className="p-5 rounded-2xl bg-white border-2 border-[#0E7C86]/30 space-y-3 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Key className="w-4 h-4 text-[#0E7C86]" />
+                    <label className="text-xs font-mono uppercase tracking-wider text-[#0A5A62] font-bold">
+                      {lang === 'uz' ? '⭐ Shaxsiy Voice ID ni ulash (Eng oson & tezkor):' : '⭐ Подключить личный Voice ID:'}
+                    </label>
+                  </div>
+                  <span className="px-2 py-0.5 rounded-full bg-[#0E7C86]/10 text-[#0E7C86] font-mono text-[10px] font-bold">
+                    Tavsiya etiladi
+                  </span>
                 </div>
+
+                <div className="p-3 rounded-xl bg-[#F4F1EA] text-xs text-[#5D594E] leading-relaxed">
+                  {lang === 'uz'
+                    ? "Agar sizda tayyor Voice ID mavjud bo'lsa (masalan: voice_17raj9ewke3g), uni bu yerga kiriting. Qayta rozilik audiosi yozish talab etilmaydi — ovoz darhol butun platformada faollashadi!"
+                    : "Если у вас есть готовый Voice ID (например: voice_17raj9ewke3g), просто вставьте его сюда. Никаких повторных записей согласия — голос мгновенно активируется во всех разделах!"}
+                </div>
+
                 <div className="flex flex-col sm:flex-row gap-2">
                   <input
                     type="text"
                     value={voiceId}
                     onChange={(e) => setVoiceId(e.target.value.trim())}
                     placeholder="Masalan: voice_17raj9ewke3g yoki voicekey_..."
-                    className="flex-1 px-4 py-2.5 rounded-xl bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] text-[#161511] font-mono text-xs focus:outline-none focus:border-[#0E7C86] focus:bg-white"
+                    className="flex-1 px-4 py-2.5 rounded-xl bg-white border border-[rgba(22,21,17,0.18)] text-[#161511] font-mono text-xs focus:outline-none focus:border-[#0E7C86] focus:ring-1 focus:ring-[#0E7C86]"
                   />
                   <button
                     type="button"
                     onClick={() => handleTestVoice(voiceId, voiceName)}
                     disabled={!voiceId || isTestingVoice}
-                    className="btn-pill btn-ghost text-xs px-4 py-2 flex items-center justify-center gap-2"
+                    className="btn-pill btn-ghost text-xs px-4 py-2 flex items-center justify-center gap-2 cursor-pointer"
                   >
                     <Play className="w-3.5 h-3.5 fill-current" />
-                    <span>{lang === 'uz' ? 'Tekshirish & Eshittirish' : 'Проверить и прослушать'}</span>
+                    <span>{isTestingVoice ? 'Sintez...' : (lang === 'uz' ? 'Sinash (Test)' : 'Проверить')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveAndActivate}
+                    disabled={!voiceId}
+                    className="btn-pill btn-solid text-xs px-4 py-2 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>{lang === 'uz' ? 'Faollashtirish' : 'Активировать'}</span>
                   </button>
                 </div>
-                <p className="text-[11px] text-[#5D594E]">
-                  {lang === 'uz'
-                    ? 'Google AI Studio Speech & Voices sahifasida yaratilgan har qanday ovoz ID sini bu yerga nusxalab qo\'yishingiz mumkin.'
-                    : 'Вы можете вставить сюда любой Voice ID, созданный в Google AI Studio во вкладке Speech & Voices.'}
-                </p>
               </div>
 
               {/* Voice Name in App */}
@@ -596,13 +658,13 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
                 <div className="flex items-center gap-2">
                   <Info className="w-4 h-4 text-[#0E7C86]" />
                   <h4 className="font-semibold text-[#161511] text-xs sm:text-sm">
-                    {lang === 'uz' ? 'Gemini 3.8 Voice Replication Talablari' : 'Требования Gemini 3.8 Voice Replication'}
+                    {lang === 'uz' ? 'OvozStudio Voice Replication Talablari' : 'Требования OvozStudio Voice Replication'}
                   </h4>
                 </div>
                 <p className="text-xs text-[#5D594E] leading-relaxed">
                   {lang === 'uz'
-                    ? "Google qat'iy xavfsizlik va biometrik qoidalariga ko'ra 2 ta audio talab etiladi: 1) Sizning 10-30 soniyalik tabiiy nutq namunangiz; 2) Majburiy ovozli rozilik bayonoti."
-                    : 'По правилам безопасности Google требует 2 записи: 1) Образец вашей речи на 10-30 сек; 2) Обязательное голосовое согласие владельца голоса.'}
+                    ? "Qat'iy xavfsizlik va biometrik qoidalariga ko'ra 2 ta audio talab etiladi: 1) Sizning 10-30 soniyalik tabiiy nutq namunangiz; 2) Majburiy ovozli rozilik bayonoti."
+                    : 'По правилам безопасности требуется 2 записи: 1) Образец вашей речи на 10-30 сек; 2) Обязательное голосовое согласие владельца голоса.'}
                 </p>
               </div>
 
@@ -654,11 +716,11 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
               </div>
 
               {/* Step 2: Consent Audio */}
-              <div className="p-5 rounded-2xl bg-white border border-[rgba(22,21,17,0.14)] space-y-3 shadow-xs">
+              <div className="p-5 rounded-2xl bg-white border border-[rgba(22,21,17,0.14)] space-y-3.5 shadow-xs">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-[#161511] flex items-center gap-2">
                     <span className="w-5 h-5 rounded-full bg-[#161511] text-[#F4F1EA] font-mono font-bold text-xs flex items-center justify-center">2</span>
-                    {lang === 'uz' ? 'Majburiy Ovozli Rozilik (Consent Audio)' : 'Обязательное Согласие (Consent Audio)'}
+                    {lang === 'uz' ? 'Majburiy Ovozli Rozilik (Verbal Consent)' : 'Обязательное Согласие (Verbal Consent)'}
                   </span>
                   {consentAudioBase64 && (
                     <span className="text-[11px] font-mono font-bold text-[#0E7C86] flex items-center gap-1">
@@ -667,10 +729,39 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
                   )}
                 </div>
 
-                <div className="p-3.5 rounded-xl bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] text-xs font-mono text-[#0A5A62]">
-                  "{lang === 'uz'
-                    ? "Men ushbu ovozning egasiman va Google ushbu ovozdan sun'iy intellekt modeli yaratishiga roziman."
-                    : "I am the owner of this voice and I consent to Google using this voice to create a synthetic voice model."}"
+                <div className="p-4 rounded-xl bg-[#F4F1EA] border border-[#0E7C86]/30 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-mono font-bold text-[#C4552D] uppercase tracking-wider">
+                      ⚠️ {lang === 'uz' ? 'Aynan shu inglizcha matnni so\'zma-so\'z o\'qing:' : 'Прочитайте в точности эту фразу:'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handlePlayConsentGuide}
+                      className="px-2.5 py-1 rounded-lg bg-white border border-[rgba(22,21,17,0.15)] hover:bg-[#0E7C86] hover:text-white text-[11px] font-mono text-[#0A5A62] flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
+                      title="Inglizcha talaffuzni eshitish"
+                    >
+                      <Volume2 className="w-3.5 h-3.5" />
+                      <span>{lang === 'uz' ? '🔊 Talaffuzni eshitish' : '🔊 Послушать образец'}</span>
+                    </button>
+                  </div>
+
+                  <div className="p-3 rounded-lg bg-white border border-[rgba(22,21,17,0.12)] text-xs sm:text-sm font-mono font-semibold text-[#161511] leading-relaxed">
+                    "I am the owner of this voice and I consent to Google using this voice to create a synthetic voice model."
+                  </div>
+
+                  <div className="space-y-1 text-[11px] text-[#5D594E]">
+                    <p className="font-mono text-[#0A5A62]">
+                      <b>{lang === 'uz' ? 'O\'qilishi:' : 'Произношение:'}</b> «Ay em ze ovner of zis voys end ay konsent tu Gugl yuzing zis voys tu krieyt e sintetik voys model»
+                    </p>
+                    <p>
+                      <b>{lang === 'uz' ? 'Ma\'nosi:' : 'Значение:'}</b> «Men ushbu ovozning egasiman va ushbu ovozdan sun'iy intellekt modeli yaratilishiga roziman»
+                    </p>
+                    <p className="text-[#C4552D] font-mono pt-1">
+                      ℹ️ {lang === 'uz'
+                        ? 'Nega inglizcha? Xalqaro xavfsizlik filtri rozilik audiosini avtomatik nutq tekshiruvi (STT) orqali so\'zma-so\'z tekshiradi. O\'zbekcha aytilsa, xavfsizlik xatosi yuz beradi.'
+                        : 'Международный стандарт безопасности проверяет совпадение фразы через автоматическое распознавание речи (STT).'}
+                    </p>
+                  </div>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-3">
@@ -714,8 +805,8 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
                 {isReplicating ? <RefreshCw className="w-4 h-4 animate-spin text-[#5CC8CF]" /> : <Fingerprint className="w-4 h-4 text-[#5CC8CF]" />}
                 <span>
                   {isReplicating
-                    ? (lang === 'uz' ? 'Gemini 3.8 da Ovoz Nusxalanmoqda...' : 'Клонирование в Gemini 3.8...')
-                    : (lang === 'uz' ? 'Gemini 3.8 da Haqiqiy Ovoz Nusxasini Yaratish' : 'Создать Копию Своего Голоса')}
+                    ? (lang === 'uz' ? 'OvozStudio da Ovoz Nusxalanmoqda...' : 'Клонирование в OvozStudio...')
+                    : (lang === 'uz' ? 'OvozStudio da Haqiqiy Ovoz Nusxasini Yaratish' : 'Создать Копию Своего Голоса')}
                 </span>
               </button>
             </div>
@@ -738,7 +829,7 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
 
               <div className="space-y-2">
                 <label className="text-xs font-mono uppercase tracking-wider text-[#5D594E]">
-                  {lang === 'uz' ? 'Gemini 3.8 Voice Persona Prompt:' : 'Промпт персоны голоса:'}
+                  {lang === 'uz' ? 'Ovoz Persona Prompti:' : 'Промпт персоны голоса:'}
                 </label>
                 <textarea
                   rows={3}
@@ -756,12 +847,12 @@ export const VoiceStudioModal: React.FC<VoiceStudioModalProps> = ({
                     onChange={(e) => setBaseVoice(e.target.value as BaseVoiceModel)}
                     className="w-full px-4 py-2.5 rounded-xl bg-white border border-[rgba(22,21,17,0.14)] text-[#161511] text-xs focus:outline-none focus:border-[#0E7C86]"
                   >
-                    <option value="Charon">Charon (Vazmin Bariton)</option>
-                    <option value="Puck">Puck (Quvnoq Tenor)</option>
-                    <option value="Kore">Kore (Mayin Ayol)</option>
-                    <option value="Fenrir">Fenrir (Chuqur Bas)</option>
-                    <option value="Zephyr">Zephyr (Ilmiy / Texno)</option>
-                    <option value="Aoede">Aoede (Nafis Ayol)</option>
+                    <option value="Charon">{lang === 'uz' ? 'Salobatli Bariton (Jasur & Javohir uslubi)' : 'Глубокий Баритон (в стиле Жасур)'}</option>
+                    <option value="Puck">{lang === 'uz' ? 'Quvnoq Tenor (Otabek & Sanjar uslubi)' : 'Яркий Тенор (в стиле Отабек)'}</option>
+                    <option value="Kore">{lang === 'uz' ? 'Mayin Muloyim Ayol (Aziza & Shahnoza uslubi)' : 'Мягкий Женский (в стиле Азиза)'}</option>
+                    <option value="Fenrir">{lang === 'uz' ? 'Nufuzli Chuqur Bas (Ulug\'bek & Sherzod uslubi)' : 'Авторитетный Бас (в стиле Улугбек)'}</option>
+                    <option value="Zephyr">{lang === 'uz' ? 'Ilmiy & Zamonaviy Ayol (Sevara uslubi)' : 'Научный Женский (в стиле Севара)'}</option>
+                    <option value="Aoede">{lang === 'uz' ? 'Nafis & Ohangdor Ayol (Madina & Rayhon uslubi)' : 'Мелодичный Женский (в стиле Мадина)'}</option>
                   </select>
                 </div>
 

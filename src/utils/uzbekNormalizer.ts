@@ -1,5 +1,5 @@
 /**
- * Uzbek Linguistic & Text Normalization Engine for Google Gemini 3.8 TTS
+ * Uzbek Linguistic & Text Normalization Engine for OvozStudio TTS
  * Standardizes apostrophes (o', g'), translates numerals/dates/prices/percentages into phonetic Uzbek,
  * and processes inline vocal tags (<laugh>, <short pause>, <sigh>, <whisper>).
  */
@@ -222,19 +222,27 @@ export function normalizeNumbersAndDates(text: string): string {
  * <laugh>, <short pause>, <sigh>, <whisper>
  */
 export function preserveVocalTags(text: string): string {
-  // Normalize whitespace around known vocal tags
+  // Normalize whitespace around known vocal and acoustic emotion tags
   return text
-    .replace(/<\s*laugh\s*>/gi, " <laugh> ")
+    .replace(/<\s*(?:breath|nafas|chuqur_nafas)\s*>/gi, " <breath> ")
+    .replace(/<\s*deep_breath\s*>/gi, " <deep_breath> ")
+    .replace(/<\s*(?:gasp|hansirash|hayrat)\s*>/gi, " <gasp> ")
+    .replace(/<\s*(?:sigh|xo'rsinish|xoʻrsinish)\s*>/gi, " <sigh> ")
+    .replace(/<\s*(?:laugh|kulgi|kulgili|jilmayish)\s*>/gi, " <laugh> ")
+    .replace(/<\s*chuckle\s*>/gi, " <chuckle> ")
+    .replace(/<\s*giggle\s*>/gi, " <giggle> ")
+    .replace(/<\s*(?:whisper|pichirlash|shivir)\s*>/gi, " <whisper> ")
     .replace(/<\s*short\s+pause\s*>/gi, " <short pause> ")
-    .replace(/<\s*sigh\s*>/gi, " <sigh> ")
-    .replace(/<\s*whisper\s*>/gi, " <whisper> ")
+    .replace(/<\s*(?:throat_clear|tomoq_qirish)\s*>/gi, " <throat_clear> ")
+    .replace(/\[\s*Pauza\s+([^\]]+)\]/gi, " [Pauza $1] ")
+    .replace(/\|\s*(ha|mhm|rostanam|rosti|aha|albatta|xoʻsh|xosh|voy|ana|bilasizmi)\s*\|/gi, " |$1| ")
     .replace(/\s{2,}/g, " ")
     .trim();
 }
 
 /**
  * Master Uzbek Speech Normalization function
- * Run before sending any script to Gemini 3.8 Flash TTS
+ * Run before sending any script to OvozStudio Speech Synthesizer
  */
 export function normalizeUzbekSpeech(text: string): string {
   if (!text || typeof text !== "string") return "";

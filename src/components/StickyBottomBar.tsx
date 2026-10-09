@@ -2,6 +2,12 @@ import React, { useState } from 'react';
 import { motion } from 'framer-motion';
 import { Play, Lock } from 'lucide-react';
 import { VoiceProfile } from '../types/podcast';
+import {
+  useGenerationCountdown,
+  calculateAudioSynthesizeSeconds,
+  GenerationCountdownState,
+} from '../hooks/useGenerationCountdown';
+import { PreCalculationBadge } from './GenerationCountdownHUD';
 
 interface StickyBottomBarProps {
   activeVoice: VoiceProfile;
@@ -15,6 +21,7 @@ interface StickyBottomBarProps {
   isAuthenticated: boolean;
   isAdmin: boolean;
   lang: 'uz' | 'ru';
+  countdownState?: GenerationCountdownState;
 }
 
 export const StickyBottomBar: React.FC<StickyBottomBarProps> = ({
@@ -29,6 +36,7 @@ export const StickyBottomBar: React.FC<StickyBottomBarProps> = ({
   isAuthenticated,
   isAdmin,
   lang,
+  countdownState,
 }) => {
   const [selectedFormat, setSelectedFormat] = useState<'mp3' | 'wav' | 'srt'>('wav');
 
@@ -39,6 +47,16 @@ export const StickyBottomBar: React.FC<StickyBottomBarProps> = ({
   };
 
   const estimatedCredits = isAdmin ? 0 : Math.max(1, Math.ceil(estimatedSeconds / 180));
+  const estimatedGenSeconds = calculateAudioSynthesizeSeconds(wordCount, tempo);
+
+  // Fallback internal countdown only if no parent countdown is supplied (prevents duplicate intervals)
+  const fallbackCountdown = useGenerationCountdown(
+    countdownState ? false : isSynthesizing,
+    estimatedGenSeconds,
+    lang,
+    'audio_solo'
+  );
+  const countdown = countdownState || fallbackCountdown;
 
   return (
     <div className="sticky bottom-0 left-0 right-0 z-40 bg-[#F4F1EA]/95 backdrop-blur-md border-t border-[rgba(22,21,17,0.14)] px-4 sm:px-8 py-3 select-none shadow-[0_-10px_25px_-5px_rgba(22,21,17,0.06)]">
@@ -66,7 +84,18 @@ export const StickyBottomBar: React.FC<StickyBottomBarProps> = ({
         </div>
 
         {/* Right: Audio Format Selector + Large Teal CTA Button */}
-        <div className="flex items-center gap-3 ml-auto">
+        <div className="flex items-center gap-2.5 sm:gap-3 ml-auto flex-wrap">
+          {/* Pre-calculation estimate chip */}
+          {!isSynthesizing && wordCount > 0 && (
+            <PreCalculationBadge
+              estimatedSeconds={estimatedGenSeconds}
+              audioDurationSeconds={estimatedSeconds}
+              creditsCost={estimatedCredits}
+              lang={lang}
+              className="hidden lg:inline-flex"
+            />
+          )}
+
           {/* Format Toggle Pill */}
           <div className="flex border border-[rgba(22,21,17,0.14)] rounded-full overflow-hidden text-[10.5px] font-mono">
             <button
@@ -113,8 +142,13 @@ export const StickyBottomBar: React.FC<StickyBottomBarProps> = ({
           >
             {isSynthesizing ? (
               <>
-                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                <span>{lang === 'uz' ? 'Sintez jarayoni...' : 'Синтез...'}</span>
+                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin shrink-0" />
+                <span>
+                  {lang === 'uz'
+                    ? `Sintez: ${countdown.remainingDigits} (~${countdown.formattedRemaining})`
+                    : `Синтез: ${countdown.remainingDigits} (~${countdown.formattedRemaining})`}
+                </span>
+                <span className="font-mono text-[10px] bg-white/20 px-1.5 py-0.5 rounded-full">{countdown.progressPercent}%</span>
               </>
             ) : !isAuthenticated ? (
               <>

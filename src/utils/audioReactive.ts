@@ -1,10 +1,11 @@
+import { getAudioContext } from './audioUtils';
+
 /**
  * Audio Reactive Web Audio API Service
  * Shared AnalyserNode (fftSize 512, smoothingTimeConstant 0.78)
  * Connects <audio> elements via MediaElementSource (stored in WeakMap to avoid re-creation errors).
  */
 
-let sharedCtx: AudioContext | null = null;
 let sharedAnalyser: AnalyserNode | null = null;
 const sourceNodeMap = new WeakMap<HTMLMediaElement, MediaElementAudioSourceNode>();
 let activeAudioElement: HTMLMediaElement | null = null;
@@ -13,18 +14,7 @@ let freqArray: Uint8Array<ArrayBuffer> | null = null;
 
 export function getSharedAudioContext(): AudioContext | null {
   if (typeof window === 'undefined') return null;
-  if (!sharedCtx) {
-    const AudioCtxClass =
-      window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-    if (AudioCtxClass) {
-      try {
-        sharedCtx = new AudioCtxClass();
-      } catch (e) {
-        console.warn('AudioContext creation failed:', e);
-      }
-    }
-  }
-  return sharedCtx;
+  return getAudioContext();
 }
 
 export function getSharedAnalyser(): AnalyserNode | null {

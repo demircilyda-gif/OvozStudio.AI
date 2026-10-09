@@ -1,5 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { authFetch } from '../utils/authFetch';
 import {
   FileText,
   Upload,
@@ -186,7 +187,7 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
         payload.sourceText = `Manba havolasi: ${sourceUrl}`;
       }
 
-      const res = await fetch('/api/podcast/analyze-document', {
+      const res = await authFetch('/api/podcast/analyze-document', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -215,7 +216,7 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#161511]/60 backdrop-blur-sm animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-[9999] isolate flex items-center justify-center p-4 bg-[#161511]/75 backdrop-blur-md animate-in fade-in duration-200">
       <div className="relative w-full max-w-2xl bg-[#F4F1EA] text-[#161511] border border-[rgba(22,21,17,0.14)] rounded-[26px] p-6 sm:p-8 shadow-[0_30px_60px_-20px_rgba(22,21,17,0.35)] space-y-5 max-h-[92vh] overflow-y-auto no-scrollbar">
         {/* Soft Glow */}
         <div className="absolute top-0 right-0 w-64 h-64 bg-[#0E7C86]/10 blur-3xl pointer-events-none" />
@@ -488,8 +489,8 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
               ) : (
                 <div className="font-mono text-[11px] text-[#7D7A70] flex items-center bg-white border border-[rgba(22,21,17,0.12)] px-3 rounded-full">
                   {lang === 'uz'
-                    ? 'Gemini mos so\'zlar sonini tanlaydi.'
-                    : 'Gemini подберет точное число слов.'}
+                    ? 'AI tizim mos so\'zlar sonini tanlaydi.'
+                    : 'ИИ подберет точное число слов.'}
                 </div>
               )}
             </div>

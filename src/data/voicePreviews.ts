@@ -16,11 +16,25 @@ export const PREBUILT_VOICE_PREVIEWS: Record<string, string> = {
   "ulugbek-history": "/audio/previews/ulugbek-history.wav",
   "farrux-tech": "/audio/previews/farrux-tech.wav",
   "bobur-coach": "/audio/previews/bobur-coach.wav",
-  "puck-comedy": "/audio/previews/puck-comedy.wav",
-  "kore-warm": "/audio/previews/kore-warm.wav",
-  "fenrir-mystery": "/audio/previews/fenrir-mystery.wav",
-  "zephyr-tech": "/audio/previews/zephyr-tech.wav",
-  "aoede-poetic": "/audio/previews/aoede-poetic.wav"
+  "sevara-science": "/audio/previews/sevara-science.wav",
+  "javohir-media": "/audio/previews/javohir-media.wav",
+  "sanjar-radio": "/audio/previews/sanjar-radio.wav",
+  "sherzod-investigation": "/audio/previews/sherzod-investigation.wav",
+  "shahnoza-speech": "/audio/previews/shahnoza-speech.wav",
+  "rayhon-art": "/audio/previews/rayhon-art.wav",
+  "gulzoda-edu": "/audio/previews/gulzoda-edu.wav",
+  "eldor-fintech": "/audio/previews/eldor-fintech.wav",
+  "umida-health": "/audio/previews/dilnoza-blogger.wav",
+  "nigora-stories": "/audio/previews/rayhon-art.wav",
+  "feruza-family": "/audio/previews/sevara-science.wav",
+  "bekzod-sport": "/audio/previews/otabek-comedy.wav",
+  "alisher-cyber": "/audio/previews/farrux-tech.wav",
+  "rustam-agro": "/audio/previews/jasur-business.wav",
+  "puck-comedy": "/audio/previews/sanjar-radio.wav",
+  "kore-warm": "/audio/previews/shahnoza-speech.wav",
+  "fenrir-mystery": "/audio/previews/sherzod-investigation.wav",
+  "zephyr-tech": "/audio/previews/sevara-science.wav",
+  "aoede-poetic": "/audio/previews/rayhon-art.wav"
 };
 
 /**

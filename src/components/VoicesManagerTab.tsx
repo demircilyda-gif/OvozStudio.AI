@@ -85,7 +85,7 @@ export const VoicesManagerTab: React.FC<VoicesManagerTabProps> = ({
           <div className="flex items-center gap-2">
             <span className="px-2.5 py-0.5 rounded-full text-xs font-mono uppercase tracking-wider bg-[#0E7C86]/10 text-[#0E7C86] border border-[#0E7C86]/25 flex items-center gap-1.5">
               <Mic2 className="w-3.5 h-3.5 text-[#0E7C86]" />
-              Gemini 3.8 TTS Live • Voice Replication
+              OvozStudio Neural Live • Voice Replication
             </span>
             <span className="text-xs text-[#7D7A70]">•</span>
             <span className="text-xs font-mono text-[#5D594E]">{voices.length} {lang === 'uz' ? 'ta ovoz profili' : 'голосов'}</span>
@@ -99,8 +99,8 @@ export const VoicesManagerTab: React.FC<VoicesManagerTabProps> = ({
           </h2>
           <p className="text-xs sm:text-sm text-[#5D594E] mt-1 max-w-xl">
             {lang === 'uz'
-              ? 'Google AI Studio-da yaratilgan shaxsiy ovozingizni ulang, sinab ko\'ring va podkastlaringiz uchun tanlang.'
-              : 'Подключайте свою голосовую копию из Google AI Studio, тестируйте звучание и используйте для озвучивания.'}
+              ? 'OvozStudio-da shaxsiy replikatsiya ovozingizni ulang, sinab ko\'ring va podkastlaringiz uchun tanlang.'
+              : 'Подключайте свою голосовую копию, тестируйте звучание и используйте для озвучивания.'}
           </p>
         </div>
 
@@ -234,7 +234,7 @@ export const VoicesManagerTab: React.FC<VoicesManagerTabProps> = ({
         <div className="flex items-center gap-2">
           <Mic2 className="w-5 h-5 text-[#C98A12]" />
           <h3 className="font-serif text-xl text-[#161511]">
-            {lang === 'uz' ? 'Standart Gemini 3.8 Ovozlar Katalogi' : 'Стандартный Каталог Голосов Gemini 3.8'}
+            {lang === 'uz' ? 'Standart Neyron Ovozlar Katalogi' : 'Стандартный Каталог Нейронных Голосов'}
           </h3>
           <span className="px-2 py-0.5 rounded-full text-xs font-mono bg-[#ECE7DB] text-[#5D594E]">
             {catalogVoices.length}
@@ -264,7 +264,7 @@ export const VoicesManagerTab: React.FC<VoicesManagerTabProps> = ({
                       <div>
                         <h4 className="font-serif text-base text-[#161511]">{voice.name}</h4>
                         <p className="font-mono text-[11px] text-[#7D7A70]">
-                          {voice.baseVoice} • {voice.pitchLevel}
+                          {voice.gender === 'female' ? (lang === 'uz' ? 'Ayol ovozi' : 'Женский голос') : (lang === 'uz' ? 'Erkak ovozi' : 'Мужской голос')} • {voice.pitchLevel}
                         </p>
                       </div>
                     </div>

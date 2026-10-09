@@ -17,14 +17,19 @@ export const DocsScreen: React.FC<DocsScreenProps> = ({ lang, onOpenPricingModal
   };
 
   const curlCode = `# 1 soatlik podkast yoki oddiy TTS sintezi:
-curl https://api.ovozstudio.uz/v1/tts \\
-  -H "Authorization: Bearer OZS_live_xxxxxxxxxxxx" \\
+# Firebase ID Token (user.getIdToken()) orqali haqiqiy avtorizatsiya:
+curl https://api.ovozstudio.uz/api/podcast/synthesize \\
+  -H "Authorization: Bearer <FIREBASE_ID_TOKEN>" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "voice": "shokhrukh",
-    "text": "Assalomu alaykum! <breath> Bugun sizga bir ajoyib yangilik aytaman.",
-    "tempo": 0.95,
-    "format": "wav_24k"
+    "script": "Assalomu alaykum! <breath> Bugun sizga bir ajoyib yangilik aytaman.",
+    "voiceProfile": {
+      "voiceId": "shokhrukh",
+      "voiceName": "SHOKHRUKH",
+      "baseVoice": "Puck",
+      "timbre": "Bariton"
+    },
+    "speechStyle": "Samimiy & Jonli"
   }' --output salom.wav`;
 
   const agentCode = `{
@@ -193,15 +198,16 @@ curl https://api.ovozstudio.uz/v1/tts \\
                 </button>
               </div>
               <pre className="bg-[#141414] text-[#EDEAE2] p-5 rounded-b-2xl font-mono text-xs sm:text-[12.5px] leading-relaxed overflow-x-auto whitespace-pre m-0">
-                <span className="text-[#7D7A70]"># 1 soatlik podkast yoki oddiy TTS sintezi:</span>{'\n'}
-                curl <span className="text-[#5CC8CF]">https://api.ovozstudio.uz/v1/tts</span> \{'\n'}
-                {'  '}-H <span className="text-[#C98A12]">"Authorization: Bearer OZS_live_xxxxxxxxxxxx"</span> \{'\n'}
+                <span className="text-[#7D7A70]"># 1 soatlik podkast yoki oddiy TTS sintezi (Firebase ID Token):</span>{'\n'}
+                curl <span className="text-[#5CC8CF]">https://api.ovozstudio.uz/api/podcast/synthesize</span> \{'\n'}
+                {'  '}-H <span className="text-[#C98A12]">"Authorization: Bearer &lt;FIREBASE_ID_TOKEN&gt;"</span> \{'\n'}
                 {'  '}-H <span className="text-[#C98A12]">"Content-Type: application/json"</span> \{'\n'}
                 {'  '}-d <span className="text-[#C98A12]">'{'{'}{'\n'}
-                {'    '}<span className="text-[#5CC8CF]">"voice"</span>: <span className="text-[#E08B5A]">"shokhrukh"</span>,{'\n'}
-                {'    '}<span className="text-[#5CC8CF]">"text"</span>: <span className="text-[#E08B5A]">"Assalomu alaykum! &lt;breath&gt; Bugun sizga bir ajoyib yangilik aytaman."</span>,{'\n'}
-                {'    '}<span className="text-[#5CC8CF]">"tempo"</span>: <span className="text-white">0.95</span>,{'\n'}
-                {'    '}<span className="text-[#5CC8CF]">"format"</span>: <span className="text-[#E08B5A]">"wav_24k"</span>{'\n'}
+                {'    '}<span className="text-[#5CC8CF]">"script"</span>: <span className="text-[#E08B5A]">"Assalomu alaykum! &lt;breath&gt; Bugun sizga bir ajoyib yangilik aytaman."</span>,{'\n'}
+                {'    '}<span className="text-[#5CC8CF]">"voiceProfile"</span>: {'{'}{'\n'}
+                {'      '}<span className="text-[#5CC8CF]">"voiceId"</span>: <span className="text-[#E08B5A]">"shokhrukh"</span>,{'\n'}
+                {'      '}<span className="text-[#5CC8CF]">"voiceName"</span>: <span className="text-[#E08B5A]">"SHOKHRUKH"</span>{'\n'}
+                {'    '}{'}'}{'\n'}
                 {'  }'}'</span> <span className="text-[#7D7A70]">--output salom.wav</span>
               </pre>
             </div>
@@ -217,8 +223,20 @@ curl https://api.ovozstudio.uz/v1/tts \\
             <h2 className="font-serif font-normal text-2xl text-[#161511]">
               {lang === 'uz' ? 'Autentifikatsiya' : 'Аутентификация'}
             </h2>
-            <p className="text-[#3A382F] text-[14.5px] mt-2">
-              Barcha soʻrovlar <code className="font-mono text-xs bg-[rgba(14,124,134,0.08)] text-[#0A5A62] px-2 py-0.5 rounded">Authorization: Bearer</code> sarlavhasi bilan yuboriladi. Kalit turlari: <span className="font-mono text-xs text-[#0A5A62]">OZS_test_</span> (sinov rejimi, 50 soʻrov/kun) va <span className="font-mono text-xs text-[#0A5A62]">OZS_live_</span> (production). Kalitni hech qachon brauzer yoki client-side kodida saqlamang.
+            <p className="text-[#3A382F] text-[14.5px] mt-2 leading-relaxed">
+              {lang === 'uz' ? (
+                <>
+                  Barcha API soʻrovlari <code className="font-mono text-xs bg-[rgba(14,124,134,0.08)] text-[#0A5A62] px-2 py-0.5 rounded">Authorization: Bearer &lt;ID_TOKEN&gt;</code> sarlavhasi bilan yuboriladi.
+                  Tokenni Firebase Auth orqali oling: <code className="font-mono text-xs bg-[rgba(14,124,134,0.08)] text-[#0A5A62] px-2 py-0.5 rounded">auth.currentUser.getIdToken()</code>.
+                  Statik doimiy API kalitlar (<span className="font-mono text-xs text-[#0A5A62]">OZS_live_...</span>) korporativ mijozlar uchun tez orada taqdim etiladi (ishlab chiqilmoqda).
+                </>
+              ) : (
+                <>
+                  Все API-запросы защищены заголовком <code className="font-mono text-xs bg-[rgba(14,124,134,0.08)] text-[#0A5A62] px-2 py-0.5 rounded">Authorization: Bearer &lt;ID_TOKEN&gt;</code>.
+                  Получите токен через Firebase Auth: <code className="font-mono text-xs bg-[rgba(14,124,134,0.08)] text-[#0A5A62] px-2 py-0.5 rounded">auth.currentUser.getIdToken()</code>.
+                  Постоянные API-ключи (<span className="font-mono text-xs text-[#0A5A62]">OZS_live_...</span>) для корпоративных интеграций станут доступны в ближайшее время (в разработке).
+                </>
+              )}
             </p>
           </div>
 
@@ -247,7 +265,7 @@ curl https://api.ovozstudio.uz/v1/tts \\
                   <tr>
                     <td className="p-3 font-mono text-xs text-[#0E7C86]">voice</td>
                     <td className="p-3 font-mono text-xs text-[#5D594E]">string</td>
-                    <td className="p-3">Ovoz ID: <code>shokhrukh</code>, <code>kore</code>, <code>charon</code>… yoki shaxsiy klon ID</td>
+                    <td className="p-3">Ovoz ID: <code>shokhrukh</code>, <code>aziza-ai</code>, <code>jasur-business</code>… yoki shaxsiy klon ID</td>
                   </tr>
                   <tr>
                     <td className="p-3 font-mono text-xs text-[#0E7C86]">text</td>
@@ -288,7 +306,7 @@ curl https://api.ovozstudio.uz/v1/tts \\
               </span>
             </div>
             <p className="text-[#3A382F] text-[14.5px] mt-2">
-              Real-time ovozli muloqot: mijoz gapiradi — agent tushunadi va tabiiy oʻzbekcha ovozda javob beradi (Gemini 3.8 Live). Veb-sayt widgetida yoki telefonda ishlaydi.
+              Real-time ovozli muloqot: mijoz gapiradi — agent tushunadi va tabiiy oʻzbekcha ovozda javob beradi (OvozStudio Live). Veb-sayt widgetida yoki telefonda ishlaydi.
             </p>
 
             <div className="mt-4">

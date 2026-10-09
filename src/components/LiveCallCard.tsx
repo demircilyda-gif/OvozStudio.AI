@@ -215,7 +215,7 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
                     : 'bg-[#0E7C86]'
                 }`}
               />
-              <span>GEMINI 3.8 LIVE · 0% AKSENT</span>
+              <span>OVOZSTUDIO NEURAL LIVE · 0% AKSENT</span>
             </p>
           </div>
         </div>

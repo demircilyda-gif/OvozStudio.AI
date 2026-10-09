@@ -12,31 +12,59 @@ service cloud.firestore {
 
     function isAdmin() {
       return isAuthenticated() && (
-        request.auth.token.email == 'demircilyda@gmail.com' ||
-        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+        request.auth.token.email in ['demircilyda@gmail.com']
       );
     }
 
+    // User profiles: readable by owner or admin
+    // System fields: creditsRemaining, role, tier are strictly protected from client updates
     match /users/{userId} {
       allow read: if isOwner(userId) || isAdmin();
-      allow create: if isOwner(userId) || isAdmin();
-      allow update: if isOwner(userId) || isAdmin();
+      allow create: if isAdmin() || (
+        isOwner(userId) &&
+        (!request.resource.data.keys().hasAny(['role', 'tier', 'creditsRemaining']) ||
+         (request.resource.data.role == 'user' && request.resource.data.tier == 'free' && request.resource.data.creditsRemaining <= 5))
+      );
+      allow update: if isAdmin() || (
+        isOwner(userId) &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['creditsRemaining', 'role', 'tier'])
+      );
       allow delete: if isAdmin();
 
       match /generations/{generationId} {
-        allow read, write: if isOwner(userId) || isAdmin();
+        allow read: if isOwner(userId) || isAdmin();
+        allow write: if isOwner(userId) || isAdmin();
       }
     }
 
+    // Payment Requests: readable by owner or admin; create allowed by request owner; full management by admin
     match /paymentRequests/{requestId} {
-      allow create: if isAuthenticated();
-      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow read: if isAuthenticated() && (
+        resource.data.uid == request.auth.uid ||
+        resource.data.userId == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if isAuthenticated() && (
+        request.resource.data.uid == request.auth.uid ||
+        request.resource.data.userId == request.auth.uid
+      );
       allow update, delete: if isAdmin();
     }
 
-    match /{document=**} {
+    // Pending credit grants: managed by admin
+    match /pendingCreditGrants/{email} {
       allow read, write: if isAdmin();
+    }
+
+    // Connection diagnostic test
+    match /test/connection {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Default deny for all other collections
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }

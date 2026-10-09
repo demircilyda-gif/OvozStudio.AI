@@ -96,7 +96,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ lang }) => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#161511]/60 backdrop-blur-sm animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-[9999] isolate flex items-center justify-center p-4 bg-[#161511]/75 backdrop-blur-md animate-in fade-in duration-200">
       <div className="relative w-full max-w-md bg-[#F4F1EA] text-[#161511] border border-[rgba(22,21,17,0.14)] rounded-[24px] p-6 sm:p-8 shadow-[0_30px_60px_-20px_rgba(22,21,17,0.35)] overflow-hidden space-y-6">
         {/* Soft Ambient Glow (Teal) */}
         <div className="absolute top-0 right-0 w-48 h-48 bg-[#0E7C86]/10 blur-3xl pointer-events-none" />

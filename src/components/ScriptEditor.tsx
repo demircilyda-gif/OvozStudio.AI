@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { authFetch } from '../utils/authFetch';
 import {
   FileText,
   Sparkles,
@@ -216,7 +217,7 @@ export const ScriptEditor: React.FC<ScriptEditorProps> = ({
 
     setIsPolishing(true);
     try {
-      const res = await fetch('/api/podcast/analyze-document', {
+      const res = await authFetch('/api/podcast/analyze-document', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -241,7 +242,7 @@ export const ScriptEditor: React.FC<ScriptEditorProps> = ({
     }
   };
 
-  // Generate Script using Gemini 3.8 Flash
+  // Generate Script using OvozStudio Neural Engine
   const handleAIGenerate = async () => {
     if (
       !requireAuth(
@@ -267,7 +268,7 @@ export const ScriptEditor: React.FC<ScriptEditorProps> = ({
     });
 
     try {
-      const res = await fetch('/api/podcast/generate-script', {
+      const res = await authFetch('/api/podcast/generate-script', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -291,7 +292,7 @@ export const ScriptEditor: React.FC<ScriptEditorProps> = ({
         category.badgeUz,
         category.nameUz.split(' ')[0],
         'Podkast',
-        'Gemini38'
+        'NeuralStudio'
       ];
       onChangeTags(autoTags);
 
@@ -351,7 +352,7 @@ export const ScriptEditor: React.FC<ScriptEditorProps> = ({
 
     try {
       const chosenTopic = title || category.topics[0]?.titleUz || 'O\'zbekiston va Jahon Tarixi';
-      const res = await fetch('/api/podcast/generate-longform-script', {
+      const res = await authFetch('/api/podcast/generate-longform-script', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -377,7 +378,7 @@ export const ScriptEditor: React.FC<ScriptEditorProps> = ({
         category.badgeUz,
         'KattaPodkast',
         targetDuration.includes('60') ? '1Soatlik' : '30Daqiqa',
-        'Gemini38',
+        'NeuralStudio',
       ];
       onChangeTags(autoTags);
 
@@ -414,7 +415,7 @@ export const ScriptEditor: React.FC<ScriptEditorProps> = ({
   const handleExpandChapter = async (chap: ScriptChapter) => {
     setIsExpandingChapter(true);
     try {
-      const res = await fetch('/api/podcast/expand-chapter', {
+      const res = await authFetch('/api/podcast/expand-chapter', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -595,7 +596,7 @@ export const ScriptEditor: React.FC<ScriptEditorProps> = ({
           </div>
           <div>
             <h4 className="text-xs sm:text-sm font-semibold text-[#161511] flex items-center gap-2">
-              <span>{lang === 'uz' ? 'Gemini 3.8 AI Ssenariy Dvigateli' : 'Движок Сценариев Gemini 3.8'}</span>
+              <span>{lang === 'uz' ? 'OvozStudio AI Ssenariy Dvigateli' : 'Движок Сценариев OvozStudio AI'}</span>
               <span className="px-2 py-0.5 rounded-full bg-[#0E7C86]/10 text-[#0E7C86] text-[10px] font-mono border border-[#0E7C86]/25">
                 1 Soatlik Podkast
               </span>
@@ -802,7 +803,7 @@ export const ScriptEditor: React.FC<ScriptEditorProps> = ({
           </div>
           <p className="text-[11px] text-[#5D594E] leading-normal">
             {lang === 'uz'
-              ? '🛡️ Ushbu shartlar avtomatik tarzda ovoz tembri/ohangiga yo\'naltiriladi va Gemini TTS tomonidan OVOZDA O\'QILMAYDI!'
+              ? '🛡️ Ushbu shartlar avtomatik tarzda ovoz tembri/ohangiga yo\'naltiriladi va neyron dvigatel tomonidan OVOZDA O\'QILMAYDI!'
               : '🛡️ Эти условия автоматически формируют тембр и интонацию, и НЕ озвучиваются голосом вслух!'}
           </p>
         </div>

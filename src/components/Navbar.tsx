@@ -52,7 +52,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               <span className="w-1.5 h-1.5 rounded-full bg-[#0E7C86] animate-ping" />
               <span className="font-mono text-[9px] uppercase tracking-wider px-2 py-0.2 rounded-full bg-[#0E7C86]/10 text-[#0E7C86] border border-[#0E7C86]/20 hidden md:inline-flex items-center gap-1">
                 <Sparkles className="w-2.5 h-2.5 text-[#0E7C86]" />
-                Gemini 3.8 Live
+                OvozStudio Live
               </span>
             </div>
           </div>

@@ -36,8 +36,8 @@ export const PodcastGuideModal: React.FC<PodcastGuideModalProps> = ({
             </h2>
             <p className="text-xs text-[#5D594E]">
               {lang === 'uz'
-                ? 'Gemini 3.8 TTS Live, toifalar, temp, tembr va audio eksport qo\'llanmasi'
-                : 'Руководство по Gemini 3.8 TTS Live, категориям, тембру, темпу и экспорту'}
+                ? 'OvozStudio Neural TTS Live, toifalar, temp, tembr va audio eksport qo\'llanmasi'
+                : 'Руководство по OvozStudio Neural Live, категориям, тембру, темпу и экспорту'}
             </p>
           </div>
         </div>
@@ -75,7 +75,7 @@ export const PodcastGuideModal: React.FC<PodcastGuideModalProps> = ({
               <span>03 — Tembr va Ovoz Personasi</span>
             </h3>
             <p className="text-xs text-[#5D594E] leading-relaxed">
-              Ovoz tembri — bu sizning brendingiz. Boy bariton salobat va ishonch bag'ishlasa, yorqin tenor do'stona muhit yaratadi. Gemini 3.8 da o'zingizning ovozingizni sozlab, unga o'zbekcha toza talaffuz va boy rezonans bera olasiz.
+              Ovoz tembri — bu sizning brendingiz. Boy bariton salobat va ishonch bag'ishlasa, yorqin tenor do'stona muhit yaratadi. OvozStudio'da o'zingizning ovozingizni sozlab, unga o'zbekcha toza talaffuz va boy rezonans bera olasiz.
             </p>
           </div>
 

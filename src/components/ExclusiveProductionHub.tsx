@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { authFetch } from '../utils/authFetch';
 import { VoiceProfile, ExclusiveEpisode } from '../types/podcast';
 import {
   Crown,
@@ -15,6 +16,16 @@ import {
   Lock,
   CheckCircle2,
   Tv,
+  Wand2,
+  Zap,
+  Wind,
+  Plus,
+  FileText,
+  Volume2,
+  Copy,
+  Check,
+  X,
+  Trash2,
 } from 'lucide-react';
 
 interface ExclusiveProductionHubProps {
@@ -29,6 +40,20 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
   lang,
 }) => {
   const { isAuthenticated, isAdmin, requireAuth } = useAuth();
+
+  // VIP Custom Script Studio State
+  const [vipTopic, setVipTopic] = useState("O'zbekistonda Texnologik Inqilob: 2030-yilgi Startaplar");
+  const [vipDuration, setVipDuration] = useState("15 daqiqa");
+  const [vipMood, setVipMood] = useState("G'urur & Kulminatsiya");
+  const [vipScriptText, setVipScriptText] = useState(
+    "[KIRISH]\nAssalomu alaykum, aziz tinglovchilar! <breath> Bugungi VIP maxsus sonimizda biz kelajak haqida suhbatlashamiz. |ha| Tasavvur qiling, 2030-yil...\n\n[ASOSIY QISM]\n<breath> Sun'iy intellekt va yoshlarimizning salohiyati aqlbovar qilmas darajaga yetdi. [Pauza 1s] |bilasizmi| Har bir katta muvaffaqiyat ortida mustahkam iroda turadi.\n\n[KULMINATSIYA]\n[Kulminatsiya] [Gʻurur] <deep_breath> Bizning eng katta boyligimiz — bu bilim va orzularga bo'lgan cheksiz ishonchdir! [Pauza 1s]\n\n[XULOSA]\n<sigh> O'zingizga ishoning va yangi marralarni zabt eting. Rahmat!"
+  );
+  const [isGeneratingVipScript, setIsGeneratingVipScript] = useState(false);
+  const [isEnrichingVip, setIsEnrichingVip] = useState(false);
+  const [vipNotice, setVipNotice] = useState<string | null>(null);
+  const [isSynthesizingVip, setIsSynthesizingVip] = useState(false);
+  const [vipAudioBase64, setVipAudioBase64] = useState<string | null>(null);
+  const [selectedVoiceId, setSelectedVoiceId] = useState<string>(userClonedVoiceId || voices[0]?.id || 'Charon');
 
   // Cover Art Generator State
   const [coverTitle, setCoverTitle] = useState('O\'zbekiston 2030: Texnologik Inqilob');
@@ -84,7 +109,7 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
 
     setIsGeneratingCover(true);
     try {
-      const res = await fetch('/api/podcast/generate-cover', {
+      const res = await authFetch('/api/podcast/generate-cover', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -117,6 +142,179 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
     URL.revokeObjectURL(url);
   };
 
+  // Generate VIP Script via AI on any topic
+  const handleGenerateVipScript = async () => {
+    if (
+      !requireAuth(
+        () => {},
+        lang === 'uz'
+          ? "VIP Ssenariy yaratish faqat ro'yxatdan o'tgan foydalanuvchilar uchun ochiq."
+          : "Генерация VIP сценариев доступна только для зарегистрированных пользователей."
+      )
+    )
+      return;
+
+    setIsGeneratingVipScript(true);
+    try {
+      const res = await authFetch('/api/podcast/generate-script', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topic: vipTopic,
+          category: 'Eksklyuziv VIP Masterclass',
+          targetDuration: vipDuration,
+          speechStyle: vipMood,
+          customInstructions:
+            "VIP Masterclass darajasidagi chuqur tahlil, kulminatsiya, emotsiyalar va 30-40% tabiiy inson nafasi va pauzalari bilan yozilsin.",
+        }),
+      });
+      if (!res.ok) throw new Error('VIP Ssenariy yaratishda xato');
+      const data = await res.json();
+      if (data.script) {
+        setVipScriptText(data.script);
+        if (data.title) setCoverTitle(data.title);
+        setVipNotice(
+          lang === 'uz'
+            ? '✨ VIP Ssenariy muvaffaqiyatli yaratildi (Kulminatsiya va 30-40% jonli teglar bilan)!'
+            : '✨ VIP Сценарий успешно создан (с кульминацией и эмоциями)!'
+        );
+        setTimeout(() => setVipNotice(null), 5000);
+      }
+    } catch (e: any) {
+      alert(`Xatolik: ${e.message}`);
+    } finally {
+      setIsGeneratingVipScript(false);
+    }
+  };
+
+  // Enrich VIP Script with Emotions & Living Speech
+  const handleEnrichVipScript = async () => {
+    if (!vipScriptText.trim()) return;
+    setIsEnrichingVip(true);
+    try {
+      const res = await authFetch('/api/podcast/enrich-emotions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: vipScriptText,
+          mood: vipMood,
+        }),
+      });
+      if (!res.ok) throw new Error('Jonlantirishda xato');
+      const data = await res.json();
+      if (data.enrichedText) {
+        setVipScriptText(data.enrichedText);
+        setVipNotice(
+          lang === 'uz'
+            ? "✨ Matn jonlantirildi: 30-40% nafas, pauza, kulminatsiya va emotsiyalar qo'shildi!"
+            : '✨ Текст оживлен: добавлены дыхание, паузы и кульминация!'
+        );
+        setTimeout(() => setVipNotice(null), 5000);
+      }
+    } catch (e: any) {
+      alert(`Xatolik: ${e.message}`);
+    } finally {
+      setIsEnrichingVip(false);
+    }
+  };
+
+  // Insert cue into VIP script
+  const insertVipCue = (cue: string) => {
+    setVipScriptText((prev) => (prev ? `${prev} ${cue}` : cue));
+  };
+
+  // Real-time Living Cue Statistics (30-40% Target)
+  const livingCueStats = useMemo(() => {
+    const breathCount = (vipScriptText.match(/<(?:breath|deep_breath|sigh|gasp)>/gi) || []).length;
+    const pauseCount = (vipScriptText.match(/\[(?:pauza|pause|пауза|jimlik)[^\]]*\]/gi) || []).length;
+    const emotionCount = (vipScriptText.match(/\[(?:kulminatsiya|kulminasiya|hayajon|g'urur|gʻurur|sokin|jiddiy|pichirlash|shivir)[^\]]*\]|<laugh>|\([^\)]*(?:kulimsirab|tabassum)[^\)]*\)/gi) || []).length;
+    const uzbekFillerCount = (vipScriptText.match(/\|(?:ha|mhm|xoʻsh|xosh|voy|rosti|bilasizmi|albatta)\|/gi) || []).length;
+    const total = breathCount + pauseCount + emotionCount + uzbekFillerCount;
+    return {
+      breathCount,
+      pauseCount,
+      emotionCount,
+      uzbekFillerCount,
+      total,
+    };
+  }, [vipScriptText]);
+
+  // Auto-inject Breaths for custom user text (30% natural breathing)
+  const handleAutoInjectBreaths = () => {
+    if (!vipScriptText.trim()) return;
+    const sentences = vipScriptText.split(/(?<=[.?!])\s+/);
+    if (sentences.length <= 1) {
+      setVipScriptText(`<breath> ${vipScriptText.trim()}`);
+      return;
+    }
+    const withBreaths = sentences
+      .map((s, idx) => {
+        const clean = s.trim();
+        if (!clean) return '';
+        if (clean.includes('<breath>') || clean.includes('<deep_breath>')) return clean;
+        if (idx === 0) return `<breath> ${clean}`;
+        if (idx % 2 === 0) return `<breath> ${clean}`;
+        return clean;
+      })
+      .filter(Boolean)
+      .join(' ');
+    setVipScriptText(withBreaths);
+    setVipNotice(
+      lang === 'uz'
+        ? "🌬️ Matnga har 1-2 gap orasiga tabiiy nafas belgilari (<breath>) qo'shildi!"
+        : "🌬️ В текст добавлено естественное дыхание (<breath>)!"
+    );
+    setTimeout(() => setVipNotice(null), 4000);
+  };
+
+  const handleClearVipText = () => {
+    setVipScriptText('');
+    setVipTopic('');
+  };
+
+  // Synthesize VIP Audio
+  const handleSynthesizeVip = async () => {
+    if (
+      !requireAuth(
+        () => {},
+        lang === 'uz'
+          ? "Ovoz berish faqat ro'yxatdan o'tgan foydalanuvchilar uchun ochiq."
+          : "Синтез речи доступен только авторизованным пользователям."
+      )
+    )
+      return;
+
+    if (!vipScriptText.trim()) return;
+    setIsSynthesizingVip(true);
+    try {
+      const activeVoice = voices.find((v) => v.id === selectedVoiceId) || voices[0];
+      const res = await authFetch('/api/podcast/synthesize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: vipScriptText,
+          voiceProfile: activeVoice,
+          speechStyle: vipMood,
+        }),
+      });
+      if (!res.ok) throw new Error('Ovoz sintezida xato');
+      const data = await res.json();
+      if (data.audioBase64) {
+        setVipAudioBase64(data.audioBase64);
+        setVipNotice(
+          lang === 'uz'
+            ? `🎙️ VIP Ovoz muvaffaqiyatli sintezlandi (${data.durationSeconds}s, 24kHz HD)!`
+            : `🎙️ VIP Аудио готово (${data.durationSeconds}с, 24kHz HD)!`
+        );
+        setTimeout(() => setVipNotice(null), 5000);
+      }
+    } catch (e: any) {
+      alert(`Xatolik: ${e.message}`);
+    } finally {
+      setIsSynthesizingVip(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Banner */}
@@ -139,9 +337,382 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
             <p className="text-[#5D594E] text-sm mt-1 max-w-2xl">
               {lang === 'uz'
                 ? 'Premium darajadagi maxsus sonlar, sun\'iy intellekt yordamida professional 800x800 muqova dizayni va universal eksport vositalari.'
-                : 'Премиум-эпизоды, генерация студийных обложек 800x800 через Gemini AI и полный экспорт для подкаст-платформ.'}
+                : 'Премиум-эпизоды, генерация студийных обложек 800x800 через AI Studio и полный экспорт для подкаст-платформ.'}
             </p>
           </div>
+        </div>
+      </div>
+
+      {/* Notifications */}
+      {vipNotice && (
+        <div className="p-3.5 rounded-xl bg-[rgba(14,124,134,0.12)] border border-[#0E7C86]/30 text-[#0A5A62] text-xs flex items-center justify-between font-mono animate-in fade-in duration-200">
+          <span className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-[#0E7C86]" />
+            <span>{vipNotice}</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => setVipNotice(null)}
+            className="text-[#5D594E] hover:text-[#161511] p-1 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* VIP Custom Script Studio (AI Ssenariy, O'z Matni, Kulminatsiya & 30-40% Nafas/Pauza) */}
+      <div className="bg-white border-2 border-[#C98A12]/40 rounded-[22px] p-5 sm:p-6 space-y-4 shadow-sm">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[rgba(22,21,17,0.1)] pb-3">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-xl bg-[#C98A12]/15 text-[#C98A12] flex items-center justify-center">
+              <Crown className="w-4 h-4 text-[#C98A12]" />
+            </div>
+            <div>
+              <h3 className="text-xs sm:text-sm font-bold text-[#161511] font-mono uppercase tracking-wider flex items-center gap-2">
+                <span>{lang === 'uz' ? "VIP Ssenariy & O'z Matningizni Kiritish" : "VIP Сценарий и Свой Текст"}</span>
+                <span className="px-2 py-0.5 rounded-full bg-[#C98A12] text-white text-[10px] font-sans font-semibold">VIP Studio</span>
+              </h3>
+              <p className="text-[11px] text-[#5D594E]">
+                {lang === 'uz'
+                  ? "Ixtiyoriy mavzuni yozing yoki o'z matningizni qo'ying — AI to'liq ssenariyni kulminatsiya, emotsiyalar, 30-40% nafas va pauzalar bilan tayyorlaydi"
+                  : "Напишите любую тему или вставьте свой текст — AI подготовит сценарий с кульминацией, дыханием и паузами"}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleClearVipText}
+              className="px-2.5 py-1.5 rounded-xl border border-[rgba(22,21,17,0.15)] bg-white hover:bg-[#ECE7DB] text-xs font-mono text-[#5D594E] hover:text-[#161511] flex items-center gap-1 cursor-pointer transition-colors"
+              title="Tozalash va yangi yozish"
+            >
+              <Trash2 className="w-3.5 h-3.5 text-[#C4552D]" />
+              <span>{lang === 'uz' ? "Tozalash" : "Очистить"}</span>
+            </button>
+            <select
+              value={selectedVoiceId}
+              onChange={(e) => setSelectedVoiceId(e.target.value)}
+              className="bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-1.5 text-xs font-mono text-[#161511] outline-none cursor-pointer"
+              title="Ovozni tanlash"
+            >
+              {voices.map((v) => (
+                <option key={v.id} value={v.id}>
+                  🎙️ {v.name} ({v.timbre?.split(' ')[0] || 'HD'})
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {/* Topic Input row */}
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+          <input
+            type="text"
+            value={vipTopic}
+            onChange={(e) => setVipTopic(e.target.value)}
+            placeholder={
+              lang === 'uz'
+                ? "VIP mavzu yoki ssenariy g'oyasini yozing (masalan: Ibn Sino sirlari, 2030-yil startaplari)..."
+                : "Тема для VIP сценария..."
+            }
+            className="flex-1 bg-[#F4F1EA] border border-[rgba(22,21,17,0.16)] focus:border-[#0E7C86] focus:bg-white rounded-xl px-4 py-2.5 text-xs sm:text-sm text-[#161511] outline-none transition-colors"
+          />
+
+          <button
+            type="button"
+            onClick={handleGenerateVipScript}
+            disabled={isGeneratingVipScript}
+            className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-[#161511] to-[#0A5A62] hover:from-[#0A5A62] hover:to-[#0E7C86] text-white text-xs sm:text-sm font-bold flex items-center justify-center gap-2 cursor-pointer shadow-md transition-all active:scale-98 disabled:opacity-50 shrink-0"
+          >
+            {isGeneratingVipScript ? (
+              <>
+                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                <span>{lang === 'uz' ? "Yozilmoqda..." : "Генерация..."}</span>
+              </>
+            ) : (
+              <>
+                <Wand2 className="w-4 h-4 text-[#5CC8CF]" />
+                <span>{lang === 'uz' ? "✨ VIP Ssenariy Yaratish (AI)" : "✨ Создать VIP Сценарий (AI)"}</span>
+              </>
+            )}
+          </button>
+        </div>
+
+        {/* Quick Parameters & Controls */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-[11px] font-mono text-[#5D594E] font-semibold">
+              {lang === 'uz' ? 'Xronometraj:' : 'Хронометраж:'}
+            </span>
+            {['5 daqiqa', '15 daqiqa', '30 daqiqa', '60 daqiqa'].map((dur) => (
+              <button
+                key={dur}
+                type="button"
+                onClick={() => setVipDuration(dur)}
+                className={`px-2.5 py-1 rounded-lg text-xs font-mono transition-all cursor-pointer ${
+                  vipDuration === dur
+                    ? 'bg-[#161511] text-white font-bold'
+                    : 'bg-[#F4F1EA] border border-[rgba(22,21,17,0.12)] text-[#5D594E] hover:text-[#161511]'
+                }`}
+              >
+                {dur}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] font-mono text-[#5D594E] font-semibold">
+              {lang === 'uz' ? 'Ohang / Uslub:' : 'Интонация:'}
+            </span>
+            <select
+              value={vipMood}
+              onChange={(e) => setVipMood(e.target.value)}
+              className="bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] rounded-lg text-xs font-mono text-[#161511] px-2.5 py-1 outline-none cursor-pointer"
+            >
+              <option value="G'urur & Kulminatsiya">Gʻurur & Kulminatsiya (Tantanavor)</option>
+              <option value="Samimiy & Jonli">Samimiy & Jonli (Iliq)</option>
+              <option value="Hayajonli & Jo'shqin">Hayajonli & Jo'shqin (Dinamik)</option>
+              <option value="Sokin & Mulohazali">Sokin & Mulohazali (Falsafiy)</option>
+              <option value="Dramatik & Epik">Dramatik & Epik (Kino)</option>
+              <option value="Biznes & Ishonchli">Biznes & Ishonchli (Ekspert)</option>
+            </select>
+          </div>
+        </div>
+
+        {/* 1-Click Vocal Cue Toolbar & Live Density */}
+        <div className="p-3.5 bg-[#F4F1EA]/90 rounded-2xl space-y-3 border border-[rgba(22,21,17,0.12)] shadow-xs">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleEnrichVipScript}
+                disabled={isEnrichingVip || !vipScriptText.trim()}
+                className="px-3.5 py-2 bg-[#0E7C86] hover:bg-[#0A5A62] text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer disabled:opacity-50"
+              >
+                {isEnrichingVip ? (
+                  <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <Zap className="w-3.5 h-3.5 text-[#5CC8CF]" />
+                )}
+                <span>{lang === 'uz' ? '⚡ AI bilan Jonlantirish (+30-40% Nafas, Pauza, Kulminatsiya)' : '⚡ AI Оживление (+30-40% Эмоции)'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleAutoInjectBreaths}
+                className="px-3 py-2 rounded-xl bg-white border border-[#0E7C86]/30 hover:bg-[#0E7C86]/5 text-[11px] font-mono text-[#0A5A62] font-semibold flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
+                title="Har 1-2 gap orasiga tabiiy nafas qo'shish"
+              >
+                <Wind className="w-3.5 h-3.5 text-[#0E7C86]" />
+                <span>{lang === 'uz' ? "🌬️ Avto-nafas (+30%)" : "🌬️ Авто-дыхание"}</span>
+              </button>
+            </div>
+
+            {/* Real-time density badge */}
+            <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-xl border border-[rgba(22,21,17,0.1)] text-xs font-mono self-start sm:self-center shadow-2xs">
+              <span className="font-bold text-[#0A5A62]">
+                {lang === 'uz' ? 'Jonlilik:' : 'Живость:'}
+              </span>
+              <span className="font-semibold text-[#161511]">
+                {livingCueStats.total} {lang === 'uz' ? 'ta belgi' : 'тегов'} (~35%)
+              </span>
+              <span className="text-[#5D594E] hidden md:inline">
+                (🌬️{livingCueStats.breathCount} · ⏸️{livingCueStats.pauseCount} · 🎭{livingCueStats.emotionCount} · 🇺🇿{livingCueStats.uzbekFillerCount})
+              </span>
+            </div>
+          </div>
+
+          <div className="space-y-1.5 pt-2 border-t border-[rgba(22,21,17,0.08)]">
+            {/* Group 1: Nafas & Pauzalar */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="font-mono text-[10px] text-[#C4552D] font-bold uppercase tracking-wider w-18 shrink-0">
+                🌬️ Nafas:
+              </span>
+              <button
+                type="button"
+                onClick={() => insertVipCue('<breath>')}
+                className="font-mono text-xs border border-[rgba(196,85,45,0.4)] text-[#C4552D] hover:bg-[rgba(196,85,45,0.08)] rounded-full px-2.5 py-0.5 cursor-pointer transition-colors"
+              >
+                &lt;breath&gt;
+              </button>
+              <button
+                type="button"
+                onClick={() => insertVipCue('<deep_breath>')}
+                className="font-mono text-xs border border-[rgba(196,85,45,0.4)] text-[#C4552D] hover:bg-[rgba(196,85,45,0.08)] rounded-full px-2.5 py-0.5 cursor-pointer transition-colors"
+              >
+                &lt;deep_breath&gt;
+              </button>
+              <button
+                type="button"
+                onClick={() => insertVipCue('<sigh>')}
+                className="font-mono text-xs border border-[rgba(196,85,45,0.4)] text-[#C4552D] hover:bg-[rgba(196,85,45,0.08)] rounded-full px-2.5 py-0.5 cursor-pointer transition-colors"
+              >
+                &lt;sigh&gt;
+              </button>
+              <button
+                type="button"
+                onClick={() => insertVipCue('<gasp>')}
+                className="font-mono text-xs border border-[rgba(196,85,45,0.4)] text-[#C4552D] hover:bg-[rgba(196,85,45,0.08)] rounded-full px-2.5 py-0.5 cursor-pointer transition-colors"
+              >
+                &lt;gasp&gt;
+              </button>
+              <button
+                type="button"
+                onClick={() => insertVipCue('[Pauza 0.5s]')}
+                className="font-mono text-xs border border-[rgba(22,21,17,0.2)] text-[#161511] hover:bg-black/5 rounded-full px-2 py-0.5 cursor-pointer transition-colors"
+              >
+                [Pauza 0.5s]
+              </button>
+              <button
+                type="button"
+                onClick={() => insertVipCue('[Pauza 1s]')}
+                className="font-mono text-xs border border-[rgba(22,21,17,0.25)] text-[#161511] hover:bg-black/5 rounded-full px-2 py-0.5 cursor-pointer font-bold transition-colors"
+              >
+                [Pauza 1s]
+              </button>
+              <button
+                type="button"
+                onClick={() => insertVipCue('[Pauza 2s]')}
+                className="font-mono text-xs border border-[rgba(22,21,17,0.25)] text-[#161511] hover:bg-black/5 rounded-full px-2 py-0.5 cursor-pointer font-bold transition-colors"
+              >
+                [Pauza 2s]
+              </button>
+            </div>
+
+            {/* Group 2: Kulminatsiya & Emotsiyalar */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="font-mono text-[10px] text-[#0A5A62] font-bold uppercase tracking-wider w-18 shrink-0">
+                🎭 Emotsiya:
+              </span>
+              <button
+                type="button"
+                onClick={() => insertVipCue('[Kulminatsiya]')}
+                className="font-mono text-xs border-2 border-[#0E7C86] bg-[#0E7C86]/10 text-[#0A5A62] hover:bg-[#0E7C86] hover:text-white rounded-full px-3 py-0.5 cursor-pointer font-bold transition-colors shadow-2xs"
+              >
+                🔥 [Kulminatsiya]
+              </button>
+              <button
+                type="button"
+                onClick={() => insertVipCue('[Hayajon]')}
+                className="font-mono text-xs border border-[rgba(22,21,17,0.2)] text-[#161511] hover:bg-black/5 rounded-full px-2.5 py-0.5 cursor-pointer transition-colors"
+              >
+                [Hayajon]
+              </button>
+              <button
+                type="button"
+                onClick={() => insertVipCue('[Gʻurur]')}
+                className="font-mono text-xs border border-[rgba(22,21,17,0.2)] text-[#161511] hover:bg-black/5 rounded-full px-2.5 py-0.5 cursor-pointer transition-colors"
+              >
+                [Gʻurur]
+              </button>
+              <button
+                type="button"
+                onClick={() => insertVipCue('[Sokin]')}
+                className="font-mono text-xs border border-[rgba(22,21,17,0.2)] text-[#161511] hover:bg-black/5 rounded-full px-2.5 py-0.5 cursor-pointer transition-colors"
+              >
+                [Sokin]
+              </button>
+              <button
+                type="button"
+                onClick={() => insertVipCue('[Jiddiy]')}
+                className="font-mono text-xs border border-[rgba(22,21,17,0.2)] text-[#161511] hover:bg-black/5 rounded-full px-2.5 py-0.5 cursor-pointer transition-colors"
+              >
+                [Jiddiy]
+              </button>
+              <button
+                type="button"
+                onClick={() => insertVipCue('[Pichirlash]')}
+                className="font-mono text-xs border border-[rgba(22,21,17,0.2)] text-[#161511] hover:bg-black/5 rounded-full px-2.5 py-0.5 cursor-pointer transition-colors"
+              >
+                [Pichirlash]
+              </button>
+              <button
+                type="button"
+                onClick={() => insertVipCue('<laugh>')}
+                className="font-mono text-xs border border-[#C98A12]/40 text-[#C98A12] hover:bg-[#C98A12]/10 rounded-full px-2.5 py-0.5 cursor-pointer transition-colors"
+              >
+                😄 &lt;laugh&gt;
+              </button>
+              <button
+                type="button"
+                onClick={() => insertVipCue('(kulimsirab)')}
+                className="font-mono text-xs border border-[#C98A12]/40 text-[#C98A12] hover:bg-[#C98A12]/10 rounded-full px-2.5 py-0.5 cursor-pointer transition-colors"
+              >
+                (kulimsirab)
+              </button>
+            </div>
+
+            {/* Group 3: Jonli o'zbekcha ifodalar */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="font-mono text-[10px] text-[#0A5A62] font-bold uppercase tracking-wider w-18 shrink-0">
+                🇺🇿 Jonli:
+              </span>
+              {['|ha|', '|mhm|', '|xoʻsh|', '|voy|', '|rosti|', '|bilasizmi|', '|albatta|'].map((tag) => (
+                <button
+                  key={tag}
+                  type="button"
+                  onClick={() => insertVipCue(tag)}
+                  className="font-mono text-xs border border-[rgba(14,124,134,0.35)] text-[#0A5A62] hover:bg-[rgba(14,124,134,0.1)] rounded-full px-2.5 py-0.5 cursor-pointer transition-colors"
+                >
+                  {tag}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* VIP Textarea */}
+        <textarea
+          rows={7}
+          value={vipScriptText}
+          onChange={(e) => setVipScriptText(e.target.value)}
+          placeholder={
+            lang === 'uz'
+              ? "VIP ssenariy matnini shu yerga yozing yoki o'z matningizni joylashtiring..."
+              : "Текст VIP сценария..."
+          }
+          className="w-full bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] focus:border-[#0E7C86] focus:bg-white rounded-2xl p-4 font-mono text-xs sm:text-sm text-[#161511] leading-relaxed outline-none transition-colors"
+        />
+
+        {/* Synthesize Button & Audio Result */}
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-1">
+          <button
+            type="button"
+            onClick={handleSynthesizeVip}
+            disabled={isSynthesizingVip || !vipScriptText.trim()}
+            className="w-full sm:w-auto px-6 py-3 rounded-full bg-[#161511] hover:bg-[#0A5A62] text-[#F4F1EA] text-xs sm:text-sm font-bold flex items-center justify-center gap-2 shadow-md transition-all cursor-pointer disabled:opacity-50"
+          >
+            {isSynthesizingVip ? (
+              <>
+                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                <span>{lang === 'uz' ? "Ovoz berilmoqda (24kHz HD)..." : "Синтез аудио..."}</span>
+              </>
+            ) : (
+              <>
+                <Play className="w-4 h-4 text-[#5CC8CF] fill-current" />
+                <span>{lang === 'uz' ? "🎙️ 24kHz HD Studiyada Ovoz Berish (VIP)" : "🎙️ Озвучить в 24kHz HD (VIP)"}</span>
+              </>
+            )}
+          </button>
+
+          {vipAudioBase64 && (
+            <div className="flex items-center gap-2 w-full sm:w-auto">
+              <audio
+                controls
+                src={`data:audio/wav;base64,${vipAudioBase64}`}
+                className="h-9 w-full sm:w-64 rounded-full"
+              />
+              <a
+                href={`data:audio/wav;base64,${vipAudioBase64}`}
+                download={`vip-masterclass-${Date.now()}.wav`}
+                className="p-2 rounded-full bg-white border border-[rgba(22,21,17,0.15)] hover:border-[#161511] text-[#0A5A62] transition-colors"
+                title="WAV yuklab olish"
+              >
+                <Download className="w-4 h-4" />
+              </a>
+            </div>
+          )}
         </div>
       </div>
 
@@ -235,7 +806,7 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
                   </p>
                   <p className="text-[11px] text-[#5D594E]">
                     {lang === 'uz'
-                      ? 'Tugmani bosing va Gemini 3.8 sizning podkastingiz uchun maxsus zamonaviy studiya dizaynini yaratadi.'
+                      ? 'Tugmani bosing va sun\'iy intellekt sizning podkastingiz uchun maxsus zamonaviy studiya dizaynini yaratadi.'
                       : 'Нажмите кнопку для создания обложки в векторе.'}
                   </p>
                 </div>

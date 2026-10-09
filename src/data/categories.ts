@@ -14,7 +14,7 @@ export const PODCAST_CATEGORIES: PodcastCategory[] = [
       border: 'border-amber-500/30',
       accent: 'from-amber-600 to-yellow-600',
     },
-    suggestedVoice: 'Charon',
+    suggestedVoice: 'Jasur',
     suggestedTimbre: 'Iliq va salobatli chuqur bariton, vazmin intonatsiya',
     suggestedTempo: 'Vazmin (0.9x)',
     suggestedStyle: 'Hujjatli & Epik hikoyanavis',
@@ -66,7 +66,7 @@ Bu boy meros bugun ham qonimizda yashamoqda. Biz bilan birga qoling, navbatdagi 
       border: 'border-emerald-500/30',
       accent: 'from-emerald-600 to-indigo-600',
     },
-    suggestedVoice: 'Puck',
+    suggestedVoice: 'Otabek',
     suggestedTimbre: 'Yorqin, quvnoq va jonli tenor, samimiy kulgi bilan',
     suggestedTempo: 'Jonli (1.15x)',
     suggestedStyle: 'Quvnoq & Hazilomuz suhbat',
@@ -109,7 +109,7 @@ Xullas, metroda zerikmaysiz. Hayotingiz quvnoq lahzalarga to'la bo'lsin!`,
     id: 'ilm-fan',
     nameUz: 'Ilm-fan & Sun\'iy Intellekt',
     nameRu: 'Наука и Искусственный интеллект',
-    taglineUz: 'Gemini 3.8, koinot sirlari, kelajak texnologiyalari va startaplar',
+    taglineUz: 'Neyron tarmoqlar, koinot sirlari, kelajak texnologiyalari va startaplar',
     iconName: 'Cpu',
     badgeUz: 'IT & Fan',
     colorTheme: {
@@ -118,25 +118,25 @@ Xullas, metroda zerikmaysiz. Hayotingiz quvnoq lahzalarga to'la bo'lsin!`,
       border: 'border-blue-500/30',
       accent: 'from-blue-600 to-indigo-600',
     },
-    suggestedVoice: 'Zephyr',
+    suggestedVoice: 'Farrux',
     suggestedTimbre: 'Aniq, intellektual va ravshan diksiya, zamonaviy ritm',
     suggestedTempo: 'Standart (1.0x)',
     suggestedStyle: 'Ma\'rifiy & Ekspert suhbati',
     ambientSound: 'tech-ambient',
     topics: [
       {
-        id: 'gemini-ozbek',
-        titleUz: 'Gemini 3.8 va O\'zbek tili: Sun\'iy intellekt qanday qilib ona tilimizda gapirmoqda?',
-        titleRu: 'Gemini 3.8 и узбекский язык: Как ИИ заговорил на нашем языке?',
-        descriptionUz: 'Ovoz sintezi, Gemini 3.8 TTS Live imkoniyatlari va sun\'iy intellektning o\'zbek tilidagi inqilobi.',
+        id: 'ai-ozbek',
+        titleUz: 'Neyron ovoz va O\'zbek tili: Sun\'iy intellekt qanday qilib ona tilimizda gapirmoqda?',
+        titleRu: 'Нейросети и узбекский язык: Как ИИ заговорил на нашем языке?',
+        descriptionUz: 'Ovoz sintezi, OvozStudio Neural imkoniyatlari va sun\'iy intellektning o\'zbek tilidagi inqilobi.',
         sampleScriptUz: `[KIRISH]
-Salom, texnologiya ixlosmandlari! "Kelajak Kodlari" podkasti bilan birgasiz. <breath> Bugun biz dunyo bo'ylab texnologik olamni larzaga solayotgan Gemini 3.8 va uning tabiiy ovoz sintezi imkoniyatlarini tahlil qilamiz.
+Salom, texnologiya ixlosmandlari! "Kelajak Kodlari" podkasti bilan birgasiz. <breath> Bugun biz dunyo bo'ylab texnologik olamni larzaga solayotgan neyron ovoz modellari va tabiiy ovoz sintezi imkoniyatlarini tahlil qilamiz.
 
 [ASOSIY QISM]
-Yaqin-yaqingacha kompyuter ovozi o'zbek tilida juda mexanik, jonsiz eshitilar edi. <breath> Ammo Gemini 3.8 TTS Live modeli bilan bu chegara yo'qoldi! Endi sun'iy intellekt o'zbekcha so'zlarning urg'usini, his-tuyg'ularini, nafas olishni va hatto o'ziga xos intonatsiyani his qilib gapira oladi. |ha| Bu nafaqat podkasterlar, balki audio-kitoblar, ta'lim va ko'rish imkoniyati cheklangan insonlar uchun ulkan imkoniyatdir.
+Yaqin-yaqingacha kompyuter ovozi o'zbek tilida juda mexanik, jonsiz eshitilar edi. <breath> Ammo OvozStudio neyron dvigateli bilan bu chegara yo'qoldi! Endi sun'iy intellekt o'zbekcha so'zlarning urg'usini, his-tuyg'ularini, nafas olishni va hatto o'ziga xos intonatsiyani his qilib gapira oladi. |ha| Bu nafaqat podkasterlar, balki audio-kitoblar, ta'lim va ko'rish imkoniyati cheklangan insonlar uchun ulkan imkoniyatdir.
 
 [KULMINATSIYA]
-Eng qizig'i nima bilasizmi? Hozir siz eshitayotgan mana shu podkast ham aynan Gemini 3.8 TTS orqali sintez qilingan! Bir o'ylab ko'ring, kelajak allaqachon eshigimizni qoqqan.
+Eng qizig'i nima bilasizmi? Hozir siz eshitayotgan mana shu podkast ham aynan OvozStudio neyron sintezi orqali yaratilgan! Bir o'ylab ko'ring, kelajak allaqachon eshigimizni qoqqan.
 
 [XULOSA]
 Siz sun'iy intellektning qaysi yo'nalishda rivojlanishini kutmoqdasiz? O'z ovozingizni AI orqali yaratish sizga qanday tuyuladi? Bizga obuna bo'ling, ilm va texnologiya sirlarini birgalikda o'rganamiz!`,
@@ -156,7 +156,7 @@ Siz sun'iy intellektning qaysi yo'nalishda rivojlanishini kutmoqdasiz? O'z ovozi
       border: 'border-rose-500/30',
       accent: 'from-rose-600 to-pink-600',
     },
-    suggestedVoice: 'Kore',
+    suggestedVoice: 'Aziza',
     suggestedTimbre: 'Mayin, tinchlantiruvchi va chuqur samimiy ayol yoki erkak ovozi',
     suggestedTempo: 'Xotirjam (0.85x)',
     suggestedStyle: 'Samimiy & Ilhomlantiruvchi',
@@ -194,7 +194,7 @@ O'zingizga ishoning. Har bir tong — yangi boshlanish, yangi imkoniyatdir. Bugu
       border: 'border-purple-500/30',
       accent: 'from-purple-600 to-indigo-700',
     },
-    suggestedVoice: 'Fenrir',
+    suggestedVoice: 'Sherzod',
     suggestedTimbre: 'Sirli, qalin, past va vazmin bariton, kutilmagan pauzalar bilan',
     suggestedTempo: 'Vazmin (0.9x)',
     suggestedStyle: 'Dramatik & Qorong\'u sirli hikoya',
@@ -232,7 +232,7 @@ Biz tabiatning barcha sirlarini bilamiz deb o'ylaymiz, ammo sahro va dengiz tubi
       border: 'border-indigo-500/30',
       accent: 'from-indigo-600 to-amber-500',
     },
-    suggestedVoice: 'Charon',
+    suggestedVoice: 'Jasur',
     suggestedTimbre: 'Ishonchli, qat\'iy, dinamik va biznesga xos professional ohang',
     suggestedTempo: 'Dinamik (1.05x)',
     suggestedStyle: 'Biznes & Amaliy tavsiyalar',
@@ -267,7 +267,7 @@ Katta natijalarga erishish uchun birinchi qadamni bugun tashlang. Muvaffaqiyat h
       border: 'border-violet-500/30',
       accent: 'from-violet-600 to-purple-600',
     },
-    suggestedVoice: 'Puck',
+    suggestedVoice: 'Madina',
     suggestedTimbre: 'Universal, moslashuvchan va jozibador ovoz',
     suggestedTempo: 'Standart (1.0x)',
     suggestedStyle: 'Jonli suhbat',

@@ -11,6 +11,7 @@ import {
   logoutUser,
   ADMIN_EMAIL,
 } from '../firebase';
+import { AUTH_REQUIRED_EVENT } from '../utils/authFetch';
 
 interface AuthContextType {
   user: User | null;
@@ -28,6 +29,7 @@ interface AuthContextType {
   closePricingModal: () => void;
   requireAuth: (action: () => void, reason?: string) => boolean;
   useCredit: (cost?: number) => Promise<boolean>;
+  syncCredits: (remaining: number) => void;
   addCredits: (amount: number, newTier?: 'free' | 'pro' | 'unlimited') => Promise<void>;
   logGeneration: (
     type: 'podcast' | 'voiceover' | 'tts' | 'dubbing' | 'agent_call',
@@ -48,9 +50,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [authModalReason, setAuthModalReason] = useState<string>('');
   const [isPricingModalOpen, setIsPricingModalOpen] = useState<boolean>(false);
 
-  const isAdmin = !!(user && (isUserAdmin(user.email) || userProfile?.role === 'admin'));
+  // Admin authorization based ONLY on admin email list, never from Firestore document role field
+  const isAdmin = !!(user && isUserAdmin(user.email));
   const isAuthenticated = !!user;
   const credits = isAdmin ? 999999 : userProfile?.creditsRemaining ?? 0;
+
+  // Global listener for authFetch unauthorized events and pricing requests
+  useEffect(() => {
+    const handleAuthRequired = (e: Event) => {
+      const customEvent = e as CustomEvent<{ reason?: string }>;
+      openAuthModal(customEvent.detail?.reason);
+    };
+    const handlePricingRequired = () => {
+      openPricingModal();
+    };
+    window.addEventListener(AUTH_REQUIRED_EVENT, handleAuthRequired);
+    window.addEventListener('ovozstudio:open-pricing', handlePricingRequired);
+    return () => {
+      window.removeEventListener(AUTH_REQUIRED_EVENT, handleAuthRequired);
+      window.removeEventListener('ovozstudio:open-pricing', handlePricingRequired);
+    };
+  }, []);
 
   const refreshProfile = async () => {
     if (auth.currentUser) {
@@ -132,6 +152,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return true;
   };
 
+  const syncCredits = (remaining: number) => {
+    if (typeof remaining === 'number') {
+      setUserProfile((prev) => (prev ? { ...prev, creditsRemaining: remaining } : null));
+    }
+  };
+
   const addCredits = async (amount: number, newTier?: 'free' | 'pro' | 'unlimited') => {
     if (!user) return;
     const remaining = await addCreditsToUser(user.uid, user.email || '', credits, amount, newTier);
@@ -171,6 +197,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         closePricingModal,
         requireAuth,
         useCredit,
+        syncCredits,
         addCredits,
         logGeneration,
         logout,

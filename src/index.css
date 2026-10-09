@@ -80,6 +80,28 @@
   scrollbar-width: none;
 }
 
+/* Elegant visible horizontal/vertical scrollbar */
+.visible-scrollbar::-webkit-scrollbar {
+  display: block;
+  height: 5px;
+  width: 5px;
+}
+.visible-scrollbar::-webkit-scrollbar-track {
+  background: rgba(22, 21, 17, 0.06);
+  border-radius: 9999px;
+}
+.visible-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(14, 124, 134, 0.35);
+  border-radius: 9999px;
+}
+.visible-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(14, 124, 134, 0.65);
+}
+.visible-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(14, 124, 134, 0.35) rgba(22, 21, 17, 0.06);
+}
+
 /* Global Light Ivory System for all panels & legacy studio classes */
 .surface-0, .bg-\[\#1E1E2C\] {
   background-color: #F4F1EA !important;

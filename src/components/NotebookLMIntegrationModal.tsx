@@ -46,7 +46,7 @@ export const NotebookLMIntegrationModal: React.FC<NotebookLMIntegrationModalProp
   };
 
   const pythonIntegrationCode = `# OvozStudio AI ↔ NotebookLM Automation Script (Python)
-# Exports notes or audio from Google Workspace / Gemini and sends to OvozStudio API
+# Exports notes or audio from Google Workspace / AI and sends to OvozStudio API
 
 import requests
 import json
@@ -97,10 +97,13 @@ import fetch from "node-fetch";
 
 const OVOZSTUDIO_URL = "https://your-ovozstudio-instance.run.app/api/podcast/analyze-document";
 
-async function convertNotebookLMToUzbekPodcast(notesText, format = "interview") {
+async function convertNotebookLMToUzbekPodcast(notesText, firebaseIdToken, format = "interview") {
   const response = await fetch(OVOZSTUDIO_URL, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer " + firebaseIdToken
+    },
     body: JSON.stringify({
       sourceText: notesText,
       targetFormat: format, // 'podcast' | 'interview' | 'voiceover'
@@ -200,8 +203,8 @@ async function convertNotebookLMToUzbekPodcast(notesText, format = "interview") 
               </div>
               <p className="leading-relaxed text-[12px]">
                 {lang === 'uz'
-                  ? 'Iste\'molchilar uchun Google NotebookLM (notebooklm.google.com) ommaviy ochiq REST API kalitlariga ega emas (faqat Enterprise versiyada Gemini Notebook API mavjud). Biroq NotebookLM negizida aynan Google Gemini AI modeli ishlaydi. OvozStudio esa ushbu Gemini 3.8 motoriga to\'g\'ridan-to\'g\'ri ulangan bo\'lib, 1 000 000+ tokenlik kontekst bilan xuddi shunday va undan ham chuqurroq o\'zbekcha qayta ishlash imkonini beradi.'
-                  : 'Потребительская версия Google NotebookLM не имеет публичных API-ключей. Однако в основе NotebookLM лежит модель Google Gemini, которая напрямую встроена в OvozStudio. Поэтому связка настраивается через прямой перенос конспектов, экспорт аудио или внутренний документ-хаб OvozStudio.'}
+                  ? 'Iste\'molchilar uchun Google NotebookLM (notebooklm.google.com) ommaviy ochiq REST API kalitlariga ega emas. OvozStudio esa neyron sun\'iy intellekt motoriga to\'g\'ridan-to\'g\'ri ulangan bo\'lib, 1 000 000+ tokenlik kontekst bilan chuqur o\'zbekcha qayta ishlash imkonini beradi.'
+                  : 'Потребительская версия Google NotebookLM не имеет публичных API-ключей. OvozStudio использует передовые нейросети и документ-хаб для прямого переноса конспектов и мгновенной озвучки на узбекском.'}
               </p>
             </div>
 
@@ -310,8 +313,8 @@ async function convertNotebookLMToUzbekPodcast(notesText, format = "interview") 
                 </div>
                 <p className="text-xs text-[#5D594E] leading-relaxed">
                   {lang === 'uz'
-                    ? 'Gemini 3.8 ssenariyni yaratib beradi. OvozStudio unga Aoede, Puck, Kore ovozlarini beradi, Ambient musiqa qo\'shadi va tayyor MP3 qilib beradi.'
-                    : 'Gemini 3.8 формирует сценарий, OvozStudio озвучивает его студийными голосами с фоновой музыкой и отдаёт готовый MP3.'}
+                    ? 'OvozStudio sun\'iy intellekti ssenariyni yaratib beradi, unga studiya ovozlarini beradi, mayin fon qo\'shadi va tayyor MP3 qilib beradi.'
+                    : 'ИИ OvozStudio формирует сценарий, озвучивает его студийными голосами и отдаёт готовый MP3.'}
                 </p>
               </div>
             </div>
@@ -446,7 +449,7 @@ async function convertNotebookLMToUzbekPodcast(notesText, format = "interview") 
         <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-[rgba(22,21,17,0.14)] text-xs">
           <div className="flex items-center gap-2 text-[#5D594E] font-mono text-[11px]">
             <span className="w-2 h-2 rounded-full bg-[#0E7C86] pulse-teal-dot"></span>
-            <span>{lang === 'uz' ? 'Gemini 3.8 Multimodal dvigateli faol' : 'Движок Gemini 3.8 Multimodal активен'}</span>
+            <span>{lang === 'uz' ? 'OvozStudio Multimodal dvigateli faol' : 'Движок OvozStudio Multimodal активен'}</span>
           </div>
 
           <div className="flex items-center gap-2">

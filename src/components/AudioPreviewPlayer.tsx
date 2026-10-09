@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { authFetch } from '../utils/authFetch';
 import {
   Play,
   Pause,
@@ -62,6 +63,7 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
   const [playbackRate, setPlaybackRate] = useState(1.0);
   
   // Ambient background mixer state
+  const [showAmbientControls, setShowAmbientControls] = useState(false);
   const [currentAmbient, setCurrentAmbient] = useState<AmbientSoundscape>(ambientSound);
   const [ambientEnabled, setAmbientEnabled] = useState(ambientSound !== 'none');
   const [ambientVol, setAmbientVol] = useState(ambientVolume || 20);
@@ -320,7 +322,7 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
   const handleRunSoundDirector = async () => {
     setIsPlanningDirector(true);
     try {
-      const res = await fetch('/api/podcast/sound-director', {
+      const res = await authFetch('/api/podcast/sound-director', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -562,7 +564,7 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
             <Disc className="w-3.5 h-3.5 text-[#0E7C86]" />
             <span>{lang === 'uz' ? 'Ovoz:' : 'Голос:'} <strong className="text-[#161511]">{voiceName}</strong></span>
             <span>•</span>
-            <span>Gemini 3.8 TTS Live 24kHz Studio Master</span>
+            <span>OvozStudio Neural HD 24kHz Studio Master</span>
           </p>
         </div>
 
@@ -686,64 +688,77 @@ export const AudioPreviewPlayer: React.FC<AudioPreviewPlayerProps> = ({
           </div>
         </div>
 
-        {/* Ambient Soundscape Live Controls */}
-        <div className="flex flex-wrap items-center gap-2.5 bg-[#F4F1EA] px-3 py-1.5 rounded-full border border-[rgba(22,21,17,0.14)] text-xs">
-          <div className="flex items-center gap-1.5 text-[#5D594E]">
-            <Music className={`w-3.5 h-3.5 ${isPlaying && ambientEnabled && currentAmbient !== 'none' ? 'text-[#0E7C86] animate-spin' : 'text-[#0E7C86]'}`} />
-            <span className="font-semibold text-[11px]">{lang === 'uz' ? 'Fon musiqasi:' : 'Фоновая музыка:'}</span>
+        {/* Ambient Soundscape Controls (Hidden by default to keep UI clean and calm) */}
+        {showAmbientControls ? (
+          <div className="flex flex-wrap items-center gap-2.5 bg-[#F4F1EA] px-3 py-1.5 rounded-full border border-[rgba(22,21,17,0.14)] text-xs animate-in fade-in duration-150">
+            <div className="flex items-center gap-1.5 text-[#5D594E]">
+              <Music className={`w-3.5 h-3.5 ${isPlaying && ambientEnabled && currentAmbient !== 'none' ? 'text-[#0E7C86] animate-spin' : 'text-[#0E7C86]'}`} />
+              <span className="font-semibold text-[11px]">{lang === 'uz' ? 'Fon musiqasi:' : 'Фоновая музыка:'}</span>
+            </div>
+
+            {/* Soundscape Selector */}
+            <select
+              value={currentAmbient}
+              onChange={(e) => handleSelectAmbient(e.target.value as AmbientSoundscape)}
+              className="bg-white border border-[rgba(22,21,17,0.14)] text-[#161511] text-xs rounded-full px-2.5 py-1 font-medium focus:outline-none focus:border-[#0E7C86] cursor-pointer max-w-[170px] truncate"
+            >
+              {AMBIENT_SOUNDSCAPES.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.icon} {lang === 'uz' ? s.labelUz : s.labelRu}
+                </option>
+              ))}
+            </select>
+
+            <button
+              type="button"
+              onClick={handleToggleAmbient}
+              className={`px-2.5 py-1 rounded-full font-semibold transition-all flex items-center gap-1 cursor-pointer text-xs ${
+                ambientEnabled && currentAmbient !== 'none'
+                  ? 'bg-[#0E7C86] text-white shadow-2xs'
+                  : 'bg-white text-[#5D594E] hover:text-[#161511] border border-[rgba(22,21,17,0.1)]'
+              }`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${ambientEnabled && currentAmbient !== 'none' ? 'bg-[#5CC8CF] animate-pulse' : 'bg-[#5D594E]/40'}`} />
+              {ambientEnabled && currentAmbient !== 'none'
+                ? (lang === 'uz' ? 'Yoqilgan' : 'Вкл')
+                : (lang === 'uz' ? 'O\'chirilgan' : 'Выкл')}
+            </button>
+
+            {ambientEnabled && currentAmbient !== 'none' && (
+              <div className="flex items-center gap-2 pl-2 border-l border-[rgba(22,21,17,0.14)]">
+                <span className="text-[10px] text-[#5D594E] font-mono">{ambientVol}%</span>
+                <input
+                  type="range"
+                  min="5"
+                  max="50"
+                  step="5"
+                  value={ambientVol}
+                  onChange={(e) => setAmbientVol(parseInt(e.target.value))}
+                  className="w-16 accent-[#0E7C86] h-1 bg-[#ECE7DB] rounded-lg cursor-pointer"
+                  title={lang === 'uz' ? 'Fon ovozi balandligi' : 'Громкость фона'}
+                />
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setShowAmbientControls(false)}
+              className="text-[#5D594E] hover:text-[#161511] text-[10px] font-mono ml-1 underline cursor-pointer"
+            >
+              {lang === 'uz' ? 'Yashirish' : 'Скрыть'}
+            </button>
           </div>
-
-          {/* Soundscape Selector */}
-          <select
-            value={currentAmbient}
-            onChange={(e) => handleSelectAmbient(e.target.value as AmbientSoundscape)}
-            className="bg-white border border-[rgba(22,21,17,0.14)] text-[#161511] text-xs rounded-full px-2.5 py-1 font-medium focus:outline-none focus:border-[#0E7C86] cursor-pointer max-w-[170px] truncate"
-          >
-            {AMBIENT_SOUNDSCAPES.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.icon} {lang === 'uz' ? s.labelUz : s.labelRu}
-              </option>
-            ))}
-          </select>
-
+        ) : (
           <button
             type="button"
-            onClick={handleToggleAmbient}
-            className={`px-2.5 py-1 rounded-full font-semibold transition-all flex items-center gap-1 cursor-pointer text-xs ${
-              ambientEnabled && currentAmbient !== 'none'
-                ? 'bg-[#0E7C86] text-white shadow-2xs'
-                : 'bg-white text-[#5D594E] hover:text-[#161511] border border-[rgba(22,21,17,0.1)]'
-            }`}
+            onClick={() => setShowAmbientControls(true)}
+            className="text-[11px] font-mono text-[#5D594E] hover:text-[#0E7C86] flex items-center gap-1 px-2.5 py-1 rounded-full hover:bg-black/5 transition-colors cursor-pointer"
+            title={lang === 'uz' ? 'Fon saundtrekini sozlash' : 'Настроить фоновый трек'}
           >
-            <span className={`w-1.5 h-1.5 rounded-full ${ambientEnabled && currentAmbient !== 'none' ? 'bg-[#5CC8CF] animate-pulse' : 'bg-[#5D594E]/40'}`} />
-            {ambientEnabled && currentAmbient !== 'none'
-              ? (lang === 'uz' ? 'Yoqilgan' : 'Вкл')
-              : (lang === 'uz' ? 'O\'chirilgan' : 'Выкл')}
+            <Music className="w-3 h-3" />
+            <span>{lang === 'uz' ? 'Fon musiqasi' : 'Фоновая музыка'}</span>
           </button>
-
-          {ambientEnabled && currentAmbient !== 'none' && (
-            <div className="flex items-center gap-2 pl-2 border-l border-[rgba(22,21,17,0.14)]">
-              <span className="text-[10px] text-[#5D594E] font-mono">{ambientVol}%</span>
-              <input
-                type="range"
-                min="5"
-                max="50"
-                step="5"
-                value={ambientVol}
-                onChange={(e) => setAmbientVol(parseInt(e.target.value))}
-                className="w-16 accent-[#0E7C86] h-1 bg-[#ECE7DB] rounded-lg cursor-pointer"
-                title={lang === 'uz' ? 'Fon ovozi balandligi' : 'Громкость фона'}
-              />
-            </div>
-          )}
-
-          {isPlaying && ambientEnabled && currentAmbient !== 'none' && (
-            <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#0E7C86]/10 border border-[#0E7C86]/30 text-[#0A5A62] flex items-center gap-1 font-mono">
-              <span className="w-1.5 h-1.5 rounded-full bg-[#0E7C86] animate-ping" />
-              {lang === 'uz' ? 'Efirda yangramoqda' : 'Звучит в эфире'}
-            </span>
-          )}
-        </div>
+        )}
       </div>
 
       {/* Export & Download Section */}
