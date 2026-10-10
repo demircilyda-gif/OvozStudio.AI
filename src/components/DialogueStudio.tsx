@@ -47,8 +47,17 @@ import {
   ShieldCheck,
   Eraser,
   Lock,
+  Youtube,
+  Video,
+  StopCircle,
+  RefreshCw,
+  AlertCircle,
+  FileText,
+  Wand2,
+  ArrowLeftRight,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { YUGAY_BURKHANOV_TURNS, YUGAY_BURKHANOV_METADATA } from '../data/yugayBurkhanovPreset';
 
 interface DialogueStudioProps {
   voices: VoiceProfile[];
@@ -71,12 +80,16 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 }) => {
   const { isAuthenticated, requireAuth, useCredit, syncCredits, logGeneration } = useAuth();
 
-  // Speaker 1 (User's cloned voice)
+  // Master Audio Mode: 'continuous' (seamless 0.35s pause, recommended) vs 'time_aligned' (max 2s pause clamp)
+  const [masterAudioMode, setMasterAudioMode] = useState<'continuous' | 'time_aligned'>('continuous');
+  const [isDiarizing, setIsDiarizing] = useState<boolean>(false);
+
+  // Speaker 1 (User's cloned voice or selected host voice)
   const [speaker1VoiceId, setSpeaker1VoiceId] = useState<string>(() => {
-    return userClonedVoiceId || 'voice_17raj9ewke3g';
+    return userClonedVoiceId || 'jasur-business';
   });
-  const [speaker1Name, setSpeaker1Name] = useState<string>('Shokhrukh');
-  const [speaker1Role, setSpeaker1Role] = useState<string>('Boshlovchi (Podkaster)');
+  const [speaker1Name, setSpeaker1Name] = useState<string>('Artur Yugay');
+  const [speaker1Role, setSpeaker1Role] = useState<string>('Boshlovchi & Intervyuer');
   const [speaker1Tempo, setSpeaker1Tempo] = useState<string>('1.0x');
 
   // Keep speaker1VoiceId in sync with user's verified cloned voice
@@ -86,18 +99,44 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     }
   }, [userClonedVoiceId]);
 
-  // Speaker 2 (Guest / Expert) - Default to genuine female voice Aziza (Kore)
-  const [speaker2GenderFilter, setSpeaker2GenderFilter] = useState<'all' | 'female' | 'male'>('female');
+  // Speaker 2 (Guest / Expert) - Default to male guest for the interview
+  const [speaker2GenderFilter, setSpeaker2GenderFilter] = useState<'all' | 'female' | 'male'>('male');
   const [speaker2VoiceId, setSpeaker2VoiceId] = useState<string>(() => {
-    const aziza = voices.find((v) => v.id === 'aziza-ai' || v.baseVoice === 'Kore') || voices[1] || voices[0];
-    return aziza?.id || 'aziza-ai';
+    const fenrirVoice = voices.find((v) => v.id === 'farrux-tech' || v.baseVoice === 'Fenrir') || voices[1] || voices[0];
+    return fenrirVoice?.id || 'farrux-tech';
   });
-  const [speaker2Name, setSpeaker2Name] = useState<string>('Aziza');
-  const [speaker2Role, setSpeaker2Role] = useState<string>('AI & Fan Eksperti');
-  const [speaker2Gender, setSpeaker2Gender] = useState<'female' | 'male'>('female');
+  const [speaker2Name, setSpeaker2Name] = useState<string>('Ayubxon Burxonov');
+  const [speaker2Role, setSpeaker2Role] = useState<string>('Moliya & Biznes Eksperti');
+  const [speaker2Gender, setSpeaker2Gender] = useState<'female' | 'male'>('male');
   const [speaker2Tempo, setSpeaker2Tempo] = useState<string>('1.0x');
-  const [speaker2Timbre, setSpeaker2Timbre] = useState<string>('Mayin & Intellektual');
+  const [speaker2Timbre, setSpeaker2Timbre] = useState<string>('Tahliliy & Salobatli');
   const [speaker2Emotion, setSpeaker2Emotion] = useState<string>('thoughtful');
+
+  // YouTube 2-Speaker Dubbing & Import State (Supports long interviews up to 1.5 hours)
+  const [studioSourceMode, setStudioSourceMode] = useState<'prompt' | 'youtube'>('prompt');
+  const [youtubeImportUrl, setYoutubeImportUrl] = useState<string>('');
+  const [youtubeTargetLang, setYoutubeTargetLang] = useState<'uz' | 'ru'>('uz');
+  const [isImportingYoutube, setIsImportingYoutube] = useState<boolean>(false);
+  const [youtubeImportNotice, setYoutubeImportNotice] = useState<string | null>(null);
+  const [youtubeImportError, setYoutubeImportError] = useState<string | null>(null);
+  const [manualTranscriptText, setManualTranscriptText] = useState<string>('');
+  const [showManualTranscriptInput, setShowManualTranscriptInput] = useState<boolean>(false);
+  const [youtubeVideoId, setYoutubeVideoId] = useState<string | null>(null);
+  const [youtubeEmbedUrl, setYoutubeEmbedUrl] = useState<string | null>(null);
+  const [youtubeVideoTitle, setYoutubeVideoTitle] = useState<string | null>(null);
+  const [youtubeAuthorName, setYoutubeAuthorName] = useState<string | null>(null);
+  const [showOriginalTranscript, setShowOriginalTranscript] = useState<boolean>(true);
+
+  // Progressive Batch Synthesis State for long dialogues (avoids HTTP timeouts)
+  const [batchProgress, setBatchProgress] = useState<{
+    currentBatch: number;
+    totalBatches: number;
+    completedTurns: number;
+    totalTurns: number;
+    percent: number;
+    statusText: string;
+  } | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // Preview testing for speakers
   const [previewingSpeaker, setPreviewingSpeaker] = useState<'host1' | 'host2' | null>(null);
@@ -111,95 +150,97 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     voices.find((v) => v.gender === 'female') ||
     voices[1];
 
-  const handleSelectSpeaker2Voice = (vId: string) => {
-    setSpeaker2VoiceId(vId);
+  const handleSelectSpeaker1Voice = (vId: string) => {
+    setSpeaker1VoiceId(vId);
     const chosen = voices.find((v) => v.id === vId);
     if (chosen) {
-      const isFemale =
-        chosen.gender === 'female' ||
-        chosen.baseVoice === 'Kore' ||
-        chosen.baseVoice === 'Aoede' ||
-        chosen.baseVoice === 'Zephyr' ||
-        /aziza|madina|dilnoza|zarina|nodira|malika|zephyr|kore|aoede|ayol/i.test(chosen.name || chosen.id);
-      setSpeaker2Gender(isFemale ? 'female' : 'male');
-      if (chosen.tempo) setSpeaker2Tempo(chosen.tempo.match(/[\d.]+x/)?.[0] || '1.0x');
-      if (chosen.timbre) setSpeaker2Timbre(chosen.timbre);
+      const rawName = chosen.name || chosen.id;
+      const nameMatch = rawName.match(/^([^(]+)/);
+      const newName = (nameMatch?.[1] || rawName).trim();
+      const prevName = speaker1Name;
+      if (newName) {
+        setSpeaker1Name(newName);
+        setTurns((prev) =>
+          prev.map((t) => {
+            if (t.speakerId === 'HOST_1') {
+              return { ...t, speakerName: newName };
+            }
+            if (t.speakerId === 'HOST_2' && prevName && t.text.includes(prevName)) {
+              return { ...t, text: t.text.replaceAll(prevName, newName) };
+            }
+            return t;
+          })
+        );
+      }
+    }
+  };
 
-      if (chosen.name.includes('Aziza')) {
-        setSpeaker2Name('Aziza');
-        setSpeaker2Role('AI & Fan Eksperti');
-      } else if (chosen.name.includes('Madina')) {
-        setSpeaker2Name('Madina');
-        setSpeaker2Role('Jurnalist & Podkaster');
-      } else if (chosen.name.includes('Dilnoza')) {
-        setSpeaker2Name('Dilnoza');
-        setSpeaker2Role('Psixolog & Bloger');
-      } else if (chosen.name.includes('Zarina')) {
-        setSpeaker2Name('Zarina');
-        setSpeaker2Role('Adabiyot & Madaniyat');
-      } else if (chosen.name.includes('Nodira')) {
-        setSpeaker2Name('Nodira');
-        setSpeaker2Role('Biznes & Tahlilchi');
-      } else if (chosen.name.includes('Malika')) {
-        setSpeaker2Name('Malika');
-        setSpeaker2Role('Startap & Innovatsiya');
-      } else if (chosen.name.includes('Sevara') || chosen.name.includes('Zephyr')) {
-        setSpeaker2Name('Sevara');
-        setSpeaker2Role('Ilmiy & Texno Ekspert');
-      } else if (chosen.name.includes('Shahnoza')) {
-        setSpeaker2Name('Shahnoza');
-        setSpeaker2Role('Suxandon & Madaniyat');
-      } else if (chosen.name.includes('Rayhon')) {
-        setSpeaker2Name('Rayhon');
-        setSpeaker2Role('Audio-Kitob & Adabiyot');
-      } else if (chosen.name.includes('Gulzoda')) {
-        setSpeaker2Name('Gulzoda');
-        setSpeaker2Role('Pedagog & Ta\'lim');
-      } else if (chosen.name.includes('Umida')) {
-        setSpeaker2Name('Umida');
-        setSpeaker2Role('Tibbiyot & Salomatlik');
-      } else if (chosen.name.includes('Nigora')) {
-        setSpeaker2Name('Nigora');
-        setSpeaker2Role('Bolalar Adabiyoti');
-      } else if (chosen.name.includes('Feruza')) {
-        setSpeaker2Name('Feruza');
-        setSpeaker2Role('Oila & Munosabatlar');
-      } else if (chosen.name.includes('Jasur')) {
-        setSpeaker2Name('Jasur');
-        setSpeaker2Role('Tadbirkor & Biznes Ekspert');
-      } else if (chosen.name.includes('Otabek')) {
-        setSpeaker2Name('Otabek');
-        setSpeaker2Role('Quvnoq Boshlovchi');
-      } else if (chosen.name.includes('Ulug\'bek')) {
-        setSpeaker2Name('Ulug\'bek');
-        setSpeaker2Role('Tarixchi & Professor');
-      } else if (chosen.name.includes('Farrux')) {
-        setSpeaker2Name('Farrux');
-        setSpeaker2Role('IT Muhandis');
-      } else if (chosen.name.includes('Bobur')) {
-        setSpeaker2Name('Bobur');
-        setSpeaker2Role('Motivator & Spiker');
-      } else if (chosen.name.includes('Javohir')) {
-        setSpeaker2Name('Javohir');
-        setSpeaker2Role('Kino & Teatr Diktori');
-      } else if (chosen.name.includes('Sanjar')) {
-        setSpeaker2Name('Sanjar');
-        setSpeaker2Role('Radio Boshlovchi');
-      } else if (chosen.name.includes('Sherzod')) {
-        setSpeaker2Name('Sherzod');
-        setSpeaker2Role('Tahliliy Jurnalist');
-      } else if (chosen.name.includes('Eldor')) {
-        setSpeaker2Name('Eldor');
-        setSpeaker2Role('Moliya Mutaxassisi');
-      } else if (chosen.name.includes('Bekzod')) {
-        setSpeaker2Name('Bekzod');
-        setSpeaker2Role('Sport & Fitnes Murabbiyi');
-      } else if (chosen.name.includes('Alisher')) {
-        setSpeaker2Name('Alisher');
-        setSpeaker2Role('Dasturchi & Kiberxavfsizlik');
-      } else if (chosen.name.includes('Rustam')) {
-        setSpeaker2Name('Rustam');
-        setSpeaker2Role('Agrobiznes & Fermer');
+  const handleSelectSpeaker2Voice = (vId: string) => {
+    const chosen = voices.find((v) => v.id === vId);
+    if (!chosen) return;
+
+    setSpeaker2VoiceId(vId);
+    const isFemale =
+      chosen.gender === 'female' ||
+      chosen.baseVoice === 'Kore' ||
+      chosen.baseVoice === 'Aoede' ||
+      chosen.baseVoice === 'Zephyr' ||
+      /aziza|madina|dilnoza|zarina|nodira|malika|zephyr|kore|aoede|sevara|shahnoza|rayhon|gulzoda|umida|nigora|feruza|ayol/i.test(
+        chosen.name || chosen.id
+      );
+    setSpeaker2Gender(isFemale ? 'female' : 'male');
+    if (chosen.tempo) setSpeaker2Tempo(chosen.tempo.match(/[\d.]+x/)?.[0] || '1.0x');
+    if (chosen.timbre) setSpeaker2Timbre(chosen.timbre);
+
+    // Dynamically extract name and role from chosen voice (e.g. "Jasur (Tadbirkor & Biznes Ekspert)")
+    const rawName = chosen.name || chosen.id;
+    const nameMatch = rawName.match(/^([^(]+)(?:\((.*?)\))?/);
+    const extractedName = (nameMatch?.[1] || rawName).trim();
+    const extractedRole = (nameMatch?.[2] || chosen.style || (isFemale ? 'AI & Fan Eksperti' : 'Mutaxassis')).trim();
+
+    const previousSpeaker2Name = speaker2Name;
+    const newName = extractedName || (isFemale ? 'Aziza' : 'Jasur');
+    const newRole = extractedRole || (isFemale ? 'Ekspert' : 'Mutaxassis');
+
+    setSpeaker2Name(newName);
+    setSpeaker2Role(newRole);
+
+    // Synchronously update all turns assigned to HOST_2 so they reflect the chosen voice & name
+    setTurns((prev) =>
+      prev.map((t) => {
+        if (t.speakerId === 'HOST_2') {
+          return { ...t, speakerName: newName };
+        }
+        // Also update greeting in turn 1 if it referenced previous guest name
+        if (t.speakerId === 'HOST_1' && previousSpeaker2Name && t.text.includes(previousSpeaker2Name)) {
+          return { ...t, text: t.text.replaceAll(previousSpeaker2Name, newName) };
+        }
+        return t;
+      })
+    );
+  };
+
+  const handleSetSpeaker2GenderFilter = (gender: 'all' | 'female' | 'male') => {
+    setSpeaker2GenderFilter(gender);
+    if (gender === 'male' && speaker2Gender === 'female') {
+      const firstMale = voices.find(
+        (v) =>
+          !v.isReplicatedVoice &&
+          !v.id.includes('17raj9') &&
+          (v.gender === 'male' || ['Charon', 'Puck', 'Fenrir'].includes(v.baseVoice))
+      );
+      if (firstMale) {
+        handleSelectSpeaker2Voice(firstMale.id);
+      }
+    } else if (gender === 'female' && speaker2Gender === 'male') {
+      const firstFemale = voices.find(
+        (v) =>
+          !v.isReplicatedVoice &&
+          !v.id.includes('17raj9') &&
+          (v.gender === 'female' || ['Kore', 'Aoede', 'Zephyr'].includes(v.baseVoice))
+      );
+      if (firstFemale) {
+        handleSelectSpeaker2Voice(firstFemale.id);
       }
     }
   };
@@ -253,7 +294,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           voiceProfile: {
             voiceName: spkName,
             voiceId: prof?.voiceId || prof?.id,
-            baseVoice: prof?.baseVoice || (isFemaleSpeaker ? 'Kore' : 'Charon'),
+            baseVoice: prof?.baseVoice || (isFemaleSpeaker ? 'Kore' : (isH1 ? 'Charon' : 'Fenrir')),
             timbre: isH1 ? prof?.timbre : speaker2Timbre || prof?.timbre,
             tempo: isH1 ? speaker1Tempo : speaker2Tempo,
             customPersonaPrompt: prof?.customPersonaPrompt,
@@ -278,7 +319,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   };
 
   const [topic, setTopic] = useState<string>(
-    initialTopic || 'Sun\'iy intellekt va inson tafakkuri: Kim kimni boshqaradi?'
+    initialTopic || YUGAY_BURKHANOV_METADATA.title
   );
   const [tone, setTone] = useState<string>('Jonli va intellektual bahs');
 
@@ -288,75 +329,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   const [isSynthesizing, setIsSynthesizing] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
 
-  // Turns
+  // Turns — Defaults directly to Artur Yugay & Ayubxon Burxanov 73-turn interview with precise diarization
   const [turns, setTurns] = useState<DialogueTurn[]>(() => {
     if (initialTurns && initialTurns.length > 0) return initialTurns;
-    return [
-      {
-        id: 'turn-1',
-        speakerId: 'HOST_1',
-        speakerName: 'Shokhrukh',
-        text: 'Assalomu alaykum aziz do\'stlar! Bugun studiyamizda sun\'iy intellekt bo\'yicha yetakchi mutaxassis Aziza mehmon. Xush kelibsiz!',
-        emotion: 'excited',
-        musicCue: {
-          enabled: true,
-          cueType: 'intro',
-          soundscape: 'midnight-jazz',
-          volumePercent: 35,
-          labelUz: 'Kirish Jingle (Intro)',
-          labelRu: 'Вступительный джингл',
-          reasoning: 'Epizod boshida 6-8s dinamik jingle, boshlovchi salomi ostida pasayadi.',
-        },
-      },
-      {
-        id: 'turn-2',
-        speakerId: 'HOST_2',
-        speakerName: 'Aziza',
-        text: 'Va alaykum assalom, Shokhrukh! Taklif uchun katta rahmat. Bugungi mavzu haqiqatan ham har birimizning kelajagimizga taalluqli.',
-        emotion: 'thoughtful',
-        musicCue: {
-          enabled: false,
-          cueType: 'silence',
-          soundscape: 'none',
-          volumePercent: 0,
-          labelUz: 'Toza ovoz (Silence)',
-          labelRu: 'Чистый голос (без музыки)',
-          reasoning: 'Suhbatning asosiy qismida 100% toza nutq va diqqatni jamlash uchun musiqasiz.',
-        },
-      },
-      {
-        id: 'turn-3',
-        speakerId: 'HOST_1',
-        speakerName: 'Shokhrukh',
-        text: 'Ayting-chi, ko\'pchilik sun\'iy intellekt inson kasblarini yo\'q qiladi deb qo\'rqmoqda. Bu qo\'rquv qanchalik to\'g\'ri?',
-        emotion: 'skeptical',
-        musicCue: {
-          enabled: true,
-          cueType: 'stinger',
-          soundscape: 'tech-ambient',
-          volumePercent: 25,
-          labelUz: "O'tish Stingeri",
-          labelRu: 'Переходной акцент',
-          reasoning: "Dolzarb bahsli savolga o'tishda 2 soniyalik qisqa kiber-stinger.",
-        },
-      },
-      {
-        id: 'turn-4',
-        speakerId: 'HOST_2',
-        speakerName: 'Aziza',
-        text: 'Aslida AI insonni almashtirmaydi, balki AIdan unumli foydalangan inson boshqa mutaxassislardan ancha oldinga o\'tib ketadi.',
-        emotion: 'thoughtful',
-        musicCue: {
-          enabled: true,
-          cueType: 'emotional',
-          soundscape: 'calm-piano',
-          volumePercent: 14,
-          labelUz: 'Mayin Pianino Foni',
-          labelRu: 'Эмоциональный эмбиент',
-          reasoning: 'Kelajak haqidagi chuqur xulosani ta\'kidlash uchun mayin sokin neoklassik fon.',
-        },
-      },
-    ];
+    return YUGAY_BURKHANOV_TURNS;
   });
 
   // Pre-calculate estimated generation duration for dialogue (parallel batches of 3)
@@ -403,10 +379,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [activeTurnIndex, setActiveTurnIndex] = useState<number>(-1);
 
-  // Ambient Soundscape for Interviews
+  // Ambient Soundscape for Interviews (Disabled by default for 100% clean, noise-free studio speech)
   const [ambientSound, setAmbientSound] = useState<AmbientSoundscape>('midnight-jazz');
-  const [ambientEnabled, setAmbientEnabled] = useState<boolean>(true);
-  const [ambientVolume, setAmbientVolume] = useState<number>(18);
+  const [ambientEnabled, setAmbientEnabled] = useState<boolean>(false);
+  const [ambientVolume, setAmbientVolume] = useState<number>(14);
   const ambientAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // Maintain ambient loop in DialogueStudio
@@ -587,6 +563,80 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     );
   };
 
+  // Smart Diarize all turns into Host 1 (Artur Yugay) vs Host 2 (Oybek Burxanov)
+  const handleSmartDiarizeTurns = async () => {
+    if (turns.length === 0) return;
+    setIsDiarizing(true);
+    try {
+      const res = await authFetch('/api/podcast/smart-diarize-turns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          turns,
+          host1Name: speaker1Name || 'Artur Yugay',
+          host2Name: speaker2Name || 'Oybek Burxanov',
+        }),
+      });
+
+      if (!res.ok) {
+        throw new Error('Diarizatsiyada xatolik yuz berdi');
+      }
+
+      const data = await res.json();
+      if (Array.isArray(data.turns)) {
+        setTurns(data.turns);
+        alert(
+          lang === 'uz'
+            ? `✅ Barcha ${data.turns.length} ta replika Artur Yugay va Oybek Burxanov o'rtasida muvaffaqiyatli taqsimlandi!`
+            : `✅ Все ${data.turns.length} реплик успешно распределены между Артуром Югаем и Ойбеком Бурхановым!`
+        );
+      }
+    } catch (e: any) {
+      alert(`Xatolik: ${e.message}`);
+    } finally {
+      setIsDiarizing(false);
+    }
+  };
+
+  // Invert all speaker roles across turns (HOST_1 <-> HOST_2)
+  const handleInvertAllSpeakers = () => {
+    setTurns((prev) =>
+      prev.map((t) => {
+        const isH1 = t.speakerId === 'HOST_1';
+        return {
+          ...t,
+          speakerId: isH1 ? 'HOST_2' : 'HOST_1',
+          speakerName: isH1 ? speaker2Name : speaker1Name,
+        };
+      })
+    );
+  };
+
+  // Load the full 73-turn Arthur Yugay & Ayubxon Burkhanov interview preset
+  const handleLoadYugayBurkhanovPreset = () => {
+    setTopic(YUGAY_BURKHANOV_METADATA.title);
+    setSpeaker1Name(YUGAY_BURKHANOV_METADATA.host1Name);
+    setSpeaker1Role(YUGAY_BURKHANOV_METADATA.host1Role);
+    setSpeaker1VoiceId(YUGAY_BURKHANOV_METADATA.host1VoiceId);
+    setSpeaker2Name(YUGAY_BURKHANOV_METADATA.host2Name);
+    setSpeaker2Role(YUGAY_BURKHANOV_METADATA.host2Role);
+    setSpeaker2VoiceId(YUGAY_BURKHANOV_METADATA.host2VoiceId);
+    setSpeaker2Gender('male');
+    setSpeaker2GenderFilter('male');
+    setTurns(YUGAY_BURKHANOV_TURNS);
+    setYoutubeVideoTitle(YUGAY_BURKHANOV_METADATA.title);
+    setYoutubeAuthorName("Arthur Yugay");
+    setYoutubeVideoId(YUGAY_BURKHANOV_METADATA.videoId);
+    setYoutubeEmbedUrl(YUGAY_BURKHANOV_METADATA.embedUrl);
+    setMasterAudioBase64(null);
+    setSynthesizedTurns([]);
+    setYoutubeImportNotice(
+      lang === 'uz'
+        ? `✅ "Artur Yugay & Ayubxon Burxanov" intervyusi yuklandi: 73 ta replika, 4 ta bob, aniq vaqtli tarjima va 2 ta mustaqil erkak ovozi!`
+        : `✅ Загружено интервью «Артур Югай и Аюбхон Бурханов»: 73 реплики, 4 главы, точный перевод по хронометражу и 2 независимых мужских голоса!`
+    );
+  };
+
   // Clean all turns from bracketed conditions and timing tags
   const handleCleanAllTurns = () => {
     setTurns((prev) =>
@@ -618,7 +668,163 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     );
   };
 
-  // Synthesize Dialogue
+  // Import & Translate YouTube Interview (supports long videos up to 1.5 hours)
+  const handleImportYouTubeInterview = async () => {
+    const hasUrl = Boolean(youtubeImportUrl.trim());
+    const hasManual = Boolean(manualTranscriptText.trim());
+
+    if (!hasUrl && !hasManual) {
+      setYoutubeImportError(
+        lang === 'uz'
+          ? "Iltimos, YouTube video havolasini kiriting yoki quyidagi matn maydoniga transkript/mavzuni yozing!"
+          : "Пожалуйста, введите ссылку на YouTube видео или вставьте текст/тему ниже!"
+      );
+      return;
+    }
+
+    if (
+      !requireAuth(
+        () => {},
+        lang === 'uz'
+          ? "YouTube videoni 2 kishilik intervyuga o'girish faqat tizim foydalanuvchilari uchun."
+          : "Импорт YouTube видео доступен только авторизованным пользователям."
+      )
+    ) {
+      return;
+    }
+
+    setIsImportingYoutube(true);
+    setYoutubeImportError(null);
+    setYoutubeImportNotice(
+      lang === 'uz'
+        ? "YouTube ma'lumotlari tahlil qilinmoqda va Gemini 3.8 Flash orqali 2 kishilik adabiy dialogga tarjima qilinmoqda..."
+        : "Обработка данных YouTube и перевод через Gemini 3.8 Flash в двухголосый диалог..."
+    );
+
+    try {
+      const res = await authFetch('/api/podcast/import-youtube-interview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: youtubeImportUrl.trim(),
+          manualTranscript: manualTranscriptText.trim(),
+          targetLanguage: youtubeTargetLang,
+          host1Name: speaker1Name || 'Boshlovchi',
+          host2Name: speaker2Name || 'Mehmon',
+          tone: 'Jonli va intellektual suhbat',
+        }),
+      });
+
+      if (!res.ok) {
+        let msg = lang === 'uz' ? 'YouTube intervyusini import qilishda xatolik' : 'Ошибка импорта YouTube видео';
+        try {
+          const errData = await res.json();
+          msg = (lang === 'ru' && errData.message_ru) ? errData.message_ru : (errData.error || errData.message || msg);
+        } catch {}
+        throw new Error(msg);
+      }
+
+      const data = await res.json();
+      if (Array.isArray(data.turns) && data.turns.length > 0) {
+        setTurns(
+          data.turns.map((t: any, idx: number) => ({
+            id: t.id || `yt-turn-${idx + 1}-${Date.now()}`,
+            speakerId: t.speakerId === 'HOST_2' ? 'HOST_2' : 'HOST_1',
+            speakerName: t.speakerName || (t.speakerId === 'HOST_2' ? speaker2Name : speaker1Name),
+            text: t.text,
+            originalText: t.originalText,
+            timecode: t.timecode,
+            startSec: t.startSec,
+            endSec: t.endSec,
+            durationSec: t.durationSec,
+            chapter: t.chapter,
+            emotion: t.emotion || 'thoughtful',
+          }))
+        );
+        if (data.videoId) setYoutubeVideoId(data.videoId);
+        if (data.embedUrl) setYoutubeEmbedUrl(data.embedUrl);
+        if (data.videoTitle) setYoutubeVideoTitle(data.videoTitle);
+        if (data.authorName) setYoutubeAuthorName(data.authorName);
+        if (data.turns[0]?.speakerName) {
+          const h1 = data.turns.find((t: any) => t.speakerId === 'HOST_1');
+          const h2 = data.turns.find((t: any) => t.speakerId === 'HOST_2');
+          if (h1?.speakerName) setSpeaker1Name(h1.speakerName);
+          if (h2?.speakerName) {
+            setSpeaker2Name(h2.speakerName);
+            const isH2Male = /oybek|ayubxon|burxonov|yugay|artur|jasur|farrux|muzaffar|rustam|alisher|nodir|sherzod|erkak|boshlovchi|mehmon/i.test(
+              h2.speakerName
+            );
+            if (isH2Male) {
+              setSpeaker2Gender('male');
+              setSpeaker2GenderFilter('male');
+              const maleVoice = voices.find(
+                (v) =>
+                  !v.isReplicatedVoice &&
+                  !v.id.includes('17raj9') &&
+                  (v.gender === 'male' || v.baseVoice === 'Fenrir' || v.baseVoice === 'Puck')
+              );
+              if (maleVoice) {
+                setSpeaker2VoiceId(maleVoice.id);
+              }
+            }
+          }
+        }
+        setTopic(data.title || data.videoTitle || 'YouTube Intervyu');
+        setYoutubeImportError(null);
+        setYoutubeImportNotice(
+          lang === 'uz'
+            ? `✅ "${data.videoTitle || 'Video'}" dan ${data.turns.length} ta replika lipsynk vaqtiga sig'dirilib to'ch-v-to'ch tarjima qilindi (~${data.estimatedDurationMinutes || 15} daqiqa)! Endi quyida video bilan tekshirishingiz yoki sintez qilishingiz mumkin.`
+            : `✅ Успешно импортировано и переведено точь-в-точь ${data.turns.length} реплик из "${data.videoTitle || 'Видео'}" (~${data.estimatedDurationMinutes || 15} мин) с привязкой к липсинк-таймкодам! Вы можете проверить реплики ниже или запустить озвучку.`
+        );
+      } else {
+        throw new Error(lang === 'uz' ? 'Videodan replikalar ajratib olinmadi' : 'Не удалось получить реплики из видео');
+      }
+    } catch (e: any) {
+      setYoutubeImportNotice(null);
+      setYoutubeImportError(e.message);
+      setShowManualTranscriptInput(true);
+    } finally {
+      setIsImportingYoutube(false);
+    }
+  };
+
+  // Stop Progressive Synthesis and stitch whatever has been synthesized so far
+  const handleStopSynthesis = async () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    if (synthesizedTurns.length > 0) {
+      try {
+        setBatchProgress((prev) =>
+          prev
+            ? {
+                ...prev,
+                statusText:
+                  lang === 'uz'
+                    ? "To'xtatildi. Tayyor bo'lgan replikalar birlashtirilmoqda..."
+                    : 'Остановлено. Склейка уже готовых реплик...',
+              }
+            : null
+        );
+        const stitchRes = await authFetch('/api/podcast/stitch-dialogue-turns', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ turns: synthesizedTurns }),
+        });
+        if (stitchRes.ok) {
+          const stitchData = await stitchRes.json();
+          setMasterAudioBase64(stitchData.masterAudioBase64);
+          setTotalDuration(stitchData.totalDurationSeconds || 0);
+        }
+      } catch (err) {
+        console.warn('Stitch on stop error:', err);
+      }
+    }
+    setIsSynthesizing(false);
+    setBatchProgress(null);
+  };
+
+  // Progressive Batch Dialogue Synthesis (handles 10 min to 1.5 hours without HTTP timeouts)
   const handleSynthesizeDialogue = async () => {
     if (
       !requireAuth(
@@ -632,80 +838,215 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
     const invalidTurn = turns.find((t) => !t.text.trim());
     if (invalidTurn) {
-      alert('Barcha replikalar uchun matn kiritilishi lozim!');
+      alert(lang === 'uz' ? 'Barcha replikalar uchun matn kiritilishi lozim!' : 'Все реплики должны содержать текст!');
       return;
     }
 
     setIsSynthesizing(true);
-    try {
-      const res = await authFetch('/api/podcast/synthesize-dialogue', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          turns,
-          host1Voice: {
-            voiceId: speaker1Profile?.voiceId || speaker1Profile?.id || 'voice_17raj9ewke3g',
-            baseVoice: speaker1Profile?.baseVoice || 'Charon',
-            gender: 'male',
-            tempo: speaker1Tempo,
-          },
-          host2Voice: {
-            voiceId: speaker2Profile?.voiceId || speaker2Profile?.id,
-            baseVoice: speaker2Profile?.baseVoice || (speaker2Gender === 'female' ? 'Kore' : 'Charon'),
-            gender: speaker2Gender,
-            tempo: speaker2Tempo,
-            timbre: speaker2Timbre || speaker2Profile?.timbre,
-            customPersonaPrompt: speaker2Profile?.customPersonaPrompt,
-            role: speaker2Role,
-          },
-        }),
-      });
+    abortControllerRef.current = new AbortController();
 
-      if (!res.ok) {
-        let errMessage = lang === 'uz' ? 'Muloqot sintezida xatolik yuz berdi' : 'Ошибка при синтезе диалога';
-        try {
-          const err = await res.json();
-          errMessage = (lang === 'ru' && err.message_ru) ? err.message_ru : (err.message || err.error || errMessage);
-        } catch {
-          const raw = await res.text().catch(() => '');
-          if (res.status === 504 || res.status === 500) {
-            errMessage = lang === 'uz'
-              ? 'Server javob berish vaqti tugadi yoki server band. Iltimos, qaytadan urinib ko\'ring.'
-              : 'Время ожидания ответа сервера истекло. Пожалуйста, попробуйте еще раз.';
-          } else if (raw) {
-            errMessage = raw;
+    const host1VoicePayload = {
+      voiceId: speaker1Profile?.voiceId || speaker1Profile?.id || 'voice_17raj9ewke3g',
+      name: speaker1Name,
+      speakerName: speaker1Name,
+      baseVoice: speaker1Profile?.baseVoice || 'Charon',
+      gender: 'male',
+      tempo: speaker1Tempo,
+    };
+    const host2VoicePayload = {
+      voiceId: speaker2Profile?.voiceId || speaker2Profile?.id,
+      name: speaker2Name,
+      speakerName: speaker2Name,
+      baseVoice: speaker2Profile?.baseVoice || (speaker2Gender === 'female' ? 'Kore' : 'Fenrir'),
+      gender: speaker2Gender,
+      tempo: speaker2Tempo,
+      timbre: speaker2Timbre || speaker2Profile?.timbre,
+      customPersonaPrompt: speaker2Profile?.customPersonaPrompt,
+      role: speaker2Role,
+    };
+
+    // If small dialogue (<= 4 turns), run single-shot
+    if (turns.length <= 4) {
+      try {
+        const res = await authFetch('/api/podcast/synthesize-dialogue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: abortControllerRef.current.signal,
+          body: JSON.stringify({
+            turns,
+            host1Voice: host1VoicePayload,
+            host2Voice: host2VoicePayload,
+            masterAudioMode,
+          }),
+        });
+
+        if (!res.ok) {
+          let errMessage = lang === 'uz' ? 'Muloqot sintezida xatolik yuz berdi' : 'Ошибка при синтезе диалога';
+          try {
+            const err = await res.json();
+            errMessage = (lang === 'ru' && err.message_ru) ? err.message_ru : (err.message || err.error || errMessage);
+          } catch {
+            const raw = await res.text().catch(() => '');
+            if (raw) errMessage = raw;
+          }
+          throw new Error(errMessage);
+        }
+
+        const data = await res.json();
+        setMasterAudioBase64(data.masterAudioBase64);
+        setTotalDuration(data.totalDurationSeconds || 0);
+        setSynthesizedTurns(data.turns || []);
+        setIsPlaying(false);
+        setActiveTurnIndex(-1);
+
+        if (typeof data.creditsRemaining === 'number') {
+          syncCredits(data.creditsRemaining);
+        } else {
+          await useCredit(1);
+        }
+        await logGeneration('podcast', topic || '2 Ovozli Intervyu', 1);
+      } catch (e: any) {
+        if (e.name !== 'AbortError') {
+          alert(`Xatolik: ${e.message}`);
+        }
+      } finally {
+        setIsSynthesizing(false);
+        setBatchProgress(null);
+      }
+      return;
+    }
+
+    // Long dialogue (5 to 100+ turns, up to 1.5 hours):
+    // Execute progressive 5-turn batches to eliminate HTTP gateway timeouts (504)
+    const BATCH_SIZE = 5;
+    const totalBatches = Math.ceil(turns.length / BATCH_SIZE);
+    const accumulatedTurns: any[] = [];
+
+    setBatchProgress({
+      currentBatch: 1,
+      totalBatches,
+      completedTurns: 0,
+      totalTurns: turns.length,
+      percent: 0,
+      statusText:
+        lang === 'uz'
+          ? `1.5 soatlik intervyu boshlanmoqda (1/${totalBatches}-paket)...`
+          : `Запуск генерации (пакет 1/${totalBatches})...`,
+    });
+
+    try {
+      for (let b = 0; b < totalBatches; b++) {
+        if (abortControllerRef.current?.signal.aborted) {
+          break;
+        }
+
+        const startIdx = b * BATCH_SIZE;
+        const endIdx = Math.min(turns.length, (b + 1) * BATCH_SIZE);
+        const batchTurns = turns.slice(startIdx, endIdx);
+
+        setBatchProgress({
+          currentBatch: b + 1,
+          totalBatches,
+          completedTurns: accumulatedTurns.length,
+          totalTurns: turns.length,
+          percent: Math.round((accumulatedTurns.length / turns.length) * 100),
+          statusText:
+            lang === 'uz'
+              ? `Paket ${b + 1}/${totalBatches} generatsiya qilinmoqda (${startIdx + 1}–${endIdx}-replikalar)...`
+              : `Генерация пакета ${b + 1}/${totalBatches} (реплики ${startIdx + 1}–${endIdx})...`,
+        });
+
+        // Retry loop for each batch (up to 2 attempts)
+        let batchData: any = null;
+        let lastErr: any = null;
+
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            const res = await authFetch('/api/podcast/synthesize-dialogue', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              signal: abortControllerRef.current?.signal,
+              body: JSON.stringify({
+                turns: batchTurns,
+                skipMasterStitch: true,
+                host1Voice: host1VoicePayload,
+                host2Voice: host2VoicePayload,
+                masterAudioMode,
+              }),
+            });
+
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              throw new Error(err.message || err.error || `HTTP ${res.status}`);
+            }
+
+            batchData = await res.json();
+            break;
+          } catch (err: any) {
+            lastErr = err;
+            if (abortControllerRef.current?.signal.aborted) break;
+            if (attempt < 2) {
+              await new Promise((r) => setTimeout(r, 2000));
+            }
           }
         }
-        throw new Error(errMessage);
+
+        if (!batchData) {
+          throw new Error(
+            lang === 'uz'
+              ? `${b + 1}-paketda xatolik: ${lastErr?.message || 'aloqa uzildi'}`
+              : `Ошибка в пакете ${b + 1}: ${lastErr?.message || 'сбой сети'}`
+          );
+        }
+
+        if (Array.isArray(batchData.turns)) {
+          accumulatedTurns.push(...batchData.turns);
+          setSynthesizedTurns([...accumulatedTurns]);
+        }
       }
 
-      let data: any;
-      try {
-        data = await res.json();
-      } catch {
-        throw new Error(
-          lang === 'uz'
-            ? 'Serverdan kutilmagan javob qaytdi. Qaytadan urinib ko\'ring.'
-            : 'Сервер вернул неожиданный ответ. Попробуйте еще раз.'
-        );
-      }
-      setMasterAudioBase64(data.masterAudioBase64);
-      setTotalDuration(data.totalDurationSeconds || 0);
-      setSynthesizedTurns(data.turns || []);
-      setIsPlaying(false);
-      setActiveTurnIndex(-1);
+      // Stitch all accumulated batch audio into ONE unified master podcast track
+      if (accumulatedTurns.length > 0) {
+        setBatchProgress({
+          currentBatch: totalBatches,
+          totalBatches,
+          completedTurns: accumulatedTurns.length,
+          totalTurns: turns.length,
+          percent: 98,
+          statusText:
+            lang === 'uz'
+              ? `Barcha ${accumulatedTurns.length} ta replika birlashtirilmoqda (Master audio montaj)...`
+              : `Склейка всех ${accumulatedTurns.length} реплик в единый мастер-трек...`,
+        });
 
-      // Sync remaining credits or fallback
-      if (typeof data.creditsRemaining === 'number') {
-        syncCredits(data.creditsRemaining);
-      } else {
-        await useCredit(1);
+        const stitchRes = await authFetch('/api/podcast/stitch-dialogue-turns', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ turns: accumulatedTurns, masterAudioMode }),
+        });
+
+        if (stitchRes.ok) {
+          const stitchData = await stitchRes.json();
+          setMasterAudioBase64(stitchData.masterAudioBase64);
+          setTotalDuration(stitchData.totalDurationSeconds || 0);
+          setSynthesizedTurns(accumulatedTurns);
+          setIsPlaying(false);
+          setActiveTurnIndex(-1);
+          await useCredit(1);
+          await logGeneration('podcast', topic || '2 Ovozli Intervyu', 1);
+        } else {
+          throw new Error(
+            lang === 'uz' ? 'Replikalarni birlashtirishda xatolik yuz berdi' : 'Ошибка склейки реплик в мастер-трек'
+          );
+        }
       }
-      await logGeneration('podcast', topic || '2 Ovozli Intervyu', 1);
     } catch (e: any) {
-      alert(`Xatolik: ${e.message}`);
+      if (e.name !== 'AbortError') {
+        alert(`Xatolik: ${e.message}`);
+      }
     } finally {
       setIsSynthesizing(false);
+      setBatchProgress(null);
     }
   };
 
@@ -1012,11 +1353,11 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left: Speaker Configuration & Script Builder (8 cols) */}
         <div className="lg:col-span-8 space-y-6">
-          {/* STEP 1: Dialogue Topic & AI Script Generator + Document Upload */}
+          {/* STEP 1: Dialogue Topic & AI Script Generator + YouTube Dubbing + Document Upload */}
           <div className="border border-[rgba(22,21,17,0.14)] rounded-[20px] bg-[rgba(255,255,255,0.52)] backdrop-blur-sm p-6 space-y-4 shadow-[0_30px_50px_-30px_rgba(22,21,17,0.15)]">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.14em] text-[#0A5A62] flex-1">
-                <span>01 — Dialog mavzusi va ssenariy</span>
+                <span>01 — Dialog manbasi va ssenariy</span>
                 <span className="h-[1px] flex-1 bg-[rgba(22,21,17,0.14)] mr-3" />
               </div>
 
@@ -1032,87 +1373,269 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
               )}
             </div>
 
-            {/* Duration Selector & Timing Info */}
-            <div className="p-3.5 bg-white border border-[rgba(22,21,17,0.14)] rounded-xl space-y-2.5 shadow-xs">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-[#161511] flex items-center gap-1.5">
-                  <Clock className="w-3.5 h-3.5 text-[#0E7C86]" />
-                  {lang === 'uz' ? 'Intervyu Davomiyligi:' : 'Длительность интервью:'}
-                </span>
-                <span className="text-[11px] font-mono text-[#5D594E]">
-                  {turns.length} {lang === 'uz' ? 'replika' : 'реплик'} · ~{Math.max(1, Math.round(turns.reduce((acc, t) => acc + t.text.trim().split(/\s+/).filter(Boolean).length, 0) / 125))} {lang === 'uz' ? 'daqiqa' : 'мин'}
-                </span>
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {[
-                  { id: '15 daqiqa', label: '15 daq', desc: '18 ta replika' },
-                  { id: '30 daqiqa', label: '30 daqiqa', desc: '26 ta replika' },
-                  { id: '45 daqiqa', label: '45 daqiqa', desc: '36 ta replika' },
-                  { id: '60 daqiqa (1 soat)', label: '60 daqiqa (1 soat)', desc: 'Katta intervyu' },
-                ].map((d) => (
-                  <button
-                    key={d.id}
-                    type="button"
-                    onClick={() => setTargetDuration(d.id)}
-                    className={`btn-pill text-xs py-1.5 px-3.5 transition-all cursor-pointer ${
-                      targetDuration === d.id
-                        ? 'bg-[#161511] text-[#F4F1EA] font-semibold border-[#161511]'
-                        : 'bg-transparent border-[rgba(22,21,17,0.14)] text-[#5D594E] hover:border-[#161511] hover:text-[#161511]'
-                    }`}
-                  >
-                    <div>{d.label}</div>
-                  </button>
-                ))}
-                {!isGeneratingScript && !isExpandingDialogue && (
-                  <PreCalculationBadge
-                    estimatedSeconds={estimatedInterviewScriptSeconds}
-                    lang={lang}
-                    className="ml-auto"
-                  />
-                )}
-              </div>
+            {/* Mode Switcher: AI Script Generator vs YouTube Dubbing (up to 1.5 hours) */}
+            <div className="flex items-center gap-2 border-b border-[rgba(22,21,17,0.1)] pb-3">
+              <button
+                type="button"
+                onClick={() => setStudioSourceMode('prompt')}
+                className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                  studioSourceMode === 'prompt'
+                    ? 'bg-[#161511] text-[#F4F1EA] shadow-xs'
+                    : 'text-[#5D594E] hover:text-[#161511] hover:bg-black/5'
+                }`}
+              >
+                <Sparkles className="w-3.5 h-3.5 text-[#5CC8CF]" />
+                <span>{lang === 'uz' ? 'Mavzu bo‘yicha ssenariy' : 'Сценарий по теме'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setStudioSourceMode('youtube')}
+                className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                  studioSourceMode === 'youtube'
+                    ? 'bg-[#C4552D] text-white shadow-xs'
+                    : 'text-[#5D594E] hover:text-[#C4552D] hover:bg-[#C4552D]/10'
+                }`}
+              >
+                <Youtube className="w-3.5 h-3.5 text-white" />
+                <span>{lang === 'uz' ? 'YouTube Dublyaj (1.5 soatgacha)' : 'YouTube Дубляж (до 1.5 ч)'}</span>
+              </button>
             </div>
 
-            <div className="flex flex-col sm:flex-row gap-2">
-              <input
-                type="text"
-                value={topic}
-                onChange={(e) => setTopic(e.target.value)}
-                placeholder={lang === 'uz' ? "Intervyu mavzusi (masalan: Sun'iy intellekt kelajagi va O'zbekiston)..." : "Тема интервью..."}
-                className="flex-1 bg-white border border-[rgba(22,21,17,0.14)] rounded-xl px-4 py-2.5 text-xs sm:text-sm text-[#161511] placeholder:text-[#5D594E]/60 focus:outline-none focus:border-[#0E7C86]"
-              />
-              <button
-                onClick={handleGenerateInterview}
-                disabled={isGeneratingScript || !topic.trim()}
-                className="btn-pill btn-solid text-xs py-2.5 px-4 flex items-center justify-center gap-1.5 shrink-0"
-              >
-                <Sparkles className={`w-3.5 h-3.5 text-[#5CC8CF] ${isGeneratingScript ? 'animate-spin' : ''}`} />
-                {isGeneratingScript ? (
-                  <>
-                    <span>{lang === 'uz' ? `Yozilmoqda: ~${interviewScriptCountdown.formattedRemaining}` : `Генерация: ~${interviewScriptCountdown.formattedRemaining}`}</span>
-                    <span className="font-mono text-[10px] bg-white/20 px-1.5 py-0.5 rounded-full">{interviewScriptCountdown.progressPercent}%</span>
-                  </>
-                ) : (
-                  lang === 'uz' ? `AI Intervyu Matni (${targetDuration})` : `AI Диалог (${targetDuration})`
+            {studioSourceMode === 'youtube' ? (
+              /* YouTube Interview Import & Translation UI */
+              <div className="p-4 bg-white border border-[rgba(196,85,45,0.25)] rounded-xl space-y-3.5 shadow-2xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-[#161511] flex items-center gap-1.5">
+                    <Youtube className="w-4 h-4 text-[#C4552D]" />
+                    {lang === 'uz' ? 'YouTube Video Havolasi (1.5 soatgacha):' : 'Ссылка на YouTube видео (до 1.5 часов):'}
+                  </span>
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <span className="text-[10px] uppercase font-mono text-[#5D594E]">
+                      {lang === 'uz' ? 'Tarjima tili:' : 'Язык перевода:'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setYoutubeTargetLang('uz')}
+                      className={`px-2 py-0.5 rounded-full text-[11px] font-semibold transition-all ${
+                        youtubeTargetLang === 'uz'
+                          ? 'bg-[#0E7C86] text-white'
+                          : 'bg-[#F4F1EA] text-[#5D594E] hover:text-[#161511]'
+                      }`}
+                    >
+                      🇺🇿 Oʻzbekcha
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setYoutubeTargetLang('ru')}
+                      className={`px-2 py-0.5 rounded-full text-[11px] font-semibold transition-all ${
+                        youtubeTargetLang === 'ru'
+                          ? 'bg-[#0E7C86] text-white'
+                          : 'bg-[#F4F1EA] text-[#5D594E] hover:text-[#161511]'
+                      }`}
+                    >
+                      🇷🇺 Русский
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input
+                    type="url"
+                    value={youtubeImportUrl}
+                    onChange={(e) => {
+                      setYoutubeImportUrl(e.target.value);
+                      if (youtubeImportError) setYoutubeImportError(null);
+                    }}
+                    placeholder="https://www.youtube.com/watch?v=... yoki youtu.be/..."
+                    className="flex-1 bg-[#FAF8F3] border border-[rgba(22,21,17,0.14)] rounded-xl px-4 py-2.5 text-xs sm:text-sm text-[#161511] placeholder:text-[#5D594E]/60 focus:outline-none focus:border-[#C4552D]"
+                  />
+                  <button
+                    onClick={handleImportYouTubeInterview}
+                    disabled={isImportingYoutube || (!youtubeImportUrl.trim() && !manualTranscriptText.trim())}
+                    className="btn-pill btn-solid text-xs py-2.5 px-4 flex items-center justify-center gap-1.5 shrink-0 bg-[#C4552D] hover:bg-[#A9431E] border-none text-white cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isImportingYoutube ? 'animate-spin' : ''}`} />
+                    <span>
+                      {isImportingYoutube
+                        ? (lang === 'uz' ? 'Tahlil qilinmoqda...' : 'Обработка...')
+                        : (lang === 'uz' ? 'Yuklash & Tarjima Qilish' : 'Импорт и перевод')}
+                    </span>
+                  </button>
+                </div>
+
+                {/* Error Banner (Visible in UI instead of suppressed alert) */}
+                {youtubeImportError && (
+                  <div className="p-3.5 bg-[#FEF2F2] border border-[#FCA5A5] rounded-xl text-xs text-[#991B1B] space-y-2">
+                    <div className="flex items-start gap-2 font-semibold">
+                      <AlertCircle className="w-4 h-4 text-[#DC2626] shrink-0 mt-0.5" />
+                      <span>{youtubeImportError}</span>
+                    </div>
+                    <p className="text-[11px] text-[#B91C1C] pl-6">
+                      {lang === 'uz'
+                        ? "Agar video YouTube'da o'chirilgan yoki maxfiy bo'lsa, quyidagi matn maydoniga intervyu matni, tezislari yoki subtitrlarini nusxalab qo'ying — tizim uni 2 ovozli to'liq intervyuga aylantirib beradi!"
+                        : "Если видео закрыто или удалено на YouTube, скопируйте текст, субтитры или тезисы в поле ниже — AI озвучит их двумя голосами!"}
+                    </p>
+                  </div>
                 )}
-              </button>
-              <button
-                onClick={handleExpandInterview}
-                disabled={isExpandingDialogue || turns.length === 0}
-                className="btn-pill btn-ghost text-xs py-2.5 px-3.5 flex items-center justify-center gap-1.5 shrink-0 text-[#C4552D] border-[rgba(196,85,45,0.4)]"
-                title="Suhbatni yana 15 daqiqaga kengaytirish"
-              >
-                <Sparkles className={`w-3.5 h-3.5 ${isExpandingDialogue ? 'animate-spin' : ''}`} />
-                {isExpandingDialogue ? (
-                  <>
-                    <span>{lang === 'uz' ? `+15 daq: ~${interviewScriptCountdown.formattedRemaining}` : `+15 мин: ~${interviewScriptCountdown.formattedRemaining}`}</span>
-                    <span className="font-mono text-[10px] bg-white/20 px-1.5 py-0.5 rounded-full">{interviewScriptCountdown.progressPercent}%</span>
-                  </>
-                ) : (
-                  lang === 'uz' ? '+15 daq' : '+15 мин'
+
+                {/* Success Notice Banner */}
+                {youtubeImportNotice && (
+                  <div className="p-3.5 bg-[rgba(14,124,134,0.08)] border border-[rgba(14,124,134,0.25)] rounded-xl text-xs text-[#0A5A62] leading-relaxed flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-[#0E7C86] shrink-0" />
+                    <span>{youtubeImportNotice}</span>
+                  </div>
                 )}
-              </button>
-            </div>
+
+                {/* Manual Text Fallback Toggle & Textarea */}
+                <div className="pt-1 border-t border-[rgba(22,21,17,0.08)]">
+                  <div className="flex items-center justify-between">
+                    <button
+                      type="button"
+                      onClick={() => setShowManualTranscriptInput(!showManualTranscriptInput)}
+                      className="text-xs text-[#0E7C86] hover:underline flex items-center gap-1.5 font-medium cursor-pointer"
+                    >
+                      <FileText className="w-3.5 h-3.5" />
+                      <span>
+                        {lang === 'uz'
+                          ? (showManualTranscriptInput ? "▲ Matn maydonini yashirish" : "▼ Matn / transkriptni qo'lda kiritish (Nusxalash)")
+                          : (showManualTranscriptInput ? "▲ Скрыть поле ввода текста" : "▼ Вставить текст / субтитры вручную (если видео закрыто)")}
+                      </span>
+                    </button>
+                    {manualTranscriptText.trim() && (
+                      <span className="text-[10px] font-mono text-[#5D594E]">
+                        {manualTranscriptText.trim().split(/\s+/).length} {lang === 'uz' ? "so'z" : 'слов'}
+                      </span>
+                    )}
+                  </div>
+
+                  {showManualTranscriptInput && (
+                    <div className="mt-2.5 space-y-2">
+                      <textarea
+                        rows={4}
+                        value={manualTranscriptText}
+                        onChange={(e) => {
+                          setManualTranscriptText(e.target.value);
+                          if (youtubeImportError) setYoutubeImportError(null);
+                        }}
+                        placeholder={
+                          lang === 'uz'
+                            ? "Videodan nusxalangan subtitrlar, maqola yoki intervyu matnini bu yerga tashlang...\nAI uni avtomatik ravishda 2 kishilik dialogga ajratadi, Toshkent o'zbekchasiga o'giradi va jonli vokal teglari bilan to'ldiradi."
+                            : "Вставьте сюда текст субтитров, статью или тезисы...\nAI автоматически распределит реплики между ведущим и гостем, переведет и озвучит двумя голосами."
+                        }
+                        className="w-full bg-[#FAF8F3] border border-[rgba(22,21,17,0.14)] rounded-xl p-3 text-xs text-[#161511] placeholder:text-[#5D594E]/60 focus:outline-none focus:border-[#C4552D] leading-relaxed resize-y font-sans"
+                      />
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          onClick={handleImportYouTubeInterview}
+                          disabled={isImportingYoutube || !manualTranscriptText.trim()}
+                          className="btn-pill btn-solid text-xs py-2 px-4 flex items-center gap-1.5 bg-[#0E7C86] hover:bg-[#0A5A62] text-white border-none cursor-pointer"
+                        >
+                          <Sparkles className="w-3.5 h-3.5 text-[#5CC8CF]" />
+                          <span>
+                            {lang === 'uz' ? "Ushbu matndan 2 ovozli intervyu yaratish" : "Сгенерировать диалог из этого текста"}
+                          </span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="text-[11px] text-[#5D594E] flex items-center gap-2">
+                  <span className="font-mono text-[#C4552D] font-bold">INFO:</span>
+                  <span>
+                    {lang === 'uz'
+                      ? "Avtomatik subtitrlar orqali ikki kishilik intervyu ajratiladi, o'zbek/rus tiliga tarjima qilinadi va jonli vokal teglari (<breath>, <laugh>, |ha|, |mhm|) kiritiladi."
+                      : 'Субтитры автоматически разбиваются на 2 спикера, переводятся на узбекский/русский и снабжаются живыми вокальными тегами (<breath>, <laugh>, |ha|, |mhm|).'}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              /* Topic Duration Selector & Timing Info */
+              <div className="space-y-4">
+                <div className="p-3.5 bg-white border border-[rgba(22,21,17,0.14)] rounded-xl space-y-2.5 shadow-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-[#161511] flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-[#0E7C86]" />
+                      {lang === 'uz' ? 'Intervyu Davomiyligi:' : 'Длительность интервью:'}
+                    </span>
+                    <span className="text-[11px] font-mono text-[#5D594E]">
+                      {turns.length} {lang === 'uz' ? 'replika' : 'реплик'} · ~{Math.max(1, Math.round(turns.reduce((acc, t) => acc + t.text.trim().split(/\s+/).filter(Boolean).length, 0) / 125))} {lang === 'uz' ? 'daqiqa' : 'мин'}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {[
+                      { id: '15 daqiqa', label: '15 daq', desc: '18 ta replika' },
+                      { id: '30 daqiqa', label: '30 daqiqa', desc: '26 ta replika' },
+                      { id: '45 daqiqa', label: '45 daqiqa', desc: '36 ta replika' },
+                      { id: '60 daqiqa (1 soat)', label: '60 daqiqa (1 soat)', desc: 'Katta intervyu' },
+                      { id: '90 daqiqa (1.5 soat)', label: '90 daqiqa (1.5 soat)', desc: 'Katta intervyu-shou' },
+                    ].map((d) => (
+                      <button
+                        key={d.id}
+                        type="button"
+                        onClick={() => setTargetDuration(d.id)}
+                        className={`btn-pill text-xs py-1.5 px-3.5 transition-all cursor-pointer ${
+                          targetDuration === d.id
+                            ? 'bg-[#161511] text-[#F4F1EA] font-semibold border-[#161511]'
+                            : 'bg-transparent border-[rgba(22,21,17,0.14)] text-[#5D594E] hover:border-[#161511] hover:text-[#161511]'
+                        }`}
+                      >
+                        <div>{d.label}</div>
+                      </button>
+                    ))}
+                    {!isGeneratingScript && !isExpandingDialogue && (
+                      <PreCalculationBadge
+                        estimatedSeconds={estimatedInterviewScriptSeconds}
+                        lang={lang}
+                        className="ml-auto"
+                      />
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input
+                    type="text"
+                    value={topic}
+                    onChange={(e) => setTopic(e.target.value)}
+                    placeholder={lang === 'uz' ? "Intervyu mavzusi (masalan: Sun'iy intellekt kelajagi va O'zbekiston)..." : "Тема интервью..."}
+                    className="flex-1 bg-white border border-[rgba(22,21,17,0.14)] rounded-xl px-4 py-2.5 text-xs sm:text-sm text-[#161511] placeholder:text-[#5D594E]/60 focus:outline-none focus:border-[#0E7C86]"
+                  />
+                  <button
+                    onClick={handleGenerateInterview}
+                    disabled={isGeneratingScript || !topic.trim()}
+                    className="btn-pill btn-solid text-xs py-2.5 px-4 flex items-center justify-center gap-1.5 shrink-0"
+                  >
+                    <Sparkles className={`w-3.5 h-3.5 text-[#5CC8CF] ${isGeneratingScript ? 'animate-spin' : ''}`} />
+                    {isGeneratingScript ? (
+                      <>
+                        <span>{lang === 'uz' ? `Yozilmoqda: ~${interviewScriptCountdown.formattedRemaining}` : `Генерация: ~${interviewScriptCountdown.formattedRemaining}`}</span>
+                        <span className="font-mono text-[10px] bg-white/20 px-1.5 py-0.5 rounded-full">{interviewScriptCountdown.progressPercent}%</span>
+                      </>
+                    ) : (
+                      lang === 'uz' ? `AI Intervyu Matni (${targetDuration})` : `AI Диалог (${targetDuration})`
+                    )}
+                  </button>
+                  <button
+                    onClick={handleExpandInterview}
+                    disabled={isExpandingDialogue || turns.length === 0}
+                    className="btn-pill btn-ghost text-xs py-2.5 px-3.5 flex items-center justify-center gap-1.5 shrink-0 text-[#C4552D] border-[rgba(196,85,45,0.4)]"
+                    title="Suhbatni yana 15 daqiqaga kengaytirish"
+                  >
+                    <Sparkles className={`w-3.5 h-3.5 ${isExpandingDialogue ? 'animate-spin' : ''}`} />
+                    {isExpandingDialogue ? (
+                      <>
+                        <span>{lang === 'uz' ? `+15 daq: ~${interviewScriptCountdown.formattedRemaining}` : `+15 мин: ~${interviewScriptCountdown.formattedRemaining}`}</span>
+                        <span className="font-mono text-[10px] bg-white/20 px-1.5 py-0.5 rounded-full">{interviewScriptCountdown.progressPercent}%</span>
+                      </>
+                    ) : (
+                      lang === 'uz' ? '+15 daq' : '+15 мин'
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Live Countdown HUD when generating script */}
             {(isGeneratingScript || isExpandingDialogue) && (
@@ -1158,7 +1681,13 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   <input
                     type="text"
                     value={speaker1Name}
-                    onChange={(e) => setSpeaker1Name(e.target.value)}
+                    onChange={(e) => {
+                      const newName = e.target.value;
+                      setSpeaker1Name(newName);
+                      setTurns((prev) =>
+                        prev.map((t) => (t.speakerId === 'HOST_1' ? { ...t, speakerName: newName } : t))
+                      );
+                    }}
                     className="w-full bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-1.5 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86]"
                     placeholder="Masalan: Shokhrukh"
                   />
@@ -1190,7 +1719,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   </div>
                   <select
                     value={speaker1VoiceId}
-                    onChange={(e) => setSpeaker1VoiceId(e.target.value)}
+                    onChange={(e) => handleSelectSpeaker1Voice(e.target.value)}
                     className="w-full bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-1.5 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86] cursor-pointer"
                   >
                     {voices.map((v) => (
@@ -1225,16 +1754,16 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 </div>
               </div>
 
-              {/* Speaker 2 (Guest / Aziza) */}
+              {/* Speaker 2 (Guest / Expert) */}
               <div className="p-4 rounded-2xl bg-white border border-[rgba(196,85,45,0.3)] space-y-3 shadow-xs">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold text-[#C4552D] flex items-center gap-1.5">
-                    <Bot className="w-3.5 h-3.5" /> 2-Mehmon / Ekspert
+                    <Bot className="w-3.5 h-3.5" /> {lang === 'uz' ? '2-Mehmon / Ekspert' : '2-Гость / Эксперт'}
                   </span>
                   <div className="flex items-center gap-1 bg-[#F4F1EA] p-0.5 rounded-lg border border-[rgba(22,21,17,0.1)]">
                     <button
                       type="button"
-                      onClick={() => setSpeaker2GenderFilter('all')}
+                      onClick={() => handleSetSpeaker2GenderFilter('all')}
                       className={`px-1.5 py-0.5 text-[10px] rounded transition-colors ${
                         speaker2GenderFilter === 'all'
                           ? 'bg-[#161511] text-[#F4F1EA] font-bold'
@@ -1245,7 +1774,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                     </button>
                     <button
                       type="button"
-                      onClick={() => setSpeaker2GenderFilter('female')}
+                      onClick={() => handleSetSpeaker2GenderFilter('female')}
                       className={`px-1.5 py-0.5 text-[10px] rounded transition-colors ${
                         speaker2GenderFilter === 'female'
                           ? 'bg-[#C4552D] text-white font-bold'
@@ -1256,7 +1785,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                     </button>
                     <button
                       type="button"
-                      onClick={() => setSpeaker2GenderFilter('male')}
+                      onClick={() => handleSetSpeaker2GenderFilter('male')}
                       className={`px-1.5 py-0.5 text-[10px] rounded transition-colors ${
                         speaker2GenderFilter === 'male'
                           ? 'bg-[#0E7C86] text-white font-bold'
@@ -1276,7 +1805,13 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                     <input
                       type="text"
                       value={speaker2Name}
-                      onChange={(e) => setSpeaker2Name(e.target.value)}
+                      onChange={(e) => {
+                        const newName = e.target.value;
+                        setSpeaker2Name(newName);
+                        setTurns((prev) =>
+                          prev.map((t) => (t.speakerId === 'HOST_2' ? { ...t, speakerName: newName } : t))
+                        );
+                      }}
                       className="w-full bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-xl px-2.5 py-1.5 text-xs text-[#161511] focus:outline-none focus:border-[#C4552D]"
                       placeholder="Aziza"
                     />
@@ -1415,26 +1950,160 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
               </span>
             </div>
 
-            {/* Clean Dialogue Actions Toolbar */}
-            <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-white border border-[rgba(22,21,17,0.14)] rounded-xl shadow-xs">
-              <div className="flex items-center gap-2 text-xs text-[#5D594E]">
-                <ShieldCheck className="w-4 h-4 text-[#0E7C86] shrink-0" />
-                <span>
-                  {lang === 'uz'
-                    ? 'Barcha shartlar [Bariton, Pauza] avtomatik diktor tembriga oʻtkaziladi va baland ovozda oʻqilmaydi.'
-                    : 'Ремарки в скобках формируют интонацию и не зачитываются вслух.'}
+            {/* YouTube Dubbing Video Player Card (when YouTube video is imported) */}
+            {youtubeVideoId && (
+              <div className="p-4 bg-white border border-[#C4552D]/30 rounded-2xl space-y-3.5 shadow-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded-full bg-[#C4552D] text-white font-mono text-[10px] font-bold uppercase tracking-wider flex items-center gap-1">
+                      <Youtube className="w-3 h-3" /> YouTube Dublyaj
+                    </span>
+                    <h4 className="text-xs font-bold text-[#161511] line-clamp-1 max-w-md">
+                      {youtubeVideoTitle || topic || 'YouTube Video'}
+                    </h4>
+                  </div>
+                  {youtubeAuthorName && (
+                    <span className="text-[11px] font-mono text-[#5D594E]">
+                      Kanal: <span className="font-semibold text-[#161511]">{youtubeAuthorName}</span>
+                    </span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-center">
+                  <div className="aspect-video w-full rounded-xl overflow-hidden border border-[rgba(22,21,17,0.15)] bg-black shadow-xs">
+                    <iframe
+                      src={`https://www.youtube.com/embed/${youtubeVideoId}?enablejsapi=1`}
+                      title="YouTube Video"
+                      className="w-full h-full border-none"
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                      allowFullScreen
+                    />
+                  </div>
+                  <div className="space-y-3 text-xs">
+                    <div className="p-3 bg-[#FAF8F3] rounded-xl border border-[rgba(22,21,17,0.1)] space-y-2">
+                      <div className="font-semibold text-[#161511] flex items-center justify-between">
+                        <span>Aktiv Spikerlar:</span>
+                        <span className="font-mono text-[11px] text-[#0E7C86]">{speaker1Name} & {speaker2Name}</span>
+                      </div>
+                      <div className="text-[11px] text-[#5D594E] leading-relaxed">
+                        {lang === 'uz'
+                          ? "Barcha replikalar sekundiga to'ch-v-to'ch sig'dirilgan. Generatsiyadan so'ng video va o'zbekcha ovoz 100% sinxron o'ynaladi."
+                          : 'Реплики уложены точь-в-точь по хронометражу. После озвучки дорожка синхронизируется секунда в секунду.'}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowOriginalTranscript(!showOriginalTranscript)}
+                        className="btn-pill btn-ghost text-[11px] py-1 px-3 flex items-center gap-1.5 cursor-pointer border border-[rgba(22,21,17,0.14)]"
+                      >
+                        <FileText className="w-3 h-3 text-[#0E7C86]" />
+                        <span>{showOriginalTranscript ? 'Asl matnni berkitish' : 'Asl matnni koʻrsatish'}</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Featured Interview Quick-Load Banner */}
+            <div className="p-3.5 bg-gradient-to-r from-[#0E7C86]/10 via-[#FAF8F3] to-[#C4552D]/10 rounded-2xl border border-[rgba(22,21,17,0.14)] flex flex-wrap items-center justify-between gap-3 shadow-2xs">
+              <div className="flex items-center gap-2.5">
+                <span className="w-8 h-8 rounded-xl bg-[#161511] text-[#FACC15] flex items-center justify-center shrink-0 shadow-xs font-bold text-sm">
+                  ⚡
                 </span>
+                <div>
+                  <h4 className="text-xs font-bold text-[#161511]">
+                    {lang === 'uz'
+                      ? "Tayyor Intervyu: Artur Yugay & Ayubxon Burxanov"
+                      : "Готовое интервью: Артур Югай и Аюбхон Бурханов"}
+                  </h4>
+                  <p className="text-[11px] text-[#5D594E]">
+                    {lang === 'uz'
+                      ? "73 ta replika, 4 ta bob (Tizir, Kirish, Toshkent eng qimmat shahar, Ko'chmas mulk narxlari). 100% to'ch-v-to'ch tarjima va 2 ta mustaqil erkak ovozi!"
+                      : "73 реплики, 4 главы (Тизер, Вступление, Ташкент, Рост цен на жилье). Точный перевод по хронометражу и 2 мужских голоса!"}
+                  </p>
+                </div>
               </div>
 
-              <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleLoadYugayBurkhanovPreset}
+                className="btn-pill btn-solid text-xs py-1.5 px-3.5 flex items-center gap-1.5 cursor-pointer font-bold shadow-xs hover:scale-105 transition-transform"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-[#5CC8CF]" />
+                <span>{lang === 'uz' ? "Intervyuni bir zumda yuklash (73 replika)" : "Загрузить интервью (73 реплики)"}</span>
+              </button>
+            </div>
+
+            {/* Dialogue Diarization & Audio Tools Toolbar */}
+            <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-white border border-[rgba(22,21,17,0.14)] rounded-xl shadow-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleSmartDiarizeTurns}
+                  disabled={isDiarizing || turns.length === 0}
+                  className="btn-pill btn-solid text-xs py-1.5 px-3 flex items-center gap-1.5 cursor-pointer font-semibold shadow-xs"
+                  title={lang === 'uz' ? "AI orqali barcha replikalarni Artur Yugay (Boshlovchi) va Ayubxon Burxanov (Mehmon) o'rtasida aniq taqsimlash" : "Умное распределение реплик между ведущим и гостем (Артур Югай и Аюбхон Бурханов)"}
+                >
+                  <Wand2 className={`w-3.5 h-3.5 text-[#5CC8CF] ${isDiarizing ? 'animate-spin' : ''}`} />
+                  <span>
+                    {isDiarizing
+                      ? (lang === 'uz' ? "Taqsimlanmoqda..." : "Распределение...")
+                      : (lang === 'uz' ? "Smart Diarize (Spikerlarni taqsimlash)" : "Smart Diarize (Распределить)")}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleInvertAllSpeakers}
+                  className="btn-pill btn-ghost text-xs py-1.5 px-3 flex items-center gap-1.5 cursor-pointer border border-[rgba(22,21,17,0.14)]"
+                  title="Artur va Ayubxon o'rinlarini almashtirish"
+                >
+                  <ArrowLeftRight className="w-3.5 h-3.5 text-[#5D594E]" />
+                  <span>{lang === 'uz' ? "Spikerlarni almashtirish (⇄)" : "Поменять местами (⇄)"}</span>
+                </button>
+
                 <button
                   type="button"
                   onClick={handleCleanAllTurns}
-                  className="btn-pill btn-ghost text-xs py-1.5 px-3 flex items-center gap-1.5"
+                  className="btn-pill btn-ghost text-xs py-1.5 px-3 flex items-center gap-1.5 cursor-pointer"
                   title="Barcha replikalardan skobkalar va ovoz shartlarini tozalash"
                 >
                   <Eraser className="w-3.5 h-3.5 text-[#5D594E]" />
                   <span>{lang === 'uz' ? 'Shartlarni tozalash' : 'Очистить условия'}</span>
+                </button>
+              </div>
+
+              {/* Master Audio Mode Toggle */}
+              <div className="flex items-center gap-1.5 bg-[#FAF8F3] p-1 rounded-xl border border-[rgba(22,21,17,0.1)] text-xs">
+                <span className="text-[10px] uppercase font-mono text-[#5D594E] px-1 font-semibold">
+                  {lang === 'uz' ? 'Ovoz Rejimi:' : 'Режим:'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setMasterAudioMode('continuous')}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer ${
+                    masterAudioMode === 'continuous'
+                      ? 'bg-[#0E7C86] text-white shadow-xs'
+                      : 'text-[#5D594E] hover:text-[#161511]'
+                  }`}
+                  title={lang === 'uz' ? "Uzviy jonli podkast: har bir replika orasida 0.35s tabiiy suhbat pauzasi, hech qanday bo'sh vaqt yo'q" : "Бесшовный подкаст без пустых пауз"}
+                >
+                  🎙️ {lang === 'uz' ? 'Uzviy podkast (Tavsiya)' : 'Слитный подкаст'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMasterAudioMode('time_aligned')}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer ${
+                    masterAudioMode === 'time_aligned'
+                      ? 'bg-[#161511] text-[#F4F1EA] shadow-xs'
+                      : 'text-[#5D594E] hover:text-[#161511]'
+                  }`}
+                  title={lang === 'uz' ? "Video xronometrajiga bog'langan: oraliq pauza maksimal 2 soniya bilan cheklanadi" : "По хронометражу (макс пауза 2с)"}
+                >
+                  ⏱️ {lang === 'uz' ? 'Xronometraj' : 'Хронометраж'}
                 </button>
               </div>
             </div>
@@ -1460,19 +2129,34 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                     }`}
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <button
                           onClick={() => toggleTurnSpeaker(turn.id)}
-                          className={`btn-pill text-xs py-1 px-3 flex items-center gap-1.5 cursor-pointer font-semibold ${
+                          className={`btn-pill text-xs py-1 px-3 flex items-center gap-1.5 cursor-pointer font-bold transition-all shadow-xs hover:scale-105 ${
                             isHost1
-                              ? 'bg-[rgba(14,124,134,0.1)] text-[#0A5A62] border border-[rgba(14,124,134,0.3)]'
-                              : 'bg-[rgba(196,85,45,0.1)] text-[#C4552D] border border-[rgba(196,85,45,0.3)]'
+                              ? 'bg-[#0E7C86]/10 text-[#0A5A62] border border-[#0E7C86]/40 hover:bg-[#0E7C86] hover:text-white'
+                              : 'bg-[#C4552D]/10 text-[#C4552D] border border-[#C4552D]/40 hover:bg-[#C4552D] hover:text-white'
                           }`}
-                          title="Spikerni almashtirish uchun bosing"
+                          title={lang === 'uz' ? "Boshqa spikerga o'tkazish uchun bosing (Artur ⇄ Ayubxon)" : "Нажмите для переключения (Артур ⇄ Аюбхон)"}
                         >
-                          {isHost1 ? <User className="w-3 h-3" /> : <Bot className="w-3 h-3" />}
-                          {turn.speakerName} ({isHost1 ? '1-Boshlovchi (Siz)' : '2-Mehmon'})
+                          {isHost1 ? <User className="w-3.5 h-3.5" /> : <Bot className="w-3.5 h-3.5" />}
+                          <span>{turn.speakerName || (isHost1 ? speaker1Name : speaker2Name)}</span>
+                          <span className="text-[10px] font-mono opacity-80">
+                            ({isHost1 ? (lang === 'uz' ? '1-Boshlovchi' : '1-Ведущий') : (lang === 'uz' ? '2-Mehmon' : '2-Гость')}) ⇄
+                          </span>
                         </button>
+
+                        {turn.timecode && (
+                          <span className="font-mono text-[10.5px] font-bold px-2 py-0.5 rounded-lg bg-[#161511] text-[#FACC15] flex items-center gap-1 shadow-2xs">
+                            ⏱ {turn.timecode} {turn.durationSec ? `(${turn.durationSec}s)` : ''}
+                          </span>
+                        )}
+
+                        {turn.chapter && (
+                          <span className="text-[10px] text-[#5D594E] font-medium hidden sm:inline-block">
+                            · {turn.chapter}
+                          </span>
+                        )}
 
                         {turnConditions.hasConditions && (
                           <div className="flex items-center gap-1.5">
@@ -1521,6 +2205,23 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                       </div>
                     </div>
 
+                    {/* Original English Text Display (for Dubbing verification) */}
+                    {showOriginalTranscript && turn.originalText && (
+                      <div className="mb-2 p-2.5 rounded-xl bg-[#FAF8F3] border border-[rgba(22,21,17,0.08)] text-xs text-[#5D594E] leading-relaxed">
+                        <div className="flex items-center justify-between mb-0.5">
+                          <span className="text-[10px] font-mono uppercase text-[#0E7C86] font-bold">
+                            Asl Inglizcha Matn (EN):
+                          </span>
+                          {turn.durationSec && (
+                            <span className="text-[10px] font-mono text-[#5D594E]">
+                              Lip-sync xronometraj: <span className="font-bold text-[#161511]">{turn.durationSec}s</span>
+                            </span>
+                          )}
+                        </div>
+                        <p className="font-serif italic text-[#161511] text-[12.5px]">{turn.originalText}</p>
+                      </div>
+                    )}
+
                     <textarea
                       rows={2}
                       value={turn.text}
@@ -1529,37 +2230,70 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                       placeholder="Ushbu spikerning replikasi..."
                     />
 
-                    {/* Quick Uzbek Vocal Tags Strip */}
-                    <div className="flex flex-wrap items-center gap-1.5 mt-1.5 pt-1 text-[11px]">
+                    {/* Quick Uzbek Vocal Tags & Natural Emotions Strip */}
+                    <div className="flex flex-wrap items-center gap-1.5 mt-2 pt-1 text-[11px]">
                       <span className="font-mono text-[10px] text-[#5D594E] uppercase tracking-wider">
-                        {lang === 'uz' ? 'Teglar:' : 'Теги:'}
+                        {lang === 'uz' ? 'Jonli Teglar:' : 'Живые Теги:'}
                       </span>
                       <button
                         type="button"
                         onClick={() => handleInsertTagToTurn(turn.id, '<breath>')}
                         className="px-2 py-0.5 rounded-full border border-[#0E7C86]/40 bg-[#0E7C86]/5 text-[#0A5A62] hover:bg-[#0E7C86] hover:text-white transition-all text-[10.5px] font-mono cursor-pointer"
-                        title="Tabiiy nafas olish ovozi"
+                        title="Tabiiy nafas olish tovushi"
                       >
                         🌬️ &lt;breath&gt;
                       </button>
                       <button
                         type="button"
+                        onClick={() => handleInsertTagToTurn(turn.id, '<chuqur_nafas>')}
+                        className="px-2 py-0.5 rounded-full border border-[#0E7C86]/30 bg-white text-[#0A5A62] hover:bg-[#0E7C86]/10 transition-all text-[10.5px] font-mono cursor-pointer"
+                        title="Chuqur nafas olish"
+                      >
+                        💨 &lt;chuqur_nafas&gt;
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => handleInsertTagToTurn(turn.id, '<laugh>')}
                         className="px-2 py-0.5 rounded-full border border-[#C98A12]/40 bg-[#C98A12]/5 text-[#C98A12] hover:bg-[#C98A12] hover:text-white transition-all text-[10.5px] font-mono cursor-pointer"
-                        title="Tabiiy kulgi tovushi"
+                        title="Tabiiy kulgi tovushi (Gemini 3.8 Flash TTS)"
                       >
                         😄 &lt;laugh&gt;
                       </button>
-                      {['|ha|', '|mhm|', '|rostanam|'].map((tag) => (
+                      {['|ha|', '|mhm|', '|rostanam|', '|albatta|', '|aha|'].map((tag) => (
                         <button
                           key={tag}
                           type="button"
                           onClick={() => handleInsertTagToTurn(turn.id, tag)}
                           className="px-2 py-0.5 rounded-full border border-[rgba(14,124,134,0.3)] bg-white text-[#0A5A62] hover:bg-[rgba(14,124,134,0.1)] transition-all text-[10.5px] font-mono cursor-pointer"
+                          title="Toshkent jonli tasdiq belgisi"
                         >
                           {tag}
                         </button>
                       ))}
+                      <button
+                        type="button"
+                        onClick={() => handleInsertTagToTurn(turn.id, '[Doston]')}
+                        className="px-2 py-0.5 rounded-full border border-[#8B5CF6]/30 bg-white text-[#7C3AED] hover:bg-[#8B5CF6]/10 transition-all text-[10.5px] font-mono cursor-pointer"
+                        title="Doston va hikoya uslubidagi ohang"
+                      >
+                        📜 [Doston]
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleInsertTagToTurn(turn.id, '[Jonli]')}
+                        className="px-2 py-0.5 rounded-full border border-[#EC4899]/30 bg-white text-[#DB2777] hover:bg-[#EC4899]/10 transition-all text-[10.5px] font-mono cursor-pointer"
+                        title="Jonli va qizg'in intonatsiya"
+                      >
+                        ⚡ [Jonli]
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleInsertTagToTurn(turn.id, '[Sokin]')}
+                        className="px-2 py-0.5 rounded-full border border-[rgba(22,21,17,0.15)] bg-white text-[#5D594E] hover:bg-black/5 transition-all text-[10.5px] font-mono cursor-pointer"
+                        title="Sokin mulohazali ohang"
+                      >
+                        😌 [Sokin]
+                      </button>
                       <button
                         type="button"
                         onClick={() => handleInsertTagToTurn(turn.id, '[Pauza 1s]')}
@@ -1669,6 +2403,18 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                     creditsCost={Math.max(1, Math.ceil(turns.length / 3))}
                     lang={lang}
                   />
+                )}
+
+                {isSynthesizing && (
+                  <button
+                    type="button"
+                    onClick={handleStopSynthesis}
+                    className="btn-pill btn-ghost text-xs py-2.5 px-3.5 text-[#C4552D] border-[rgba(196,85,45,0.4)] hover:bg-[#C4552D]/10 flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
+                    title={lang === 'uz' ? "Sintezni to'xtatish va tayyor replikalarni birlashtirish" : 'Остановить и склеить готовое'}
+                  >
+                    <StopCircle className="w-4 h-4 text-[#C4552D]" />
+                    <span>{lang === 'uz' ? "To'xtatish" : 'Стоп'}</span>
+                  </button>
                 )}
 
                 <button
@@ -1945,13 +2691,51 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 </div>
               </div>
             ) : isSynthesizing ? (
-              <GenerationCountdownHUD
-                countdown={dialogueCountdown}
-                isActive={isSynthesizing}
-                lang={lang}
-                title={lang === 'uz' ? `Dual TTS Intervyu (${turns.length} replika)` : `Синтез Интервью (${turns.length} реплик)`}
-                subtitle={lang === 'uz' ? dialogueCountdown.phaseNameUz : dialogueCountdown.phaseNameRu}
-              />
+              <div className="space-y-4">
+                {batchProgress && (
+                  <div className="p-4 rounded-2xl bg-white border border-[rgba(14,124,134,0.3)] shadow-xs space-y-3">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-semibold text-[#0A5A62] flex items-center gap-1.5">
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#0E7C86]" />
+                        {lang === 'uz'
+                          ? `Paket ${batchProgress.currentBatch} / ${batchProgress.totalBatches}`
+                          : `Пакет ${batchProgress.currentBatch} / ${batchProgress.totalBatches}`}
+                      </span>
+                      <span className="font-mono text-[11px] font-bold text-[#0E7C86]">
+                        {batchProgress.completedTurns} / {batchProgress.totalTurns} {lang === 'uz' ? 'replika' : 'реплик'} ({batchProgress.percent}%)
+                      </span>
+                    </div>
+
+                    <div className="w-full bg-[#F4F1EA] h-2.5 rounded-full overflow-hidden border border-[rgba(22,21,17,0.1)]">
+                      <div
+                        className="bg-gradient-to-r from-[#0E7C86] to-[#5CC8CF] h-full transition-all duration-300 rounded-full"
+                        style={{ width: `${Math.max(5, batchProgress.percent)}%` }}
+                      />
+                    </div>
+
+                    <p className="text-[11px] text-[#5D594E] leading-snug">
+                      {batchProgress.statusText}
+                    </p>
+
+                    <button
+                      onClick={handleStopSynthesis}
+                      type="button"
+                      className="w-full btn-pill btn-ghost text-xs py-1.5 text-[#C4552D] border-[rgba(196,85,45,0.3)] hover:bg-[#C4552D]/10 flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <StopCircle className="w-3.5 h-3.5" />
+                      <span>{lang === 'uz' ? "To'xtatish va tayyor qismini birlashtirish" : 'Остановить и склеить готовое'}</span>
+                    </button>
+                  </div>
+                )}
+
+                <GenerationCountdownHUD
+                  countdown={dialogueCountdown}
+                  isActive={isSynthesizing}
+                  lang={lang}
+                  title={lang === 'uz' ? `Dual TTS Intervyu (${turns.length} replika)` : `Синтез Интервью (${turns.length} реплик)`}
+                  subtitle={batchProgress?.statusText || (lang === 'uz' ? dialogueCountdown.phaseNameUz : dialogueCountdown.phaseNameRu)}
+                />
+              </div>
             ) : (
               <div className="p-8 rounded-2xl bg-white border border-dashed border-[rgba(22,21,17,0.2)] text-center space-y-2">
                 <Users2 className="w-8 h-8 text-[#5D594E]/50 mx-auto" />

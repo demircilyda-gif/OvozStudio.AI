@@ -45,19 +45,22 @@ export function calculateAudioSynthesizeSeconds(wordCount: number, tempo: number
 
 export function calculateInterviewDialogueSeconds(turnsCount: number): number {
   const safeTurns = Math.max(1, turnsCount || 1);
-  // Processed in parallel batches of 3 (each batch ~5.5s) + master WAV stitch (~3.5s)
-  const batches = Math.ceil(safeTurns / 3);
-  return Math.max(6, Math.round(batches * 5.5 + 3.5));
+  // Processed in parallel batches of 5 (each batch ~14s) + master WAV stitch (~3.5s)
+  const batches = Math.ceil(safeTurns / 5);
+  return Math.max(6, Math.round(batches * 14 + 3.5));
 }
 
 export function calculateAiScriptSeconds(targetDurationStr: string, format: 'solo' | 'interview' = 'solo'): number {
   const lower = (targetDurationStr || '').toLowerCase();
   if (format === 'interview') {
+    if (lower.includes('90') || lower.includes('1.5') || lower.includes('полтора')) return 45;
+    if (lower.includes('60') || lower.includes('1 soat') || lower.includes('1 час')) return 35;
+    if (lower.includes('45')) return 28;
     if (lower.includes('30') || lower.includes('30 daqiqa')) return 24;
     if (lower.includes('15') || lower.includes('15 daqiqa')) return 18;
     if (lower.includes('10')) return 15;
     if (lower.includes('5')) return 12;
-    return 16;
+    return 20;
   }
   // Solo
   if (lower.includes('10')) return 18;

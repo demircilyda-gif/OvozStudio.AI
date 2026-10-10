@@ -90,7 +90,13 @@ export interface DialogueTurn {
   speakerId: 'HOST_1' | 'HOST_2';
   speakerName: string;
   text: string;
-  emotion?: 'excited' | 'thoughtful' | 'skeptical' | 'humorous' | 'neutral';
+  originalText?: string;
+  timecode?: string;
+  startSec?: number;
+  endSec?: number;
+  durationSec?: number;
+  chapter?: string;
+  emotion?: 'excited' | 'thoughtful' | 'skeptical' | 'humorous' | 'neutral' | string;
   audioBase64?: string;
   durationSeconds?: number;
   startTime?: number;

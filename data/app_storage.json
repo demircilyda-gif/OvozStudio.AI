@@ -1,0 +1,131 @@
+{
+  "users": {
+    "admin-demircilyda": {
+      "uid": "admin-demircilyda",
+      "email": "demircilyda@gmail.com",
+      "displayName": "Demircilyda (Admin)",
+      "creditsRemaining": 999999,
+      "tier": "unlimited",
+      "role": "admin",
+      "createdAt": "2026-10-10T11:31:47.675Z",
+      "updatedAt": "2026-10-10T11:31:47.676Z"
+    },
+    "KI7fbQP8cBRUuLBkAxuQLQGh1Zu2": {
+      "uid": "KI7fbQP8cBRUuLBkAxuQLQGh1Zu2",
+      "email": "demircilyda@gmail.com",
+      "displayName": "Lyda Demirci",
+      "creditsRemaining": 999999,
+      "tier": "unlimited",
+      "role": "admin",
+      "createdAt": "2026-10-10T11:32:05.742Z",
+      "updatedAt": "2026-10-10T15:16:36.871Z"
+    },
+    "test-admin": {
+      "uid": "test-admin",
+      "email": "admin@example.com",
+      "displayName": "Foydalanuvchi",
+      "creditsRemaining": 4,
+      "tier": "free",
+      "role": "user",
+      "createdAt": "2026-10-10T14:20:02.412Z",
+      "updatedAt": "2026-10-10T14:20:02.412Z"
+    },
+    "admin-test": {
+      "uid": "admin-test",
+      "email": "shoxrux.art@gmail.com",
+      "displayName": "Foydalanuvchi",
+      "creditsRemaining": 4,
+      "tier": "free",
+      "role": "user",
+      "createdAt": "2026-10-10T14:38:32.057Z",
+      "updatedAt": "2026-10-10T14:38:32.057Z"
+    },
+    "user_test_123": {
+      "uid": "user_test_123",
+      "email": "test@example.com",
+      "displayName": "Foydalanuvchi",
+      "creditsRemaining": 0,
+      "tier": "free",
+      "role": "user",
+      "createdAt": "2026-10-10T16:14:21.614Z",
+      "updatedAt": "2026-10-10T16:22:00.430Z"
+    }
+  },
+  "paymentRequests": {},
+  "pendingCreditGrants": {},
+  "generations": {
+    "KI7fbQP8cBRUuLBkAxuQLQGh1Zu2": [
+      {
+        "id": "gen-1791648524709-otls",
+        "userId": "KI7fbQP8cBRUuLBkAxuQLQGh1Zu2",
+        "userEmail": "demircilyda@gmail.com",
+        "type": "podcast",
+        "title": "Почему в Узбекистане стало так дорого жить? — 2 Ovozli To'liq Dublyaj",
+        "creditsCost": 1,
+        "status": "completed",
+        "createdAt": "2026-10-10T16:08:44.709Z"
+      },
+      {
+        "id": "gen-1791648296849-9pqg",
+        "userId": "KI7fbQP8cBRUuLBkAxuQLQGh1Zu2",
+        "userEmail": "demircilyda@gmail.com",
+        "type": "podcast",
+        "title": "Почему в Узбекистане стало так дорого жить? — 2 Ovozli To'liq Dublyaj",
+        "creditsCost": 1,
+        "status": "completed",
+        "createdAt": "2026-10-10T16:04:56.849Z"
+      },
+      {
+        "id": "gen-1791647916092-w6gr",
+        "userId": "KI7fbQP8cBRUuLBkAxuQLQGh1Zu2",
+        "userEmail": "demircilyda@gmail.com",
+        "type": "podcast",
+        "title": "Почему в Узбекистане стало так дорого жить? — 2 Ovozli To'liq Dublyaj",
+        "creditsCost": 1,
+        "status": "completed",
+        "createdAt": "2026-10-10T15:58:36.092Z"
+      },
+      {
+        "id": "gen-1791647223549-aaif",
+        "userId": "KI7fbQP8cBRUuLBkAxuQLQGh1Zu2",
+        "userEmail": "demircilyda@gmail.com",
+        "type": "podcast",
+        "title": "Artur Yugay & Ayubxon Burxanov — Nega O'zbekistonda yashash qimmat?",
+        "creditsCost": 1,
+        "status": "completed",
+        "createdAt": "2026-10-10T15:47:03.549Z"
+      },
+      {
+        "id": "gen-1791644689543-dvpi",
+        "userId": "KI7fbQP8cBRUuLBkAxuQLQGh1Zu2",
+        "userEmail": "demircilyda@gmail.com",
+        "type": "podcast",
+        "title": "Почему в Узбекистане стало так дорого жить? — 2 Ovozli To'liq Dublyaj",
+        "creditsCost": 1,
+        "status": "completed",
+        "createdAt": "2026-10-10T15:04:49.543Z"
+      },
+      {
+        "id": "gen-1791637299915-x7j0",
+        "userId": "KI7fbQP8cBRUuLBkAxuQLQGh1Zu2",
+        "userEmail": "demircilyda@gmail.com",
+        "type": "podcast",
+        "title": "Почему в Узбекистане стало так дорого жить? — 2 Ovozli To'liq Dublyaj",
+        "creditsCost": 1,
+        "status": "completed",
+        "createdAt": "2026-10-10T13:01:39.915Z"
+      },
+      {
+        "id": "gen-1791634648583-zcl4",
+        "userId": "KI7fbQP8cBRUuLBkAxuQLQGh1Zu2",
+        "userEmail": "demircilyda@gmail.com",
+        "type": "podcast",
+        "title": "Почему в Узбекистане стало так дорого жить? — Ikki Kishilik Dublyaj",
+        "creditsCost": 1,
+        "status": "completed",
+        "createdAt": "2026-10-10T12:17:28.583Z"
+      }
+    ]
+  },
+  "processedSessions": {}
+}
