@@ -865,8 +865,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       role: speaker2Role,
     };
 
-    // If small dialogue (<= 4 turns), run single-shot
-    if (turns.length <= 4) {
+    // If dialogue has up to 10 turns, run single-shot via native multiSpeakerVoiceConfig
+    if (turns.length <= 10) {
       try {
         const res = await authFetch('/api/podcast/synthesize-dialogue', {
           method: 'POST',
@@ -916,9 +916,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       return;
     }
 
-    // Long dialogue (5 to 100+ turns, up to 1.5 hours):
-    // Execute progressive 5-turn batches to eliminate HTTP gateway timeouts (504)
-    const BATCH_SIZE = 5;
+    // Long dialogue (11 to 100+ turns, up to 1.5 hours):
+    // Execute progressive 8-turn batches to eliminate HTTP gateway timeouts (504)
+    const BATCH_SIZE = 8;
     const totalBatches = Math.ceil(turns.length / BATCH_SIZE);
     const accumulatedTurns: any[] = [];
 

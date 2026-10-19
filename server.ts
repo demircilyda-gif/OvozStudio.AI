@@ -171,9 +171,47 @@ function ensureWav(
 }
 
 /**
+ * Helper to map emotion and acoustic tags (<kulgi>, <nafas>, (kulib), (pichirlab), etc.)
+ * into expressive actor hints for Gemini TTS speechMetadata.style.
+ */
+function mapEmotionCueToStyle(cue: string): string | null {
+  const t = cue.toLowerCase().trim();
+  if (/(?:kulgi|kulgili|jilmay|tabassum|kulib|kulimsir|смех|смеет|улыб|laugh|chuckle|giggle)/i.test(t)) {
+    return "natural warm laughter, amused cheerful chuckle, smiling tone";
+  }
+  if (/(?:pichir|shivir|шепот|шепч|whisper)/i.test(t)) {
+    return "soft intimate whisper, quiet subdued confidential delivery";
+  }
+  if (/(?:nafas|chuqur_nafas|breath|deep_breath|вдох|вздох|xo.?rsin|sigh)/i.test(t)) {
+    return "audible natural breath, reflective contemplative sigh and pause";
+  }
+  if (/(?:hansirash|hayrat|gasp|hayron|удивл|восторг|astonish|excite)/i.test(t)) {
+    return "astonished intrigued intonation, heightened expressive energy";
+  }
+  if (/(?:jiddiy|серьезн|строг|serious|authoritative)/i.test(t)) {
+    return "serious, firm authoritative tone and deliberate cadence";
+  }
+  if (/(?:o.?ylan|задумчив|thoughtful|ponder)/i.test(t)) {
+    return "thoughtful contemplative cadence, reflective pacing";
+  }
+  if (/(?:istehzo|ирони|ironic|sarcas)/i.test(t)) {
+    return "subtle ironic amusement, knowing smirk in the delivery";
+  }
+  if (/(?:bodro|бодр|energetic|lively|quvnoq)/i.test(t)) {
+    return "energetic lively conversational delivery, upbeat cadence";
+  }
+  if (/(?:sokin|спокойн|calm|gentle|mehribon)/i.test(t)) {
+    return "calm warm soothing cadence, friendly conversational tone";
+  }
+  return null;
+}
+
+/**
  * Cleans stage directions, conditions (Baritone, Mezzo, Pause, etc.), timestamps, and speaker tags
  * from speech scripts so that Gemini TTS only speaks the actual spoken words.
- * Extracts any delivery conditions to enrich speechMetadata style instructions.
+ * Crucially PRESERVES emotions and vocal reactions (<kulgi>, <nafas>, (kulib), (pichirlab), etc.)
+ * by converting them into expressive delivery cues for Gemini TTS speechMetadata.style
+ * rather than discarding them.
  */
 function cleanScriptForSpeech(rawText: string): {
   speechText: string;
@@ -187,14 +225,34 @@ function cleanScriptForSpeech(rawText: string): {
   const extractedStyles: string[] = [];
   const detectedConditions: string[] = [];
 
-  // 1. Capture all bracket conditions [...] like [00:00 - 00:06], [Kulminatsiya], [Баритон, бодро], [Пауза 2с], [Кадр 1], etc.
+  // 1. Capture vocal reactions and emotion tags from angle brackets <...>:
+  // e.g. <kulgi>, <nafas>, <pichirlab>, <shivir>, <sigh>, <chuckle>, <laugh>
+  const angleTagRegex = /<([^>]+)>/g;
+  let aMatch;
+  while ((aMatch = angleTagRegex.exec(rawText)) !== null) {
+    const rawTag = aMatch[1].trim();
+    if (rawTag) {
+      detectedConditions.push(`<${rawTag}>`);
+      const mappedCue = mapEmotionCueToStyle(rawTag);
+      if (mappedCue) {
+        extractedStyles.push(mappedCue);
+      } else {
+        extractedStyles.push(rawTag);
+      }
+    }
+  }
+
+  // 2. Capture bracket conditions [...] like [00:00 - 00:06], [Kulminatsiya], [Баритон, бодро], [Пауза 2с], [kulgi], etc.
   const bracketRegex = /\[([^\]]+)\]/g;
   let bMatch;
   while ((bMatch = bracketRegex.exec(rawText)) !== null) {
     const content = bMatch[1].trim();
     if (content) {
       detectedConditions.push(`[${content}]`);
-      if (
+      const mappedCue = mapEmotionCueToStyle(content);
+      if (mappedCue) {
+        extractedStyles.push(mappedCue);
+      } else if (
         /(?:kulminatsiya|kulminasiya|кульминация|bariton|mezzo|sopran|tenor|bas|sokin|tez|pauza|nafas|kulgi|ovoz|ohang|jiddiy|hayajon|gurur|faxr|pichirlash|shivir|savol|hayrat|kulimsirab|tabassum|tantana|mehribon|sirli|chuqur|sigh|gasp|deep_breath|chuckle|голос|баритон|меццо|тенор|сопрано|бас|пауз|шепот|громк|интонац|акцент|настроени|уверен|бодр|спокойн|мягк|глубок|тембр|style|mood|tone|speed|whisper)/i.test(
           content,
         )
@@ -204,18 +262,21 @@ function cleanScriptForSpeech(rawText: string): {
     }
   }
 
-  // 2. Capture all parenthetical directions (...) that are actor directions, timing, or conditions
+  // 3. Capture all parenthetical directions (...) like (kulib), (pichirlab), (chuqur nafas olib), (jiddiy)
   const parenRegex = /\(([^)]+)\)/g;
   let pMatch;
   while ((pMatch = parenRegex.exec(rawText)) !== null) {
     const content = pMatch[1].trim();
     if (content) {
-      if (
+      detectedConditions.push(`(${content})`);
+      const mappedCue = mapEmotionCueToStyle(content);
+      if (mappedCue) {
+        extractedStyles.push(mappedCue);
+      } else if (
         /(?:bariton|mezzo|sopran|tenor|bas|sokin|tez|pauza|nafas|kulgi|kamera|kadr|musiqa|ovoz|ohang|jiddiy|hayajon|gurur|faxr|pichirlash|shivir|savol|hayrat|kulimsirab|tabassum|tantana|mehribon|sirli|chuqur|sigh|gasp|deep_breath|chuckle|голос|баритон|меццо|тенор|сопрано|бас|пауз|шепот|громк|интонац|акцент|настроени|уверен|бодр|спокойн|секунд|сек|диктор|ведущ|гость|кадр|сцен|музык|эффект|улыбк|смех|\d{1,2}:\d{2})/i.test(
           content,
         )
       ) {
-        detectedConditions.push(`(${content})`);
         extractedStyles.push(content);
       }
     }
@@ -223,7 +284,7 @@ function cleanScriptForSpeech(rawText: string): {
 
   let cleaned = rawText;
 
-  // 3. Script headers
+  // 4. Remove script headers and metadata blocks
   cleaned = cleaned
     .replace(
       /^(?:SARLAVHA|TAVSIF|SKRIPT|TAKROR_VAQT|SAHNA_MATNI|TOZA_MATN|TITLE|SCENE|CHAPTER|BOB|KIRISH|INTRO|XULOSA|OUTRO|СЦЕНА|ГЛАВА|ВСТУПЛЕНИЕ|ИТОГ)\s*:[^\n]*\n?/gim,
@@ -231,52 +292,16 @@ function cleanScriptForSpeech(rawText: string): {
     )
     .replace(/^---\s*$/gm, "");
 
-  // 4. Handle timing pause tags in brackets [Pauza 1s] by converting them into natural cadence ellipsis (... )
-  cleaned = cleaned
-    .replace(/\[\s*(?:pauza|pause|пауза|jimlik|тишина)[^\]]*\]/gi, "... ")
-    .replace(/\(\s*(?:pauza|pause|пауза|jimlik|тишина)[^)]*\)/gi, "... ");
-
-  // 4b. Convert conversational pipe markers into natural flowing conversational words
-  cleaned = cleaned
-    .replace(/\|\s*(?:ha|aha)\s*\|/gi, "ha, ")
-    .replace(/\|\s*(?:mhm|hm)\s*\|/gi, "mhm, ")
-    .replace(/\|\s*(?:rostanam|rosti|toʻgʻri|togri)\s*\|/gi, "rostanam, ")
-    .replace(/\|\s*(?:xoʻsh|xosh|xo'sh)\s*\|/gi, "xoʻsh, ")
-    .replace(/\|\s*(?:albatta)\s*\|/gi, "albatta, ")
-    .replace(/\|\s*(?:voy|ana|bilasizmi)\s*\|/gi, "$1, ")
-    .replace(/\|[^|]+\|/g, " ");
-
-  // 4c. Convert vocal bursts into natural conversational speech rhythm (no raw code tags!)
-  cleaned = cleaned
-    .replace(/<\s*(?:nafas|chuqur_nafas|breath|deep_breath)\s*>/gi, "... ")
-    .replace(/<\s*(?:kulgi|kulgili|jilmayish|laugh|chuckle|giggle)\s*>/gi, ", ")
-    .replace(/<\s*(?:xo'rsinish|xoʻrsinish|sigh)\s*>/gi, "... ")
-    .replace(/<\s*(?:hansirash|hayrat|gasp)\s*>/gi, "... ")
-    .replace(/<\s*(?:tomoq_qirish|throat_clear)\s*>/gi, " ")
-    .replace(/<[^>]+>/g, " ");
-
-  // 5. Remove ALL non-spoken bracket blocks completely: [00:00 - 00:06], [Баритон], [Кадр 1], [Kulminatsiya], [Hayajon], [Кульминация], etc.
-  cleaned = cleaned.replace(/\[[^\]]*\]/g, " ");
-
-  // 6. Remove ALL stage direction / condition parentheses completely:
-  // e.g. (kulimsirab), (kulimsirap), (кулимсираб), (кулимсирап), (tabassum bilan), (jiddiy ohangda), (o'ylanib), (kulib)
-  // Non-spoken actor instructions must NEVER be voiced aloud by TTS!
-  cleaned = cleaned.replace(/\([^)]*\)/g, " ");
-
-  // Remove any curly braces e.g. {stage_direction}
-  cleaned = cleaned.replace(/\{[^}]*\}/g, " ");
-
-  // 7. Remove timing ranges (e.g. 00:00 - 00:06) and line-start director markers (e.g. 01:23: )
-  // Also strip chapter headers e.g. "Chapter 2: Вступление" and YouTube accessibility artifacts "0:000 seconds", "1:401 minute, 40 seconds"
+  // 5. Remove timing ranges, timestamps, and YouTube accessibility artifacts
   cleaned = cleaned
     .replace(/^\s*Chapter\s*\d+\s*:.*$/gmi, " ")
     .replace(/^\s*\d{1,2}:\d{2}\d*\s*(?:minutes?|seconds?|minute,\s*\d+\s*seconds?|секунд|минут|сек|мин)?\s*/gmi, " ")
     .replace(/\b\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}\b/g, " ")
     .replace(/^\s*\d{1,2}:\d{2}(?::\d{2})?\s*[:-]\s*/gm, "");
 
-  // 8. Remove speaker label prefixes at line starts: e.g. "Диктор (баритон):", "Ведущий:", "Host 1:", "Boshlovchi:", "Speaker:", "Zephyr:"
+  // 6. Remove speaker label prefixes at line starts (e.g. "Artur:", "Host 1:", "Ayubxon:", "Диктор:")
   cleaned = cleaned.replace(
-    /^(?:[A-Za-zА-Яа-яЁё0-9_\s-]{1,25}(?:\([^)]*\))?)\s*:\s*(?=[A-Za-zА-Яа-яЁё])/gm,
+    /^(?:[A-Za-zА-Яа-яЁё0-9_\s-]{1,25}(?:\([^)]*\))?)\s*:\s*(?=[A-Za-zА-Яа-яЁё<])/gm,
     (match) => {
       if (
         /(?:диктор|голос|ведущ|гость|boshlovchi|mehmon|host|guest|speaker|spiker|narrator|баритон|меццо|bariton|mezzo|кадр|сцена|sahna|kadr|интонация|ohang|тембр|tembr|shart|условие|zephyr|charon|puck|kore|fenrir|aoede|artur|yugay|ayubxon|oybek|burxanov|arthur|айюбхон|аюбхон|бурхонов|югай|артур)/i.test(
@@ -289,13 +314,45 @@ function cleanScriptForSpeech(rawText: string): {
     },
   );
 
-  // 9. Remove formatting symbols (*, _, #, ~, `)
+  // 7. Convert conversational pipe markers into natural flowing conversational words
+  cleaned = cleaned
+    .replace(/\|\s*(?:ha|aha)\s*\|/gi, "ha, ")
+    .replace(/\|\s*(?:mhm|hm)\s*\|/gi, "mhm, ")
+    .replace(/\|\s*(?:rostanam|rosti|toʻgʻri|togri)\s*\|/gi, "rostanam, ")
+    .replace(/\|\s*(?:xoʻsh|xosh|xo'sh)\s*\|/gi, "xoʻsh, ")
+    .replace(/\|\s*(?:albatta)\s*\|/gi, "albatta, ")
+    .replace(/\|\s*(?:voy|ana|bilasizmi)\s*\|/gi, "$1, ")
+    .replace(/\|[^|]+\|/g, " ");
+
+  // 8. Convert emotion/vocal cues into Gemini TTS native inline tags (<laugh>, <sigh>, <short pause>, <gasp>)
+  cleaned = cleaned
+    .replace(/<\s*(?:kulgi|kulgili|jilmayish|chuckle|giggle)\s*>/gi, " <laugh> ")
+    .replace(/\(\s*(?:kulib|kulimsirab|tabassum bilan|jilmayib|смеется|улыбаясь|смех|chuckle|laughing)\s*\)/gi, " <laugh> ")
+    .replace(/<\s*(?:nafas|chuqur_nafas|breath|deep_breath|xo[ʻ'']rsinish)\s*>/gi, " <sigh> ")
+    .replace(/\(\s*(?:nafas olib|chuqur nafas olib|xo[ʻ'']rsinib|вздыхая|вдохнув|deep breath)\s*\)/gi, " <sigh> ")
+    .replace(/<\s*(?:hansirash|hayrat)\s*>/gi, " <gasp> ")
+    .replace(/\(\s*(?:hansirab|hayratda|ахнув|gasp)\s*\)/gi, " <gasp> ")
+    .replace(/\[\s*(?:pauza|pause|пауза|jimlik|тишина)[^\]]*\]/gi, " <short pause> ")
+    .replace(/\(\s*(?:pauza|pause|пауза|jimlik|тишина)[^)]*\)/gi, " <short pause> ")
+    .replace(/<\s*(?:pauza|pause|short_pause)\s*>/gi, " <short pause> ");
+
+  // 9. Remove all non-Gemini angle tags while PRESERVING valid native inline tags:
+  // <laugh>, <sigh>, <short pause>, <gasp>
+  cleaned = cleaned.replace(/<(?!(\/?(?:laugh|sigh|short pause|gasp))\b)[^>]+>/gi, " ");
+
+  // 10. Remove remaining stage directions in square brackets and parentheticals
+  cleaned = cleaned.replace(/\[[^\]]*\]/g, " ");
+  cleaned = cleaned.replace(/\([^)]*\)/g, " ");
+  cleaned = cleaned.replace(/\{[^}]*\}/g, " ");
+
+  // 11. Remove formatting markdown characters
   cleaned = cleaned.replace(/[*#_~`]/g, "");
 
-  // 10. Normalize spaces and punctuation
+  // 12. Normalize whitespace and punctuation spacing, keeping native tags cleanly spaced
   cleaned = cleaned
     .replace(/\s+/g, " ")
     .replace(/\s+([.,!?;:])/g, "$1")
+    .replace(/([.,!?;:])\1+/g, "$1")
     .trim();
 
   return {
@@ -307,11 +364,12 @@ function cleanScriptForSpeech(rawText: string): {
 
 /**
  * Universal High-Reliability Speech Synthesizer for Gemini TTS
- * - Automatically normalizes Uzbek linguistics (numbers, percents, letters, apostrophes) via normalizeUzbekSpeech
- * - Prioritizes gemini-3.8-flash-lite-tts (high throughput, dedicated quota, ultra-fast 2s latency)
- * - Seamlessly fails over to gemini-3.8-flash-tts
- * - Implements multi-tier fallback (with style -> without style -> trimmed)
- * - Guarantees consistent prebuilt voice identity without timbre/pitch switching
+ * - Locks stable base prebuilt voice (Charon / Fenrir / Kore / Puck / Aoede / Zephyr) per speaker
+ * - Preserves voice identity and timbre consistency across entire dialogue
+ * - Never resets or strips speechStyle (No Tier 2 style-wiping fallback)
+ * - Automatically retries with exponential backoff (1s - 2s+) on HTTP 429 / rate limit / network errors
+ * - Modulates emotions (laughter, whisper, breath, tempo, volume) strictly via speechMetadata.style
+ * - Performs linguistic and phonetic normalization for Uzbek text
  */
 export async function generateGeminiSpeechPcm({
   text,
@@ -324,119 +382,148 @@ export async function generateGeminiSpeechPcm({
   speechStyle?: string;
   speakerName?: string;
 }): Promise<{ pcm: Buffer; rawWav: Buffer }> {
-  // 1. Linguistic & Uzbek phonetic normalization
-  let normalized = text;
+  // 1. Stabilize and lock base prebuilt voice (Charon / Fenrir / Kore / Puck / Aoede / Zephyr)
+  const CANONICAL_VOICES: Record<string, string> = {
+    charon: "Charon",
+    fenrir: "Fenrir",
+    kore: "Kore",
+    puck: "Puck",
+    aoede: "Aoede",
+    zephyr: "Zephyr",
+  };
+
+  const rawKey = (voiceName || "").trim().toLowerCase();
+  let targetVoice = CANONICAL_VOICES[rawKey];
+
+  if (!targetVoice) {
+    const found = Object.values(CANONICAL_VOICES).find(
+      (v) => v.toLowerCase() === rawKey,
+    );
+    if (found) {
+      targetVoice = found;
+    } else if (/kore|female|ayol|женск/i.test(voiceName || speakerName || "")) {
+      targetVoice = "Kore";
+    } else if (/fenrir|ayubxon|oybek|mehmon|guest/i.test(voiceName || speakerName || "")) {
+      targetVoice = "Fenrir";
+    } else {
+      targetVoice = "Charon";
+    }
+  }
+
+  // 2. Extract and preserve any emotional cues (<kulgi>, <nafas>, (kulib), (pichirlab)) from the script
+  const { speechText: cleanedText, extractedStyles } = cleanScriptForSpeech(text || "");
+  const spokenContent = cleanedText || (text || "").trim() || "...";
+
+  // 3. Uzbek linguistic & phonetic normalization
+  let normalized = spokenContent;
   try {
-    normalized = normalizeUzbekSpeech(text);
+    normalized = normalizeUzbekSpeech(spokenContent);
   } catch {}
-  const ttsText = (normalized || text || "...").trim();
+  const ttsText = (normalized || spokenContent || "...").trim();
 
-  // Gemini models that support audio/TTS modalities
+  // 4. Compose persistent style + dynamic emotion prompts (whisper, laughter, tempo, etc.)
+  // Never wipe or strip style: all acting dynamics are conveyed strictly via speechMetadata.style
+  const styleTokens: string[] = [];
+  if (speechStyle && speechStyle.trim()) {
+    styleTokens.push(speechStyle.trim());
+  }
+  if (extractedStyles && extractedStyles.length > 0) {
+    styleTokens.push(`Acting & emotion delivery: ${extractedStyles.join(", ")}`);
+  }
+  const effectiveStyle = styleTokens.join(". ");
+
   const ttsModels = ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts"];
+  const MAX_RETRIES = 3;
 
-  // Tier 1: Try with full speechStyle metadata
+  const isTransientError = (err: any) => {
+    const msg = (err?.message || "").toLowerCase();
+    const status = err?.status || err?.statusCode || err?.code;
+    return (
+      status === 429 ||
+      status === 503 ||
+      status === 500 ||
+      status === "ECONNRESET" ||
+      status === "ETIMEDOUT" ||
+      msg.includes("429") ||
+      msg.includes("resource_exhausted") ||
+      msg.includes("quota") ||
+      msg.includes("rate limit") ||
+      msg.includes("too many requests") ||
+      msg.includes("overloaded") ||
+      msg.includes("fetch failed") ||
+      msg.includes("network") ||
+      msg.includes("timeout") ||
+      msg.includes("unavailable")
+    );
+  };
+
+  let lastError: any = null;
+
+  // Request payload ALWAYS maintains speechMetadata and voice identity intact (NO Tier 2 style-stripping!)
+  const payloadContents = [
+    {
+      role: "user",
+      parts: effectiveStyle
+        ? [
+            {
+              text: ttsText,
+              speechMetadata: {
+                speaker: speakerName || targetVoice,
+                style: effectiveStyle,
+              },
+            },
+          ]
+        : [{ text: ttsText }],
+    },
+  ];
+
   for (const model of ttsModels) {
-    try {
-      const response = await ai.models.generateContent({
-        model,
-        contents: [
-          {
-            role: "user",
-            parts: speechStyle
-              ? [
-                  {
-                    text: ttsText,
-                    speechMetadata: {
-                      speaker: speakerName || voiceName,
-                      style: speechStyle,
-                    },
-                  },
-                ]
-              : [{ text: ttsText }],
-          },
-        ],
-        config: {
-          responseModalities: ["AUDIO"],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName },
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: payloadContents,
+          config: {
+            responseModalities: ["AUDIO"],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: targetVoice },
+              },
             },
           },
-        },
-      });
+        });
 
-      const audioData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (audioData) {
-        const rawBuf = Buffer.from(audioData, "base64");
-        const { pcm } = extractPcmData(rawBuf);
-        if (pcm && pcm.length > 0) {
-          return { pcm, rawWav: rawBuf };
+        const audioData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        if (audioData) {
+          const rawBuf = Buffer.from(audioData, "base64");
+          const { pcm } = extractPcmData(rawBuf);
+          if (pcm && pcm.length > 0) {
+            return { pcm, rawWav: rawBuf };
+          }
         }
+      } catch (err: any) {
+        lastError = err;
+        const transient = isTransientError(err);
+        if (transient && attempt < MAX_RETRIES - 1) {
+          // Exponential backoff: 1.2s -> 2.4s -> 4.5s (with slight jitter)
+          const delayMs = Math.round(1200 * Math.pow(1.8, attempt) + Math.random() * 300);
+          console.warn(
+            `[TTS Retry ${attempt + 1}/${MAX_RETRIES}] Rate-limit/network error on ${model} for voice ${targetVoice}, retrying in ${delayMs}ms:`,
+            err?.message?.slice(0, 100),
+          );
+          await new Promise((r) => setTimeout(r, delayMs));
+          continue;
+        }
+        console.warn(`[TTS ${model}] Voice ${targetVoice} attempt failed:`, err?.message?.slice(0, 100));
+        // If not retryable or retries exhausted for this model, fallback to next model with SAME style & voice
+        break;
       }
-    } catch (err: any) {
-      console.warn(`[TTS Tier 1 - ${model}] Voice ${voiceName} notice:`, err?.message?.slice(0, 100));
     }
   }
 
-  // Tier 2: Try without speechMetadata (clean raw text)
-  for (const model of ttsModels) {
-    try {
-      const response = await ai.models.generateContent({
-        model,
-        contents: [{ role: "user", parts: [{ text: ttsText }] }],
-        config: {
-          responseModalities: ["AUDIO"],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName },
-            },
-          },
-        },
-      });
-
-      const audioData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (audioData) {
-        const rawBuf = Buffer.from(audioData, "base64");
-        const { pcm } = extractPcmData(rawBuf);
-        if (pcm && pcm.length > 0) {
-          return { pcm, rawWav: rawBuf };
-        }
-      }
-    } catch (err: any) {
-      console.warn(`[TTS Tier 2 - ${model}] Voice ${voiceName} notice:`, err?.message?.slice(0, 100));
-    }
-  }
-
-  // Tier 3: Emergency fallback with first 300 characters
-  for (const model of ttsModels) {
-    try {
-      const response = await ai.models.generateContent({
-        model,
-        contents: [{ role: "user", parts: [{ text: ttsText.slice(0, 300) }] }],
-        config: {
-          responseModalities: ["AUDIO"],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName },
-            },
-          },
-        },
-      });
-
-      const audioData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (audioData) {
-        const rawBuf = Buffer.from(audioData, "base64");
-        const { pcm } = extractPcmData(rawBuf);
-        if (pcm && pcm.length > 0) {
-          return { pcm, rawWav: rawBuf };
-        }
-      }
-    } catch (err: any) {
-      console.warn(`[TTS Tier 3 - ${model}] notice:`, err?.message?.slice(0, 100));
-    }
-  }
-
-  throw new Error(`Failed to synthesize speech across all Gemini models for voice ${voiceName}`);
+  throw new Error(
+    `Failed to synthesize speech for voice ${targetVoice} (Style: "${effectiveStyle}"): ${lastError?.message || "Unknown error"}`,
+  );
 }
 
 // -------------------------------------------------------------
@@ -3438,12 +3525,24 @@ QAT'IY TALABLAR:
 
 // Helper to cleanly extract time and spoken text from all YouTube subtitle formats
 function cleanSubtitleLine(line: string) {
-  // Support standard mm:ss or hh:mm:ss, including YouTube accessibility artifacts (e.g. 0:000 seconds, 1:401 minute, 40 seconds)
-  const match = line.match(/^(\d+):(\d{2})(.*)$/i);
-  if (!match) return null;
-  const mins = parseInt(match[1], 10);
-  const secs = parseInt(match[2], 10);
-  let rest = match[3];
+  // Support standard hh:mm:ss or mm:ss, including YouTube accessibility artifacts (e.g. 0:000 seconds, 1:401 minute, 40 seconds)
+  const hmsMatch = line.match(/^(\d{1,2}):(\d{2}):(\d{2})(.*)$/i);
+  let mins = 0;
+  let secs = 0;
+  let rest = "";
+
+  if (hmsMatch) {
+    const hours = parseInt(hmsMatch[1], 10);
+    mins = hours * 60 + parseInt(hmsMatch[2], 10);
+    secs = parseInt(hmsMatch[3], 10);
+    rest = hmsMatch[4];
+  } else {
+    const msMatch = line.match(/^(\d+):(\d{2})(.*)$/i);
+    if (!msMatch) return null;
+    mins = parseInt(msMatch[1], 10);
+    secs = parseInt(msMatch[2], 10);
+    rest = msMatch[3];
+  }
 
   // Strip repeated youtube accessibility numbers/units (e.g., "0 seconds", "1 minute, 40 seconds")
   rest = rest.replace(/^(?:\d+[\s,]*)+/i, "");
@@ -4161,14 +4260,219 @@ app.post(
     const host2Config = { prebuiltVoiceConfig: { voiceName: host2BaseVoice } };
 
     // Constant, stable voice styling for Host 1 and Host 2 across ALL turns:
-    // We avoid dynamic per-turn emotion overrides that cause vocal pitch/timbre/age jumping!
     const host1SpeechStyle = `Natural male Uzbek podcast host named Artur Yugay. Clear, resonant, warm baritone voice, confident studio conversational cadence, articulate native Uzbek speech.`;
     const host2SpeechStyle = isHost2Female
       ? `Natural female Uzbek podcast guest and specialist. Melodious, articulate, warm feminine voice, polite and intelligent conversational cadence.`
       : `Natural male Uzbek finance and business expert guest named Ayubxon Burxonov. Deep, calm, thoughtful baritone voice, articulate conversational Uzbek speech with authoritative delivery.`;
 
+    // Setup 2 distinct speaker identities for Gemini native multiSpeakerVoiceConfig:
+    const host1SpeakerTag = "Artur";
+    const host2SpeakerTag = isHost2Female ? "Kore" : "Ayubxon";
+
+    const speakerVoiceConfigs = [
+      {
+        speaker: host1SpeakerTag,
+        voiceConfig: { prebuiltVoiceConfig: { voiceName: host1BaseVoice } },
+      },
+      {
+        speaker: host2SpeakerTag,
+        voiceConfig: { prebuiltVoiceConfig: { voiceName: host2BaseVoice } },
+      },
+    ];
+
+    let nativeMasterWav: Buffer | null = null;
+    let nativeMasterPcm: Buffer | null = null;
+    const nativePerPartAudios: Buffer[] = [];
+    let nativeSuccess = false;
+
+    // Check if we can perform a single native multi-speaker request:
+    // Supported if turns <= 16 and not explicitly forced sequential
+    const canAttemptNativeMultiSpeaker =
+      turns.length > 0 &&
+      turns.length <= 16 &&
+      !req.body?.forceSequential;
+
+    if (canAttemptNativeMultiSpeaker) {
+      console.log(
+        `[Synthesize Dialogue] Attempting native multiSpeakerVoiceConfig with gemini-3.8-flash-tts (${turns.length} turns, Host 1: ${host1BaseVoice}, Host 2: ${host2BaseVoice})...`,
+      );
+
+      const multiSpeakerParts = turns.map((turn: any) => {
+        const isHost1 = turn.speakerId === "HOST_1";
+        const speaker = isHost1 ? host1SpeakerTag : host2SpeakerTag;
+        const activeBaseStyle = isHost1 ? host1SpeechStyle : host2SpeechStyle;
+
+        const { speechText: cleanedTurnText, extractedStyles: turnExtractedStyles } = cleanScriptForSpeech(turn.text || "");
+        let spokenText = cleanedTurnText;
+        try {
+          spokenText = normalizeUzbekSpeech(spokenText);
+        } catch {}
+        const textToSynthesize = spokenText || cleanedTurnText || (turn.text || "").trim() || "...";
+
+        const styleTokens = [activeBaseStyle];
+        if (turn.speechStyle) styleTokens.push(turn.speechStyle);
+        if (turnExtractedStyles && turnExtractedStyles.length > 0) {
+          styleTokens.push(`Acting & emotion cues: ${turnExtractedStyles.join(", ")}`);
+        }
+
+        return {
+          text: textToSynthesize,
+          speechMetadata: {
+            speaker,
+            style: styleTokens.filter(Boolean).join(". "),
+          },
+        };
+      });
+
+      const multiSpeakerCandidateModels = [
+        "gemini-3.8-flash-tts",
+        "gemini-2.5-flash",
+        "gemini-3.8-flash-lite-tts",
+      ];
+
+      for (const modelCandidate of multiSpeakerCandidateModels) {
+        try {
+          const multiResponse = await ai.models.generateContent({
+            model: modelCandidate,
+            contents: [
+              {
+                role: "user",
+                parts: multiSpeakerParts,
+              },
+            ],
+            config: {
+              responseModalities: ["AUDIO"],
+              speechConfig: {
+                multiSpeakerVoiceConfig: {
+                  speakerVoiceConfigs,
+                },
+              },
+            },
+          });
+
+          const resParts = multiResponse.candidates?.[0]?.content?.parts || [];
+          const audioParts = resParts.filter((p: any) => typeof p?.inlineData?.data === "string");
+
+          if (audioParts.length > 0) {
+            if (audioParts.length === 1) {
+              const audioBase64Str: string = audioParts[0].inlineData!.data!;
+              const rawAudio = Buffer.from(audioBase64Str, "base64");
+              const { pcm } = extractPcmData(rawAudio);
+              if (pcm && pcm.length > 0) {
+                nativeMasterPcm = pcm;
+                nativeMasterWav = buildWavBuffer(pcm, 24000, 1, 16);
+                nativeSuccess = true;
+                console.log(
+                  `[Synthesize Dialogue] Native multi-speaker generation succeeded on ${modelCandidate} (${pcm.length} PCM bytes)`,
+                );
+                break;
+              }
+            } else {
+              // Multiple audio parts returned (one per turn)
+              const pcmParts: Buffer[] = [];
+              for (const ap of audioParts) {
+                const audioBase64Str: string = ap.inlineData?.data || "";
+                if (!audioBase64Str) continue;
+                const rawAudio = Buffer.from(audioBase64Str, "base64");
+                const { pcm } = extractPcmData(rawAudio);
+                pcmParts.push(pcm);
+                nativePerPartAudios.push(rawAudio);
+              }
+              if (pcmParts.length > 0) {
+                nativeMasterPcm = Buffer.concat(pcmParts);
+                nativeMasterWav = buildWavBuffer(nativeMasterPcm, 24000, 1, 16);
+                nativeSuccess = true;
+                console.log(
+                  `[Synthesize Dialogue] Native multi-speaker generation succeeded with ${audioParts.length} audio parts on ${modelCandidate}`,
+                );
+                break;
+              }
+            }
+          }
+        } catch (multiErr: any) {
+          console.warn(
+            `[Synthesize Dialogue] Multi-speaker request on ${modelCandidate} failed:`,
+            multiErr?.message?.slice(0, 120),
+          );
+        }
+      }
+    }
+
+    if (nativeSuccess && nativeMasterWav && nativeMasterPcm) {
+      // Build synthesizedTurns from native multi-speaker master audio
+      const totalDuration = Math.round((nativeMasterPcm.length / 48000) * 10) / 10;
+      const totalTextLen = Math.max(1, turns.reduce((acc: number, t: any) => acc + (t.text || "").length, 0));
+      let currentTurnStart = 0;
+
+      const synthesizedTurns = turns.map((turn: any, i: number) => {
+        const isHost1 = turn.speakerId === "HOST_1";
+        const speakerName = isHost1
+          ? (host1Voice.name || turn.speakerName || "Artur Yugay")
+          : (host2Voice.name || turn.speakerName || "Ayubxon Burxonov");
+
+        let turnWavBase64 = "";
+        let turnDuration = 0;
+
+        if (nativePerPartAudios.length === turns.length) {
+          turnWavBase64 = nativePerPartAudios[i].toString("base64");
+          const { pcm } = extractPcmData(nativePerPartAudios[i]);
+          turnDuration = Math.max(0.5, Math.round((pcm.length / 48000) * 10) / 10);
+        } else {
+          // Proportional duration from master track based on turn text length
+          const proportion = Math.max(0.05, (turn.text || "").length / totalTextLen);
+          turnDuration = Math.max(0.5, Math.round(totalDuration * proportion * 10) / 10);
+          const pcmByteStart = Math.min(nativeMasterPcm!.length, Math.floor(currentTurnStart * 48000));
+          const pcmByteEnd = Math.min(nativeMasterPcm!.length, Math.floor((currentTurnStart + turnDuration) * 48000));
+          if (pcmByteEnd > pcmByteStart) {
+            const turnSlice = nativeMasterPcm!.subarray(pcmByteStart, pcmByteEnd);
+            turnWavBase64 = buildWavBuffer(turnSlice, 24000, 1, 16).toString("base64");
+          }
+        }
+
+        const startTime = currentTurnStart;
+        const endTime = currentTurnStart + turnDuration;
+        currentTurnStart = endTime;
+
+        return {
+          id: turn.id || `turn-${i}`,
+          speakerId: turn.speakerId,
+          speakerName: turn.speakerName || speakerName,
+          text: turn.text,
+          originalText: turn.originalText,
+          timecode: turn.timecode,
+          startSec: turn.startSec,
+          endSec: turn.endSec,
+          durationSec: turn.durationSec,
+          chapter: turn.chapter,
+          emotion: turn.emotion,
+          audioBase64: turnWavBase64 || nativeMasterWav!.toString("base64"),
+          durationSeconds: turnDuration,
+          startTime,
+          endTime,
+          synthesisFailed: false,
+        };
+      });
+
+      let creditsRemaining = (req as any).userBalance;
+      if (typeof (req as any).deductCredits === "function") {
+        try {
+          creditsRemaining = await (req as any).deductCredits();
+        } catch (deductErr) {
+          console.warn("Credit deduction notice:", deductErr);
+        }
+      }
+
+      return res.json({
+        masterAudioBase64: nativeMasterWav.toString("base64"),
+        totalDurationSeconds: totalDuration,
+        turns: synthesizedTurns,
+        creditsRemaining,
+      });
+    }
+
+    // SAFE FALLBACK: Sequential synthesis with 2-concurrent worker loop if native multi-speaker was skipped or failed
     console.log(
-      `[Synthesize Dialogue] Processing ${turns.length} turns with fixed voices (Host 1: ${host1BaseVoice}, Host 2: ${host2BaseVoice})...`,
+      `[Synthesize Dialogue] Running sequential fallback for ${turns.length} turns (Host 1: ${host1BaseVoice}, Host 2: ${host2BaseVoice})...`,
     );
 
     // Single unified dialogue pause constant (350ms):
@@ -4191,8 +4495,17 @@ app.post(
         ? (host1Voice.name || turn.speakerName || "Artur Yugay")
         : (host2Voice.name || turn.speakerName || "Ayubxon Burxonov");
 
-      const { speechText: cleanedTurnText } = cleanScriptForSpeech(turn.text || "");
+      const { speechText: cleanedTurnText, extractedStyles: turnExtractedStyles } = cleanScriptForSpeech(turn.text || "");
       const textToSynthesize = cleanedTurnText || (turn.text || "").trim() || "...";
+      const combinedTurnStyle = [
+        activeSpeechStyle,
+        turn.speechStyle,
+        turnExtractedStyles && turnExtractedStyles.length > 0
+          ? `Acting & emotional cues: ${turnExtractedStyles.join(", ")}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(". ");
 
       let turnPcm: Buffer | null = null;
       let turnWavRaw: Buffer | null = null;
@@ -4202,7 +4515,7 @@ app.post(
         const result = await generateGeminiSpeechPcm({
           text: textToSynthesize,
           voiceName: activeVoiceName,
-          speechStyle: activeSpeechStyle,
+          speechStyle: combinedTurnStyle,
           speakerName,
         });
         turnPcm = result.pcm;
@@ -4293,6 +4606,16 @@ app.post(
       });
     }
 
+    // If 100% of turns failed to synthesize, return an explicit error instead of silent mock audio
+    if (failedTurns.length === processedTurnResults.length && processedTurnResults.length > 0) {
+      console.error(`[Synthesize Dialogue] All ${turns.length} turns failed to synthesize audio.`);
+      return res.status(502).json({
+        error: "Ovoz sintezi amalga oshmadi. Barcha replikalarda xatolik yuz berdi.",
+        message_ru: "Синтез диалога не удался: модель не смогла сгенерировать аудио. Проверьте квоты и статус API ключа.",
+        failedTurns,
+      });
+    }
+
     // Combine all pure PCM chunks into ONE unified master track with a single valid 44-byte WAV header
     let masterAudioBase64 = "";
     let totalDuration = 0;
@@ -4304,7 +4627,7 @@ app.post(
     }
 
     let creditsRemaining = (req as any).userBalance;
-    if (typeof (req as any).deductCredits === "function") {
+    if (failedTurns.length < processedTurnResults.length && typeof (req as any).deductCredits === "function") {
       try {
         creditsRemaining = await (req as any).deductCredits();
       } catch (deductErr) {
