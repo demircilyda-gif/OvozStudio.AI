@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { isEmailAdmin, getAdminEmails } from './authUtils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -61,6 +62,7 @@ interface StorageData {
   pendingCreditGrants: Record<string, StoredPendingGrant>;
   generations: Record<string, any[]>;
   processedSessions: Record<string, StoredProcessedSession>;
+  geminiApiKey?: string;
 }
 
 class LocalStore {
@@ -91,36 +93,40 @@ class LocalStore {
           pendingCreditGrants: parsed.pendingCreditGrants || {},
           generations: parsed.generations || {},
           processedSessions: parsed.processedSessions || {},
+          geminiApiKey: parsed.geminiApiKey || undefined,
         };
       } else {
         this.save();
       }
 
-      // Ensure admin user exists with unlimited quota
-      const adminEmail = 'demircilyda@gmail.com';
-      let adminExists = false;
-      for (const u of Object.values(this.data.users)) {
-        if (u.email && u.email.trim().toLowerCase() === adminEmail) {
-          adminExists = true;
-          u.creditsRemaining = 999999;
-          u.role = 'admin';
-          u.tier = 'unlimited';
-          break;
+      // Ensure admin user(s) exist with unlimited quota
+      const adminEmails = getAdminEmails();
+      for (const adminEmail of adminEmails) {
+        let adminExists = false;
+        for (const u of Object.values(this.data.users)) {
+          if (u.email && u.email.trim().toLowerCase() === adminEmail) {
+            adminExists = true;
+            u.creditsRemaining = 999999;
+            u.role = 'admin';
+            u.tier = 'unlimited';
+            break;
+          }
+        }
+        if (!adminExists) {
+          const cleanKey = `admin-${adminEmail.replace(/[^a-zA-Z0-9]/g, '_')}`;
+          this.data.users[cleanKey] = {
+            uid: cleanKey,
+            email: adminEmail,
+            displayName: `${adminEmail.split('@')[0]} (Admin)`,
+            creditsRemaining: 999999,
+            tier: 'unlimited',
+            role: 'admin',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
         }
       }
-      if (!adminExists) {
-        this.data.users['admin-demircilyda'] = {
-          uid: 'admin-demircilyda',
-          email: adminEmail,
-          displayName: 'Demircilyda (Admin)',
-          creditsRemaining: 999999,
-          tier: 'unlimited',
-          role: 'admin',
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-        this.save();
-      }
+      this.save();
     } catch (e) {
       console.warn('LocalStore init warning:', e);
     }
@@ -273,7 +279,7 @@ class LocalStore {
     if (!user) {
       return { success: false, remaining: 0 };
     }
-    if (user.role === 'admin' || (user.email && user.email.toLowerCase() === 'demircilyda@gmail.com')) {
+    if (user.role === 'admin' || isEmailAdmin(user.email)) {
       return { success: true, remaining: 999999 };
     }
     if (user.creditsRemaining < cost) {
@@ -302,6 +308,16 @@ class LocalStore {
     user.updatedAt = new Date().toISOString();
     this.save();
     return { success: true, remaining: user.creditsRemaining };
+  }
+
+  // --- Persistent Gemini API Key Management ---
+  public getGeminiApiKey(): string | undefined {
+    return this.data.geminiApiKey;
+  }
+
+  public setGeminiApiKey(key: string): void {
+    this.data.geminiApiKey = key.trim();
+    this.save();
   }
 }
 

@@ -27,6 +27,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ lang }) => {
     isAuthModalOpen,
     authModalReason,
     closeAuthModal,
+    loginAsLocalAdmin,
   } = useAuth();
 
   const [tab, setTab] = useState<'login' | 'register'>('login');
@@ -44,10 +45,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({ lang }) => {
       await signInWithGoogle();
       closeAuthModal();
     } catch (err: any) {
-      setErrorMsg(
-        err.message ||
-          (lang === 'uz' ? 'Google orqali kirishda xatolik yuz berdi' : 'Ошибка входа через Google')
-      );
+      let msg = err.message || (lang === 'uz' ? 'Google orqali kirishda xatolik yuz berdi' : 'Ошибка входа через Google');
+      if (err.code === 'auth/permission-denied' || /suspended/i.test(err.message || '')) {
+        msg =
+          lang === 'uz'
+            ? "Firebase loyihasi yoki API kaliti Google Cloud'da to'xtatilgan (Consumer suspended). Google Cloud Console'da billing yoki loyiha holatini tekshiring."
+            : "Проект или API-ключ Firebase приостановлен в Google Cloud (Consumer suspended). Проверьте статус биллинга или разблокируйте ключ в Google Cloud Console.";
+      }
+      setErrorMsg(msg);
     } finally {
       setLoading(false);
     }
@@ -88,6 +93,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({ lang }) => {
           lang === 'uz'
             ? "Ushbu email allaqachon ro'yxatdan o'tgan"
             : 'Этот email уже зарегистрирован';
+      } else if (err.code === 'auth/permission-denied' || /suspended/i.test(err.message || '')) {
+        msg =
+          lang === 'uz'
+            ? "Firebase loyihasi yoki API kaliti Google Cloud'da to'xtatilgan (Consumer suspended). Google Cloud Console'da billing yoki loyiha holatini tekshiring."
+            : "Проект или API-ключ Firebase приостановлен в Google Cloud (Consumer suspended). Проверьте статус биллинга или разблокируйте ключ в Google Cloud Console.";
       }
       setErrorMsg(msg);
     } finally {
@@ -151,9 +161,25 @@ export const AuthModal: React.FC<AuthModalProps> = ({ lang }) => {
 
         {/* Error Message */}
         {errorMsg && (
-          <div className="relative z-10 bg-rose-50 border border-rose-200 rounded-xl p-3 text-xs text-rose-700 flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
-            <span>{errorMsg}</span>
+          <div className="relative z-10 space-y-2">
+            <div className="bg-rose-50 border border-rose-200 rounded-xl p-3 text-xs text-rose-700 flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>{errorMsg}</span>
+            </div>
+            {import.meta.env.DEV && import.meta.env.VITE_LOCAL_DEV_AUTH === 'true' && /suspended|permission-denied/i.test(errorMsg) && (
+              <button
+                type="button"
+                onClick={loginAsLocalAdmin}
+                className="w-full py-2.5 px-3 bg-[#0E7C86] hover:bg-[#0A5A62] text-white text-xs font-semibold rounded-xl flex items-center justify-center gap-2 shadow-xs transition-all cursor-pointer"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                <span>
+                  {lang === 'uz'
+                    ? "Admin sifatida davom etish (Offline Rejim — demircilyda@gmail.com)"
+                    : "Войти как администратор (Автономный режим — demircilyda@gmail.com)"}
+                </span>
+              </button>
+            )}
           </div>
         )}
 

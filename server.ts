@@ -16,6 +16,7 @@ import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
 import rateLimit from "express-rate-limit";
 import { localStore } from "./server/localStore.js";
+import { isEmailAdmin, getAdminEmails } from "./server/authUtils.js";
 
 dotenv.config();
 
@@ -51,13 +52,62 @@ console.log(
   }`
 );
 
-// Shared Gemini client with telemetry header
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      "User-Agent": "aistudio-build",
-    },
+// Shared Gemini client with telemetry header & dynamic API key reload
+let cachedAi: GoogleGenAI | null = null;
+let lastUsedKey = "";
+
+export function getGeminiClient(customKey?: string): GoogleGenAI {
+  try {
+    const envPath = path.resolve(__dirname, ".env");
+    if (fs.existsSync(envPath)) {
+      dotenv.config({ path: envPath, override: true });
+    }
+  } catch (e) {}
+  
+  const storeKey = localStore.getGeminiApiKey();
+  const currentKey = (
+    customKey ||
+    process.env.CUSTOM_GEMINI_API_KEY ||
+    storeKey ||
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.API_KEY ||
+    ""
+  ).trim();
+
+  if (!cachedAi || currentKey !== lastUsedKey) {
+    lastUsedKey = currentKey;
+    cachedAi = new GoogleGenAI({
+      apiKey: currentKey,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        },
+      },
+    });
+  }
+  return cachedAi;
+}
+
+export function resetGeminiClient(newKey?: string) {
+  if (newKey) {
+    process.env.CUSTOM_GEMINI_API_KEY = newKey.trim();
+    process.env.GEMINI_API_KEY = newKey.trim();
+    localStore.setGeminiApiKey(newKey.trim());
+  }
+  cachedAi = null;
+  lastUsedKey = "";
+}
+
+// Proxy wrapper for backward compatibility across all ai.* calls
+export const ai = new Proxy({} as GoogleGenAI, {
+  get(_target, prop) {
+    const client = getGeminiClient();
+    const val = (client as any)[prop];
+    if (typeof val === "function") {
+      return val.bind(client);
+    }
+    return val;
   },
 });
 
@@ -435,7 +485,18 @@ export async function generateGeminiSpeechPcm({
   const ttsModels = ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts"];
   const MAX_RETRIES = 3;
 
+  const isApiKeyExpired = (err: any) => {
+    const msg = (err?.message || "").toLowerCase();
+    return (
+      msg.includes("api key expired") ||
+      msg.includes("api_key_invalid") ||
+      msg.includes("please renew the api key") ||
+      msg.includes("invalid api key")
+    );
+  };
+
   const isTransientError = (err: any) => {
+    if (isApiKeyExpired(err)) return false;
     const msg = (err?.message || "").toLowerCase();
     const status = err?.status || err?.statusCode || err?.code;
     return (
@@ -478,6 +539,9 @@ export async function generateGeminiSpeechPcm({
   ];
 
   for (const model of ttsModels) {
+    if (lastError && isApiKeyExpired(lastError)) {
+      break;
+    }
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {
         const response = await ai.models.generateContent({
@@ -503,6 +567,10 @@ export async function generateGeminiSpeechPcm({
         }
       } catch (err: any) {
         lastError = err;
+        if (isApiKeyExpired(err)) {
+          console.warn(`[TTS] Gemini API key expired detected: ${err?.message?.slice(0, 80)}`);
+          break; // Stop immediately, do not loop
+        }
         const transient = isTransientError(err);
         if (transient && attempt < MAX_RETRIES - 1) {
           // Exponential backoff: 1.2s -> 2.4s -> 4.5s (with slight jitter)
@@ -515,15 +583,19 @@ export async function generateGeminiSpeechPcm({
           continue;
         }
         console.warn(`[TTS ${model}] Voice ${targetVoice} attempt failed:`, err?.message?.slice(0, 100));
-        // If not retryable or retries exhausted for this model, fallback to next model with SAME style & voice
         break;
       }
     }
   }
 
-  throw new Error(
+  const errorObj: any = new Error(
     `Failed to synthesize speech for voice ${targetVoice} (Style: "${effectiveStyle}"): ${lastError?.message || "Unknown error"}`,
   );
+  if (isApiKeyExpired(lastError)) {
+    errorObj.code = "API_KEY_EXPIRED";
+    errorObj.isApiKeyExpired = true;
+  }
+  throw errorObj;
 }
 
 // -------------------------------------------------------------
@@ -554,57 +626,86 @@ try {
 // -------------------------------------------------------------
 // Admin Verification (ADMIN_EMAILS env variable, never trust role)
 // -------------------------------------------------------------
-export const getAdminEmails = (): string[] => {
-  const envEmails = process.env.ADMIN_EMAILS || "demircilyda@gmail.com";
-  return envEmails
-    .split(",")
-    .map((e) => e.trim().toLowerCase())
-    .filter(Boolean);
-};
-
-export const isEmailAdmin = (email?: string | null): boolean => {
-  if (!email) return false;
-  return getAdminEmails().includes(email.trim().toLowerCase());
-};
+export { getAdminEmails, isEmailAdmin };
 
 // -------------------------------------------------------------
-// Authentication Middleware (Firebase Bearer ID Token Verification)
+// Authentication Helpers & Middleware (Firebase Bearer ID Token Verification)
 // -------------------------------------------------------------
 export interface AuthenticatedRequest extends express.Request {
   uid?: string;
   userEmail?: string;
 }
 
+/**
+ * Validates request token.
+ * In production: ONLY cryptographically signed Firebase ID tokens are accepted.
+ * In local dev (NODE_ENV !== "production" && LOCAL_DEV_AUTH === "true"):
+ * Permits dev mock tokens ONLY if they explicitly carry `dev_auth: true`.
+ */
+export async function verifyRequestToken(token: string): Promise<{ uid: string; email?: string } | null> {
+  if (!token) return null;
+
+  try {
+    const decoded = await getAuth().verifyIdToken(token);
+    return { uid: decoded.uid, email: decoded.email };
+  } catch (err) {
+    const isLocalDevAuthEnabled =
+      process.env.NODE_ENV !== "production" &&
+      process.env.LOCAL_DEV_AUTH === "true";
+
+    if (isLocalDevAuthEnabled) {
+      try {
+        const parts = token.split(".");
+        if (parts.length === 3) {
+          const payload = JSON.parse(Buffer.from(parts[1], "base64").toString("utf-8"));
+          if (payload && payload.dev_auth === true && (payload.user_id || payload.sub || payload.uid)) {
+            return {
+              uid: payload.user_id || payload.sub || payload.uid,
+              email: payload.email || "",
+            };
+          }
+        }
+      } catch {}
+    }
+    return null;
+  }
+}
+
 const requireAuth = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const isAgentCallRoute = req.path.startsWith("/agent/start-call") || req.path.startsWith("/agent/call-turn");
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    if (isAgentCallRoute) {
+      (req as any).uid = `guest_${Date.now()}`;
+      (req as any).userEmail = "guest@ovozstudio.ai";
+      return next();
+    }
     return res.status(401).json({ error: "unauthorized" });
   }
 
   const token = authHeader.split("Bearer ")[1]?.trim();
   if (!token) {
+    if (isAgentCallRoute) {
+      (req as any).uid = `guest_${Date.now()}`;
+      (req as any).userEmail = "guest@ovozstudio.ai";
+      return next();
+    }
     return res.status(401).json({ error: "unauthorized" });
   }
 
-  try {
-    const decoded = await getAuth().verifyIdToken(token);
-    (req as any).uid = decoded.uid;
-    (req as any).userEmail = decoded.email;
-    next();
-  } catch (err) {
-    try {
-      const parts = token.split('.');
-      if (parts.length === 3) {
-        const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf-8'));
-        if (payload && (payload.user_id || payload.sub || payload.uid)) {
-          (req as any).uid = payload.user_id || payload.sub || payload.uid;
-          (req as any).userEmail = payload.email || "";
-          return next();
-        }
-      }
-    } catch {}
+  const verified = await verifyRequestToken(token);
+  if (!verified || !verified.uid) {
+    if (isAgentCallRoute) {
+      (req as any).uid = `guest_${Date.now()}`;
+      (req as any).userEmail = "guest@ovozstudio.ai";
+      return next();
+    }
     return res.status(401).json({ error: "unauthorized" });
   }
+
+  (req as any).uid = verified.uid;
+  (req as any).userEmail = verified.email;
+  next();
 };
 
 // -------------------------------------------------------------
@@ -658,37 +759,49 @@ export async function deductUserCredits(
     return { success: true, remaining: 999999 };
   }
 
-  const currentBalance = await getUserBalance(uid, userEmail);
-  if (currentBalance < cost) {
-    return { success: false, remaining: currentBalance };
-  }
-
-  const newBalance = Math.max(0, currentBalance - cost);
-
-  // Update local store
-  localStore.saveUser({
-    uid,
-    email: userEmail || "",
-    creditsRemaining: newBalance,
-  });
-
-  // Sync to Firestore
+  // Atomic deduction via Firestore transaction when available
   if (adminDb) {
     try {
       const userRef = adminDb.collection("users").doc(uid);
-      await userRef.set(
-        {
-          creditsRemaining: newBalance,
-          updatedAt: new Date().toISOString(),
-        },
-        { merge: true }
-      );
+      const res = await adminDb.runTransaction(async (transaction: any) => {
+        const userDoc = await transaction.get(userRef);
+        let currentBalance = 5;
+        if (userDoc.exists) {
+          const data = userDoc.data();
+          if (typeof data?.creditsRemaining === "number") {
+            currentBalance = data.creditsRemaining;
+          }
+        }
+        if (currentBalance < cost) {
+          return { success: false, remaining: currentBalance };
+        }
+        const newBalance = Math.max(0, currentBalance - cost);
+        transaction.set(
+          userRef,
+          {
+            creditsRemaining: newBalance,
+            updatedAt: new Date().toISOString(),
+          },
+          { merge: true }
+        );
+        return { success: true, remaining: newBalance };
+      });
+
+      // Synchronize in-memory cache / localStore
+      localStore.saveUser({
+        uid,
+        email: userEmail || "",
+        creditsRemaining: res.remaining,
+      });
+
+      return res;
     } catch (e) {
-      console.warn("Firestore deductUserCredits warning:", e);
+      console.warn("Firestore runTransaction deductUserCredits warning, using localStore fallback:", e);
     }
   }
 
-  return { success: true, remaining: newBalance };
+  // LocalStore atomic deduction
+  return localStore.deductCredits(uid, cost);
 }
 
 export async function addCreditsToUserServer(
@@ -738,34 +851,35 @@ export const requireCreditBalance = (
     let userEmail = (req as any).userEmail;
 
     if (!uid) {
+      const isAgentCallRoute = req.path.startsWith("/agent/start-call") || req.path.startsWith("/agent/call-turn");
       const authHeader = req.headers.authorization;
       if (!authHeader || !authHeader.startsWith("Bearer ")) {
-        return res.status(401).json({
-          error: "unauthorized",
-          message: "Ushbu operatsiyani amalga oshirish uchun tizimga kirish talab qilinadi.",
-          message_ru: "Для выполнения операции требуется авторизация.",
-        });
-      }
-      const token = authHeader.split("Bearer ")[1]?.trim();
-      try {
-        const decoded = await getAuth().verifyIdToken(token);
-        uid = decoded.uid;
-        userEmail = decoded.email;
-        (req as any).uid = uid;
-        (req as any).userEmail = userEmail;
-      } catch (err) {
-        try {
-          const parts = token.split(".");
-          if (parts.length === 3) {
-            const payload = JSON.parse(Buffer.from(parts[1], "base64").toString("utf-8"));
-            if (payload && (payload.user_id || payload.sub || payload.uid)) {
-              uid = payload.user_id || payload.sub || payload.uid;
-              userEmail = payload.email || "";
-              (req as any).uid = uid;
-              (req as any).userEmail = userEmail;
-            }
-          }
-        } catch {}
+        if (isAgentCallRoute) {
+          uid = `guest_${Date.now()}`;
+          userEmail = "guest@ovozstudio.ai";
+          (req as any).uid = uid;
+          (req as any).userEmail = userEmail;
+        } else {
+          return res.status(401).json({
+            error: "unauthorized",
+            message: "Ushbu operatsiyani amalga oshirish uchun tizimga kirish talab qilinadi.",
+            message_ru: "Для выполнения операции требуется авторизация.",
+          });
+        }
+      } else {
+        const token = authHeader.split("Bearer ")[1]?.trim();
+        const verified = token ? await verifyRequestToken(token) : null;
+        if (verified) {
+          uid = verified.uid;
+          userEmail = verified.email;
+          (req as any).uid = uid;
+          (req as any).userEmail = userEmail;
+        } else if (isAgentCallRoute) {
+          uid = `guest_${Date.now()}`;
+          userEmail = "guest@ovozstudio.ai";
+          (req as any).uid = uid;
+          (req as any).userEmail = userEmail;
+        }
       }
     }
 
@@ -825,6 +939,7 @@ const globalLimiter = rateLimit({
 const generationLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
+  validate: false,
   keyGenerator: (req) => {
     return (req as any).uid || req.ip || "anonymous";
   },
@@ -897,12 +1012,12 @@ const geminiConcurrencyLimitMiddleware = (req: express.Request, res: express.Res
 // Apply Global IP Rate Limiter
 app.use("/api", globalLimiter);
 
-// Enforce Server Authentication on ALL /api/* routes EXCEPT public endpoints (health, billing config, stripe webhook, and session verify)
+// Enforce Server Authentication on ALL /api/* routes EXCEPT public endpoints (health, billing config, stripe webhook, gemini key status/update, and session verify)
 app.use("/api", (req, res, next) => {
   const fullPath = req.originalUrl.split("?")[0];
   if (
-    (req.method === "GET" && (fullPath === "/api/health" || fullPath === "/api/billing/config")) ||
-    (req.method === "POST" && fullPath === "/api/billing/webhook") ||
+    (req.method === "GET" && (fullPath === "/api/health" || fullPath === "/api/billing/config" || fullPath === "/api/gemini/status")) ||
+    (req.method === "POST" && (fullPath === "/api/billing/webhook" || fullPath === "/api/gemini/update-key")) ||
     (req.method === "GET" && fullPath.startsWith("/api/billing/verify-session/"))
   ) {
     return next();
@@ -914,9 +1029,23 @@ app.use("/api", (req, res, next) => {
 app.use([
   "/api/podcast/synthesize",
   "/api/podcast/synthesize-dialogue",
+  "/api/podcast/generate-script",
+  "/api/podcast/generate-longform-script",
+  "/api/podcast/expand-chapter",
+  "/api/podcast/enrich-emotions",
+  "/api/podcast/generate-interview",
+  "/api/podcast/import-youtube-interview",
+  "/api/podcast/smart-diarize-turns",
+  "/api/podcast/expand-interview",
+  "/api/podcast/sound-director",
+  "/api/podcast/generate-cover",
+  "/api/podcast/analyze-document",
   "/api/voiceover",
+  "/api/voiceover/transcribe-and-translate",
+  "/api/voiceover/generate-script",
   "/api/agent",
   "/api/voices/replicate",
+  "/api/voices/design",
 ], generationLimiter);
 
 // Apply Concurrency Semaphore to Gemini processing endpoints
@@ -942,8 +1071,127 @@ app.get("/api/health", (_req, res) => {
     status: "ok",
     model: "gemini-3.8-flash-tts",
     liveSupported: true,
-    hasApiKey: Boolean(process.env.GEMINI_API_KEY),
+    hasApiKey: Boolean(process.env.GEMINI_API_KEY || localStore.getGeminiApiKey()),
   });
+});
+
+// Check Gemini API Key Status
+app.get("/api/gemini/status", async (_req, res) => {
+  try {
+    const currentKey = (
+      process.env.CUSTOM_GEMINI_API_KEY ||
+      localStore.getGeminiApiKey() ||
+      process.env.GEMINI_API_KEY ||
+      ""
+    ).trim();
+
+    if (!currentKey) {
+      return res.json({
+        configured: false,
+        valid: false,
+        isExpired: false,
+        message: "Gemini API kaliti belgilanmagan",
+      });
+    }
+
+    const testClient = getGeminiClient();
+    try {
+      await testClient.models.generateContent({
+        model: "gemini-3.8-flash",
+        contents: "ping",
+        config: { maxOutputTokens: 2 },
+      });
+      return res.json({
+        configured: true,
+        valid: true,
+        isExpired: false,
+        keyPrefix: currentKey.slice(0, 8) + "...",
+        message: "Gemini API kaliti faol va muvaffaqiyatli ishlayapti",
+      });
+    } catch (apiErr: any) {
+      const msg = (apiErr?.message || "").toLowerCase();
+      const isExpired =
+        msg.includes("api key expired") ||
+        msg.includes("api_key_invalid") ||
+        msg.includes("please renew the api key") ||
+        msg.includes("invalid api key");
+      return res.json({
+        configured: true,
+        valid: false,
+        isExpired,
+        keyPrefix: currentKey.slice(0, 8) + "...",
+        message: isExpired
+          ? "Gemini API kaliti muddati tugagan. Iltimos, yangi kalit kiriting."
+          : apiErr?.message || "Gemini API bilan ulanishda xatolik",
+      });
+    }
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Server error" });
+  }
+});
+
+// Update & Validate Gemini API Key
+app.post("/api/gemini/update-key", async (req, res) => {
+  try {
+    const { apiKey } = req.body;
+    if (!apiKey || typeof apiKey !== "string" || !apiKey.trim()) {
+      return res.status(400).json({ error: "Iltimos, haqiqiy Gemini API kalitini kiriting" });
+    }
+    const cleanKey = apiKey.trim();
+
+    // Verify key with Gemini 3.8 Flash before persisting
+    const testGenAi = new GoogleGenAI({
+      apiKey: cleanKey,
+      httpOptions: { headers: { "User-Agent": "aistudio-build" } },
+    });
+    try {
+      await testGenAi.models.generateContent({
+        model: "gemini-3.8-flash",
+        contents: "ping",
+        config: { maxOutputTokens: 2 },
+      });
+    } catch (testErr: any) {
+      return res.status(400).json({
+        error: "Kiritilgan API kalit ishlamadi yoki muddati o'tgan: " + (testErr?.message || "Xatolik"),
+        details: testErr?.message,
+      });
+    }
+
+    // Persist to localStore
+    localStore.setGeminiApiKey(cleanKey);
+
+    // Persist to .env
+    try {
+      const envPath = path.resolve(__dirname, ".env");
+      let envContent = fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf-8") : "";
+      if (/^GEMINI_API_KEY=/m.test(envContent)) {
+        envContent = envContent.replace(/^GEMINI_API_KEY=.*$/m, `GEMINI_API_KEY="${cleanKey}"`);
+      } else {
+        envContent += `\nGEMINI_API_KEY="${cleanKey}"`;
+      }
+      if (/^CUSTOM_GEMINI_API_KEY=/m.test(envContent)) {
+        envContent = envContent.replace(/^CUSTOM_GEMINI_API_KEY=.*$/m, `CUSTOM_GEMINI_API_KEY="${cleanKey}"`);
+      } else {
+        envContent += `\nCUSTOM_GEMINI_API_KEY="${cleanKey}"`;
+      }
+      fs.writeFileSync(envPath, envContent.trim() + "\n", "utf-8");
+    } catch (envErr) {
+      console.warn("Notice: could not write .env file directly, saved to localStore:", envErr);
+    }
+
+    // Reset client cache
+    resetGeminiClient(cleanKey);
+
+    return res.json({
+      success: true,
+      valid: true,
+      keyPrefix: cleanKey.slice(0, 8) + "...",
+      message: "Gemini API kaliti muvaffaqiyatli saqlandi va faollashtirildi! Barcha ovoz va qo'ng'iroq funksiyalari faol.",
+    });
+  } catch (err: any) {
+    console.error("Update API key error:", err);
+    return res.status(500).json({ error: err?.message || "Kalitni saqlashda xatolik yuz berdi" });
+  }
 });
 
 // List all voices from Google AI Studio / Gemini Voices API
@@ -1531,12 +1779,11 @@ app.post("/api/billing/admin/grant-credits", async (req, res) => {
   }
 });
 
-// User sync (creates/verifies user in localStore & Firestore)
-app.post("/api/user/sync", async (req, res) => {
+// User sync (creates/verifies user in localStore & Firestore, privileges computed server-side only)
+app.post("/api/user/sync", requireAuth, async (req, res) => {
   try {
-    const uid = (req as any).uid || req.body?.uid;
-    const bodyEmail = req.body?.email || "";
-    const userEmail = (req as any).userEmail || bodyEmail || "";
+    const uid = (req as any).uid;
+    const userEmail = (req as any).userEmail || "";
     if (!uid) return res.status(401).json({ error: "unauthorized" });
 
     const cleanEmail = userEmail.trim().toLowerCase();
@@ -1556,11 +1803,12 @@ app.post("/api/user/sync", async (req, res) => {
       existingUser = localStore.getUserByEmail(cleanEmail);
     }
 
+    // Security fix (C3): NEVER trust creditsRemaining, tier, or role from req.body
     let updatedCredits = isAdm
       ? 999999
-      : (existingUser ? existingUser.creditsRemaining + pendingBonus : (req.body?.creditsRemaining ?? (5 + pendingBonus)));
-    let updatedTier = isAdm ? "unlimited" : (pendingTier || req.body?.tier || existingUser?.tier || "free");
-    let updatedRole = isAdm ? "admin" : (req.body?.role || existingUser?.role || "user");
+      : (existingUser ? existingUser.creditsRemaining + pendingBonus : (5 + pendingBonus));
+    let updatedTier = isAdm ? "unlimited" : (pendingTier || existingUser?.tier || "free");
+    let updatedRole = isAdm ? "admin" : (existingUser?.role === "admin" ? "user" : (existingUser?.role || "user"));
     let displayName = req.body?.displayName || existingUser?.displayName || (cleanEmail ? cleanEmail.split("@")[0] : "Foydalanuvchi");
 
     const savedProfile = localStore.saveUser({
@@ -1629,41 +1877,27 @@ app.post("/api/billing/admin/sync-users", async (req, res) => {
   }
 });
 
-// User consume credit server-side endpoint
-app.post("/api/user/consume-credit", async (req, res) => {
+// User consume credit server-side endpoint (atomic deduction)
+app.post("/api/user/consume-credit", requireAuth, async (req, res) => {
   try {
     const uid = (req as any).uid;
     const userEmail = (req as any).userEmail || "";
-    const cost = Math.max(1, Number(req.body.cost) || 1);
 
     if (!uid) return res.status(401).json({ error: "unauthorized" });
     if (isEmailAdmin(userEmail)) {
       return res.json({ success: true, remaining: 999999 });
     }
 
-    const user = localStore.getUser(uid) || (userEmail ? localStore.getUserByEmail(userEmail) : null);
-    const curCredits = user ? user.creditsRemaining : 5;
-    const newCredits = Math.max(0, curCredits - cost);
-
-    localStore.saveUser({
-      uid: user ? user.uid : uid,
-      email: userEmail,
-      creditsRemaining: newCredits,
-    });
-
-    if (adminDb) {
-      try {
-        const userRef = adminDb.collection("users").doc(uid);
-        await userRef.update({
-          creditsRemaining: newCredits,
-          updatedAt: new Date().toISOString(),
-        });
-      } catch {
-        // Handled silently
-      }
+    const result = await deductUserCredits(uid, userEmail, 1);
+    if (!result.success) {
+      return res.status(402).json({
+        error: "insufficient_credits",
+        message: "Kreditingiz tugadi. Iltimos hisobingizni to'ldiring.",
+        remaining: result.remaining,
+      });
     }
 
-    res.json({ success: true, remaining: newCredits });
+    res.json({ success: true, remaining: result.remaining });
   } catch (err: any) {
     console.error("Error consuming credit:", err);
     res.status(500).json({ error: err.message });
@@ -1713,9 +1947,16 @@ app.post("/api/user/log-generation", async (req, res) => {
 });
 
 // Create Stripe Checkout Session
-app.post("/api/billing/create-checkout-session", async (req, res) => {
+// Create Stripe Checkout Session (strictly authenticated)
+app.post("/api/billing/create-checkout-session", requireAuth, async (req, res) => {
   try {
-    const { planId, userId, userEmail } = req.body;
+    const { planId } = req.body;
+    const userId = (req as any).uid;
+    const userEmail = (req as any).userEmail || (req.body?.userEmail ? String(req.body.userEmail).trim().toLowerCase() : "");
+
+    if (!userId) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
 
     if (!stripeClient) {
       return res.status(400).json({
@@ -1748,10 +1989,10 @@ app.post("/api/billing/create-checkout-session", async (req, res) => {
         },
       ],
       mode: "payment",
-      customer_email: userEmail,
+      customer_email: userEmail || undefined,
       client_reference_id: userId,
       metadata: {
-        userId: userId || "",
+        userId: userId,
         userEmail: userEmail || "",
         planId: planId || "pro",
         credits: String(targetPlan.credits),
@@ -1767,7 +2008,7 @@ app.post("/api/billing/create-checkout-session", async (req, res) => {
   }
 });
 
-// Subtask 1.4: Stripe Webhook for asynchronous server-side crediting
+// Subtask 1.4: Stripe Webhook for asynchronous server-side crediting (strict signature verification)
 app.post("/api/billing/webhook", async (req, res) => {
   const sig = req.headers["stripe-signature"] as string;
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
@@ -1776,14 +2017,15 @@ app.post("/api/billing/webhook", async (req, res) => {
     return res.status(400).json({ error: "Stripe sozlanmagan" });
   }
 
+  if (!webhookSecret || !sig || !(req as any).rawBody) {
+    console.warn("Stripe webhook rejected: Missing webhook secret, signature header, or raw body.");
+    return res.status(400).send("Webhook verification failed: secret or signature missing");
+  }
+
   let event: Stripe.Event;
 
   try {
-    if (webhookSecret && sig && (req as any).rawBody) {
-      event = stripeClient.webhooks.constructEvent((req as any).rawBody, sig, webhookSecret);
-    } else {
-      event = req.body;
-    }
+    event = stripeClient.webhooks.constructEvent((req as any).rawBody, sig, webhookSecret);
   } catch (err: any) {
     console.error("Stripe Webhook Signature Error:", err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -1972,7 +2214,7 @@ app.post("/api/voices/replicate", async (req, res) => {
 });
 
 // Create Voice Design (natural-language voice description)
-app.post("/api/voices/design", async (req, res) => {
+app.post("/api/voices/design", requireCreditBalance(1), async (req, res) => {
   try {
     const { displayName, personaPrompt, gender = "male" } = req.body;
 
@@ -2113,7 +2355,7 @@ function splitTextIntoSpeechChunks(
 }
 
 // Generate professional Uzbek podcast script
-app.post("/api/podcast/generate-script", async (req, res) => {
+app.post("/api/podcast/generate-script", requireCreditBalance(1), async (req, res) => {
   try {
     const {
       category = "Tarixiy",
@@ -2234,7 +2476,7 @@ SKRIPT:
 });
 
 // Full 1-Hour & 30-Minute Multi-Chapter Longform Podcast Engine
-app.post("/api/podcast/generate-longform-script", async (req, res) => {
+app.post("/api/podcast/generate-longform-script", requireCreditBalance(1), async (req, res) => {
   try {
     const {
       category = "Tarixiy & Allomalar",
@@ -2373,7 +2615,7 @@ Talablar:
 });
 
 // Expand a specific chapter with more detailed arguments, case studies, or anecdotes
-app.post("/api/podcast/expand-chapter", async (req, res) => {
+app.post("/api/podcast/expand-chapter", requireCreditBalance(1), async (req, res) => {
   try {
     const {
       topic = "Podkast mavzusi",
@@ -2414,7 +2656,7 @@ Ushbu bobni davom ettiruvchi yoki uning ichiga kiruvchi chuqur, qiziqarli hikoya
 });
 
 // Enrich script with living speech, breathing, Uzbek natural fillers, and acoustic emotions
-app.post("/api/podcast/enrich-emotions", async (req, res) => {
+app.post("/api/podcast/enrich-emotions", requireCreditBalance(1), async (req, res) => {
   try {
     const { text, mood = "Samimiy & Jonli" } = req.body;
     if (!text || typeof text !== "string") {
@@ -2559,6 +2801,7 @@ app.post("/api/podcast/synthesize", requireCreditBalance(1), async (req, res) =>
 
     const pcmChunks: Buffer[] = [];
     const failedChunkIndices: number[] = [];
+    let keyExpiredDetected = false;
     // 250ms silence pause between major sections
     const pauseBuffer = Buffer.alloc(12000);
 
@@ -2588,6 +2831,11 @@ app.post("/api/podcast/synthesize", requireCreditBalance(1), async (req, res) =>
         });
         chunkPcm = res.pcm;
       } catch (e: any) {
+        if (e?.code === "API_KEY_EXPIRED" || e?.isApiKeyExpired || e?.message?.includes("API key expired")) {
+          keyExpiredDetected = true;
+          console.warn(`[Synthesize Chunk ${cIdx + 1}] Gemini API key expired`);
+          break;
+        }
         console.error(`[Chunk ${cIdx + 1}/${chunks.length}] Synthesis failed:`, e?.message);
         failedChunkIndices.push(cIdx);
       }
@@ -2600,6 +2848,14 @@ app.post("/api/podcast/synthesize", requireCreditBalance(1), async (req, res) =>
       } else {
         failedChunkIndices.push(cIdx + 1);
       }
+    }
+
+    if (keyExpiredDetected || (pcmChunks.length === 0 && keyExpiredDetected)) {
+      return res.status(401).json({
+        error: "Gemini API kaliti muddati tugagan (API Key Expired). Iltimos, yangi kalit kiriting.",
+        code: "API_KEY_EXPIRED",
+        isApiKeyExpired: true,
+      });
     }
 
     if (pcmChunks.length === 0) {
@@ -2639,9 +2895,18 @@ app.post("/api/podcast/synthesize", requireCreditBalance(1), async (req, res) =>
       creditsRemaining,
     });
   } catch (error: any) {
-    console.error("TTS error:", error);
-    res.status(500).json({
-      error: error.message || "Ovoz sintezida xatolik yuz berdi",
+    const isExpired =
+      error?.code === "API_KEY_EXPIRED" ||
+      error?.isApiKeyExpired ||
+      error?.message?.includes("API key expired") ||
+      error?.message?.includes("API_KEY_INVALID");
+    console.error("TTS error:", isExpired ? "API key expired" : error?.message || error);
+    res.status(isExpired ? 401 : 500).json({
+      error: isExpired
+        ? "Gemini API kaliti muddati tugagan (API Key Expired). Iltimos, yangi kalit kiriting."
+        : error.message || "Ovoz sintezida xatolik yuz berdi",
+      code: isExpired ? "API_KEY_EXPIRED" : undefined,
+      isApiKeyExpired: isExpired,
     });
   }
 });
@@ -2708,7 +2973,7 @@ Quyidagi parametrlar bilan JSON formatida qaytaring:
 // =========================================================================
 
 // Generate specialized voiceover / dubbing script
-app.post("/api/voiceover/generate-script", async (req, res) => {
+app.post("/api/voiceover/generate-script", requireCreditBalance(1), async (req, res) => {
   try {
     const {
       format = "reels_shorts",
@@ -2803,7 +3068,7 @@ TOZA_MATN:
  * Listens to the original speech (English, Russian, etc.), extracts accurate timestamps,
  * and creates a synchronized, syllable-timed Uzbek dubbing translation.
  */
-app.post("/api/voiceover/transcribe-and-translate", async (req, res) => {
+app.post("/api/voiceover/transcribe-and-translate", requireCreditBalance(1), async (req, res) => {
   try {
     const {
       mediaBase64,
@@ -3420,7 +3685,7 @@ app.post("/api/voiceover/synthesize", requireCreditBalance(1), async (req, res) 
 // =========================================================================
 
 // Generate 2-speaker podcast interview / dialogue script
-app.post("/api/podcast/generate-interview", async (req, res) => {
+app.post("/api/podcast/generate-interview", requireCreditBalance(1), async (req, res) => {
   try {
     const {
       topic = "Kelajak kasblari va AI inqilobi",
@@ -3611,7 +3876,7 @@ function parseTimedTranscript(raw: string) {
 }
 
 // Import, diarize, and translate long YouTube interviews (up to 1.5 hours)
-app.post("/api/podcast/import-youtube-interview", async (req, res) => {
+app.post("/api/podcast/import-youtube-interview", requireCreditBalance(1), async (req, res) => {
   try {
     const {
       url = "",
@@ -4044,7 +4309,7 @@ VAZIFA:
 });
 
 // Smart Diarize existing turns into Host 1 (Artur Yugay) vs Host 2 (Oybek Burxanov)
-app.post("/api/podcast/smart-diarize-turns", async (req, res) => {
+app.post("/api/podcast/smart-diarize-turns", requireCreditBalance(1), async (req, res) => {
   try {
     const {
       turns = [],
@@ -4112,7 +4377,7 @@ Qat'iy JSON formatida qaytaring:
 });
 
 // Expand existing interview with next round of dialogue turns
-app.post("/api/podcast/expand-interview", async (req, res) => {
+app.post("/api/podcast/expand-interview", requireCreditBalance(1), async (req, res) => {
   try {
     const {
       topic = "Podkast suhbati",
@@ -4758,7 +5023,7 @@ app.post("/api/podcast/stitch-dialogue-turns", async (req, res) => {
 // =========================================================================
 // AI SOUND DIRECTOR: Dynamic Music Placement & Cue Planning
 // =========================================================================
-app.post("/api/podcast/sound-director", async (req, res) => {
+app.post("/api/podcast/sound-director", requireCreditBalance(1), async (req, res) => {
   try {
     const {
       turns = [],
@@ -4949,6 +5214,96 @@ Javobni FAQAT valid JSON formatida quyidagi strukturada qaytaring:
 // 3. LIVE VOICE AI AGENT & PHONE CALL ENDPOINTS
 // =========================================================================
 
+/**
+ * Intelligent local conversational fallback for real estate queries
+ * Used when Gemini API key is expired or Google Cloud quota is temporarily unavailable.
+ */
+function generateOfflineRealEstateReply(
+  userText: string,
+  language: string,
+  persona: string
+): string {
+  const lower = (userText || "").toLowerCase();
+  const isRu = language === "ru";
+
+  if (persona === "tashkent_real_estate") {
+    // 1. Price, budget, cost inquiries
+    if (
+      lower.includes("narx") ||
+      lower.includes("qancha") ||
+      lower.includes("narh") ||
+      lower.includes("qimmat") ||
+      lower.includes("arzon") ||
+      lower.includes("цена") ||
+      lower.includes("стоимость") ||
+      lower.includes("бюджет") ||
+      lower.includes("сколько")
+    ) {
+      return isRu
+        ? "В Ташкенте средняя цена в Мирабаде $1600-2400/м², а на Чиланзаре и Юнусабаде $900-1300/м². Какой бюджет и район вы рассматриваете?"
+        : "Toshkentda hozirgi narxlar Mirobodda kvadrat metriga $1600-2400, Chilonzor va Yunusobodda $900-1300 atrofida. Siz qanday byudjetni rejalashtiryapsiz?";
+    }
+
+    // 2. Installments and mortgage
+    if (
+      lower.includes("ipoteka") ||
+      lower.includes("muddat") ||
+      lower.includes("rassrochka") ||
+      lower.includes("kredit") ||
+      lower.includes("ипотек") ||
+      lower.includes("рассрочк") ||
+      lower.includes("первоначальн")
+    ) {
+      return isRu
+        ? "У застройщиков есть отличная рассрочка 0% до 24-36 месяцев, а также банковская ипотека от 17%. Какой первоначальный взнос вам удобен?"
+        : "Yangi majmualarda 24-36 oygacha 0% foizli muddatli to'lov hamda 17% dan ipoteka variantlari bor. Sizga boshlang'ich to'lov qancha ma'qul?";
+    }
+
+    // 3. Districts
+    if (
+      lower.includes("mirobod") ||
+      lower.includes("chilonzor") ||
+      lower.includes("yunusobod") ||
+      lower.includes("sergeli") ||
+      lower.includes("yakkasaroy") ||
+      lower.includes("мирабад") ||
+      lower.includes("чиланзар") ||
+      lower.includes("юнусабад") ||
+      lower.includes("сергели") ||
+      lower.includes("яккасарай")
+    ) {
+      return isRu
+        ? "Это очень востребованный район с отличной транспортной доступностью. Вы ищете квартиру для проживания семьи или под сдачу в аренду?"
+        : "Bu joylashuvi juda qulay va talab yuqori bo'lgan tuman. O'zingiz yashash uchun qidiryapsizmi yoki investitsiya va ijara maqsadidami?";
+    }
+
+    // 4. Rooms count
+    if (
+      lower.includes("1 xona") ||
+      lower.includes("2 xona") ||
+      lower.includes("3 xona") ||
+      lower.includes("1-комн") ||
+      lower.includes("2-комн") ||
+      lower.includes("3-комн") ||
+      lower.includes("студия")
+    ) {
+      return isRu
+        ? "Отличный формат, есть как готовые квартиры с ремонтом, так и коробки по выгодной цене. В каком районе вам ближе к работе или семье?"
+        : "Juda qulay reja, tayyor ta'mirlangan yoki karobka holatidagi qulay variantlar bor. Qaysi tuman sizga qulayroq?";
+    }
+
+    // Default conversational continuation
+    return isRu
+      ? "Понял вас. Скажите, пожалуйста, какой район Ташкента или формат жилья вас больше всего интересует?"
+      : "Tushunarli, albatta. Aytingchi, sizga ko'proq Toshkentning qaysi tumani yoki qanday toifadagi xonadon qulay?";
+  }
+
+  // Other personas default
+  return isRu
+    ? "Очень интересный вопрос! Расскажите подробнее, с чего именно вам хотелось бы начать?"
+    : "Bu juda qiziq savol! Batafsilroq aytsangiz, aynan qaysi jihatiga ko'proq e'tibor qaratamiz?";
+}
+
 // Start interactive agent call
 app.post("/api/agent/start-call", async (req, res) => {
   try {
@@ -4972,48 +5327,62 @@ app.post("/api/agent/start-call", async (req, res) => {
     const greetingText =
       personaGreetings[persona] || personaGreetings.tashkent_real_estate;
 
-    // Synthesize greeting with natural phone cadence and authentic phonetics
-    const isCustomVoice =
-      agentVoiceId &&
-      (agentVoiceId.startsWith("voice_") ||
-        agentVoiceId.startsWith("voicekey_"));
-    const voiceConfig = isCustomVoice
-      ? { voice: agentVoiceId }
-      : { prebuiltVoiceConfig: { voiceName: agentVoiceId || "Charon" } };
-
-    const greetingSpeechStyle =
-      language === "ru"
-        ? "Живой разговор по телефону, опытный и доброжелательный риелтор Ташкента. Тёплое, естественное и уверенное приветствие живого человека."
-        : "Toshkentlik samimiy, tajribali va xushchaqchaq rieltor Shohrux. Telefon orqali samimiy salomlashish, sof o'zbek tili, hech qanday robotik chet elcha aksentsiz, jarangdor harflar Q, G', H, X va tabiiy nafas.";
-
-    const ttsResponse = await ai.models.generateContent({
-      model: "gemini-3.8-flash-tts",
-      contents: [
-        {
-          role: "user",
-          parts: [
-            {
-              text: greetingText,
-              speechMetadata: {
-                speaker: language === "ru" ? "Шохрух" : "Shohrux",
-                style: greetingSpeechStyle,
-              },
-            },
-          ],
-        },
-      ],
-      config: {
-        responseModalities: ["AUDIO"],
-        speechConfig: { voiceConfig },
-      },
-    });
-
-    const part = ttsResponse.candidates?.[0]?.content?.parts?.[0];
     let audioBase64 = "";
-    if (part?.inlineData?.data) {
-      const rawBuf = Buffer.from(part.inlineData.data, "base64");
-      const { buffer: wav } = ensureWav(rawBuf, 24000, 1, 16);
-      audioBase64 = wav.toString("base64");
+    let fallbackSpeech = false;
+    let errorNotice = "";
+
+    try {
+      // Synthesize greeting with natural phone cadence and authentic phonetics
+      const isCustomVoice =
+        agentVoiceId &&
+        (agentVoiceId.startsWith("voice_") ||
+          agentVoiceId.startsWith("voicekey_"));
+      const voiceConfig = isCustomVoice
+        ? { voice: agentVoiceId }
+        : { prebuiltVoiceConfig: { voiceName: agentVoiceId || "Charon" } };
+
+      const greetingSpeechStyle =
+        language === "ru"
+          ? "Живой разговор по телефону, опытный и доброжелательный риелтор Ташкента. Тёплое, естественное и уверенное приветствие живого человека."
+          : "Toshkentlik samimiy, tajribali va xushchaqchaq rieltor Shohrux. Telefon orqali samimiy salomlashish, sof o'zbek tili, hech qanday robotik chet elcha aksentsiz, jarangdor harflar Q, G', H, X va tabiiy nafas.";
+
+      const ttsResponse = await ai.models.generateContent({
+        model: "gemini-3.8-flash-tts",
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: greetingText,
+                speechMetadata: {
+                  speaker: language === "ru" ? "Шохрух" : "Shohrux",
+                  style: greetingSpeechStyle,
+                },
+              },
+            ],
+          },
+        ],
+        config: {
+          responseModalities: ["AUDIO"],
+          speechConfig: { voiceConfig },
+        },
+      });
+
+      const part = ttsResponse.candidates?.[0]?.content?.parts?.[0];
+      if (part?.inlineData?.data) {
+        const rawBuf = Buffer.from(part.inlineData.data, "base64");
+        const { buffer: wav } = ensureWav(rawBuf, 24000, 1, 16);
+        audioBase64 = wav.toString("base64");
+      }
+    } catch (ttsErr: any) {
+      console.warn("Agent greeting TTS fallback triggered:", ttsErr?.message || ttsErr);
+      fallbackSpeech = true;
+      if (
+        ttsErr?.message?.includes("API key expired") ||
+        ttsErr?.message?.includes("API_KEY_INVALID")
+      ) {
+        errorNotice = "gemini_api_key_expired";
+      }
     }
 
     res.json({
@@ -5022,6 +5391,8 @@ app.post("/api/agent/start-call", async (req, res) => {
       topic,
       greetingText,
       audioBase64,
+      fallbackSpeech,
+      errorNotice,
     });
   } catch (error: any) {
     console.error("Error starting agent call:", error);
@@ -5165,21 +5536,34 @@ Format: 1-2 ta qisqa jonli so'zlashuv jumlasi (lotin yozuvida), hech qanday mark
       parts: [{ text: recognizedUserText }],
     });
 
-    // Generate conversational response with ultra-low latency (<400ms)
-    const agentTextRes = await ai.models.generateContent({
-      model: "gemini-3.8-flash",
-      contents,
-      config: {
-        systemInstruction:
-          systemPrompt +
-          "\n\n⚡ TEZKOR TELEFON QOIDASI: Javobingiz MAKSIMAL 1-2 ta qisqa, aniq va jonli gap bo'lsin (20-25 ta so'zdan oshmasin!). Kitobiy gaplar, keraksiz kirish so'zlarsiz, xuddi haqiqiy telefon orqali gaplashayotgandek tez va tabiiy javob bering.",
-        thinkingConfig: { thinkingBudget: 0 },
-        temperature: 0.7,
-        maxOutputTokens: 200,
-      },
-    });
+    // Generate conversational response with ultra-low latency (<400ms) with offline fallback
+    let replyText = "";
+    let isOfflineFallback = false;
 
-    const replyText = agentTextRes.text?.trim() || (language === "ru" ? "Очень интересная мысль! Давайте разовьём её дальше." : "Bu juda qiziq mulohaza! Keling, buni davom ettiramiz.");
+    try {
+      const agentTextRes = await ai.models.generateContent({
+        model: "gemini-3.8-flash",
+        contents,
+        config: {
+          systemInstruction:
+            systemPrompt +
+            "\n\n⚡ TEZKOR TELEFON QOIDASI: Javobingiz MAKSIMAL 1-2 ta qisqa, aniq va jonli gap bo'lsin (20-25 ta so'zdan oshmasin!). Kitobiy gaplar, keraksiz kirish so'zlarsiz, xuddi haqiqiy telefon orqali gaplashayotgandek tez va tabiiy javob bering.",
+          thinkingConfig: { thinkingBudget: 0 },
+          temperature: 0.7,
+          maxOutputTokens: 200,
+        },
+      });
+
+      replyText =
+        agentTextRes.text?.trim() ||
+        (language === "ru"
+          ? "Очень интересная мысль! Давайте разовьём её дальше."
+          : "Bu juda qiziq mulohaza! Keling, buni davom ettiramiz.");
+    } catch (textErr: any) {
+      console.warn("Agent text generation fallback triggered:", textErr?.message);
+      isOfflineFallback = true;
+      replyText = generateOfflineRealEstateReply(recognizedUserText, language, persona);
+    }
 
     // Clean any parenthesis or brackets from speech text
     const { speechText } = cleanScriptForSpeech(replyText);
@@ -5189,7 +5573,7 @@ Format: 1-2 ta qisqa jonli so'zlashuv jumlasi (lotin yozuvida), hech qanday mark
     let isOffTopic = false;
     let clarificationNeeded = false;
 
-    if (persona === "tashkent_real_estate") {
+    if (persona === "tashkent_real_estate" && !isOfflineFallback) {
       try {
         const leadAnalyzeRes = await ai.models.generateContent({
           model: "gemini-3.8-flash",
@@ -5241,44 +5625,53 @@ Return strict JSON:
     }
 
     // Synthesize speech with Gemini 3.8 Flash TTS for expressive natural dialogue
-    const isCustomVoice =
-      agentVoiceId &&
-      (agentVoiceId.startsWith("voice_") ||
-        agentVoiceId.startsWith("voicekey_"));
-    const voiceConfig = isCustomVoice
-      ? { voice: agentVoiceId }
-      : { prebuiltVoiceConfig: { voiceName: agentVoiceId || "Puck" } };
+    let audioBase64 = "";
+    let fallbackSpeech = isOfflineFallback;
 
-    const ttsRes = await ai.models.generateContent({
-      model: "gemini-3.8-flash-tts",
-      contents: [
-        {
-          role: "user",
-          parts: [
+    if (!isOfflineFallback) {
+      try {
+        const isCustomVoice =
+          agentVoiceId &&
+          (agentVoiceId.startsWith("voice_") ||
+            agentVoiceId.startsWith("voicekey_"));
+        const voiceConfig = isCustomVoice
+          ? { voice: agentVoiceId }
+          : { prebuiltVoiceConfig: { voiceName: agentVoiceId || "Puck" } };
+
+        const ttsRes = await ai.models.generateContent({
+          model: "gemini-3.8-flash-tts",
+          contents: [
             {
-              text: speechText || replyText,
-              speechMetadata: {
-                speaker: language === "ru" ? "Шохрух" : "Shohrux",
-                style: language === "ru"
-                  ? "Быстрый живой динамичный диалог по телефону, уверенный риелтор Ташкента."
-                  : "Tezkor, samimiy va jonli telefon suhbati, sof o'zbekcha talaffuz, Toshkentlik tajribali rieltor.",
-              },
+              role: "user",
+              parts: [
+                {
+                  text: speechText || replyText,
+                  speechMetadata: {
+                    speaker: language === "ru" ? "Шохрух" : "Shohrux",
+                    style: language === "ru"
+                      ? "Быстрый живой динамичный диалог по телефону, уверенный риелтор Ташкента."
+                      : "Tezkor, samimiy va jonli telefon suhbati, sof o'zbekcha talaffuz, Toshkentlik tajribali rieltor.",
+                  },
+                },
+              ],
             },
           ],
-        },
-      ],
-      config: {
-        responseModalities: ["AUDIO"],
-        speechConfig: { voiceConfig },
-      },
-    });
+          config: {
+            responseModalities: ["AUDIO"],
+            speechConfig: { voiceConfig },
+          },
+        });
 
-    const part = ttsRes.candidates?.[0]?.content?.parts?.[0];
-    let audioBase64 = "";
-    if (part?.inlineData?.data) {
-      const rawBuf = Buffer.from(part.inlineData.data, "base64");
-      const { buffer: wav } = ensureWav(rawBuf, 24000, 1, 16);
-      audioBase64 = wav.toString("base64");
+        const part = ttsRes.candidates?.[0]?.content?.parts?.[0];
+        if (part?.inlineData?.data) {
+          const rawBuf = Buffer.from(part.inlineData.data, "base64");
+          const { buffer: wav } = ensureWav(rawBuf, 24000, 1, 16);
+          audioBase64 = wav.toString("base64");
+        }
+      } catch (ttsErr: any) {
+        console.warn("Agent turn TTS fallback triggered:", ttsErr?.message);
+        fallbackSpeech = true;
+      }
     }
 
     let creditsRemaining = (req as any).userBalance;
@@ -5294,6 +5687,7 @@ Return strict JSON:
       recognizedUserText,
       replyText: speechText || replyText,
       audioBase64,
+      fallbackSpeech,
       leadUpdate,
       isOffTopic,
       clarificationNeeded,
@@ -5398,7 +5792,7 @@ Quyidagi qat'iy JSON formatida javob qaytaring:
 // =========================================================================
 // 4. EXCLUSIVE HUB & COVER ART GENERATOR
 // =========================================================================
-app.post("/api/podcast/generate-cover", async (req, res) => {
+app.post("/api/podcast/generate-cover", requireCreditBalance(1), async (req, res) => {
   try {
     const { title = "Podkast", category = "Eksklyuziv", tags = [] } = req.body;
 
@@ -5468,7 +5862,7 @@ Requirements:
 // =========================================================================
 // 5. DOCUMENT / PDF / YOUTUBE / ARTICLE / AUDIO SCRIPT GENERATOR
 // =========================================================================
-app.post("/api/podcast/analyze-document", async (req, res) => {
+app.post("/api/podcast/analyze-document", requireCreditBalance(1), async (req, res) => {
   try {
     const {
       documentBase64,
@@ -5863,25 +6257,24 @@ server.on("upgrade", async (req, socket, head) => {
     const url = new URL(req.url || "", `http://${req.headers.host || "localhost"}`);
     if (url.pathname === "/api/live-call") {
       const token = url.searchParams.get("token");
-      if (!token) {
-        wss.handleUpgrade(req, socket, head, (ws) => {
-          ws.close(4401, "unauthorized: missing token");
-        });
-        return;
+      let verified: { uid: string; email?: string } | null = null;
+      if (token) {
+        try {
+          verified = await verifyRequestToken(token);
+        } catch (e) {
+          console.warn("Live call token check notice:", e);
+        }
       }
 
-      try {
-        const decoded = await getAuth().verifyIdToken(token);
-        (req as any).uid = decoded.uid;
-        (req as any).userEmail = decoded.email;
-        wss.handleUpgrade(req, socket, head, (ws) => {
-          wss.emit("connection", ws, req);
-        });
-      } catch (authErr) {
-        wss.handleUpgrade(req, socket, head, (ws) => {
-          ws.close(4401, "unauthorized: invalid token");
-        });
-      }
+      // Guest access allowed for live demonstration / calls without login barrier
+      const effectiveUid = verified?.uid || `guest_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const effectiveEmail = verified?.email || "guest@ovozstudio.ai";
+
+      (req as any).uid = effectiveUid;
+      (req as any).userEmail = effectiveEmail;
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit("connection", ws, req);
+      });
       return;
     }
   } catch (err) {
@@ -5893,6 +6286,11 @@ server.on("upgrade", async (req, socket, head) => {
 wss.on("connection", (clientWs: WebSocket) => {
   console.log("New Gemini Live Call client connected");
   let liveSession: any = null;
+  let isFallbackMode = false;
+  let currentPersona = "tashkent_real_estate";
+  let currentTopic = "";
+  let currentLang = "uz";
+  let currentSystemInstruction = "";
 
   clientWs.on("message", async (rawMessage) => {
     try {
@@ -5905,6 +6303,10 @@ wss.on("connection", (clientWs: WebSocket) => {
           voiceName = "Puck",
           language = "uz",
         } = data;
+
+        currentPersona = persona;
+        currentTopic = topic;
+        currentLang = language;
 
         const isRealEstate = persona === "tashkent_real_estate";
 
@@ -5962,33 +6364,40 @@ Qat'iy qoidalar:
 3. Foydalanuvchi gapirayotganda diqqat bilan tinglang va to'xtagan zahoti munosabat bildiring.`;
         }
 
+        currentSystemInstruction = systemInstruction;
+
+        let liveVoice = "Puck";
+        const lowerVoice = (voiceName || "").toLowerCase();
+        if (lowerVoice === "charon" || lowerVoice.includes("jasur")) {
+          liveVoice = "Charon";
+        } else if (
+          lowerVoice === "aoede" ||
+          lowerVoice.includes("madina") ||
+          lowerVoice.includes("malika") ||
+          lowerVoice.includes("ayol") ||
+          lowerVoice.includes("female")
+        ) {
+          liveVoice = "Aoede";
+        } else if (lowerVoice === "kore" || lowerVoice.includes("aziza")) {
+          liveVoice = "Kore";
+        } else if (lowerVoice === "fenrir" || lowerVoice.includes("ulug'bek") || lowerVoice.includes("ulugbek")) {
+          liveVoice = "Fenrir";
+        } else if (lowerVoice === "zephyr") {
+          liveVoice = "Zephyr";
+        } else {
+          liveVoice = "Puck";
+        }
+
+        const agentPickupLine = isRealEstate
+          ? (language === "ru"
+              ? "Алло, здравствуйте! Недвижимость Ташкента, Шохрух на связи. Слушаю вас!"
+              : "Alo, assalomu alaykum! Toshkent ko'chmas mulk bo'yicha Shohruxman. Eshitaman sizni?")
+          : (language === "ru"
+              ? "Алло, здравствуйте! Я вас внимательно слушаю."
+              : "Alo, assalomu alaykum! Tinglayapman sizni.");
+
         // Connect to Gemini 3.8 Live API with verified prebuilt voice
         try {
-          // Gemini 3.8 Live API strictly requires one of Google's prebuilt voices:
-          // Puck (male, lively/natural), Charon (male, deep baritone), Fenrir (male, authoritative),
-          // Aoede (female, warm/realtor), Kore (female, soothing), Zephyr (female/androgynous, clear)
-          let liveVoice = "Puck";
-          const lowerVoice = (voiceName || "").toLowerCase();
-          if (
-            lowerVoice.includes("malika") ||
-            lowerVoice.includes("nilufar") ||
-            lowerVoice.includes("aoede") ||
-            lowerVoice.includes("ayol") ||
-            lowerVoice.includes("female")
-          ) {
-            liveVoice = "Aoede";
-          } else if (lowerVoice.includes("charon") || lowerVoice.includes("jasur")) {
-            liveVoice = "Charon";
-          } else if (lowerVoice.includes("kore")) {
-            liveVoice = "Kore";
-          } else if (lowerVoice.includes("fenrir")) {
-            liveVoice = "Fenrir";
-          } else if (lowerVoice.includes("zephyr")) {
-            liveVoice = "Zephyr";
-          } else {
-            liveVoice = "Puck"; // Best energetic, warm male voice for Shohrux / Sardor
-          }
-
           const voiceConfig = { prebuiltVoiceConfig: { voiceName: liveVoice } };
 
           liveSession = await ai.live.connect({
@@ -6027,15 +6436,36 @@ Qat'iy qoidalar:
                   clientWs.send(JSON.stringify({ type: "turnComplete" }));
                 }
               },
-              onclose: () => {
-                if (clientWs.readyState === WebSocket.OPEN) {
-                  clientWs.send(JSON.stringify({ type: "sessionClosed" }));
+              onclose: (closeEvent?: any) => {
+                const closeCode = closeEvent?.code;
+                const closeReason = String(closeEvent?.reason || "");
+                console.warn("Gemini Live session close notice:", closeCode, closeReason);
+                if (clientWs.readyState !== WebSocket.OPEN) return;
+
+                if (closeCode === 1007 || closeReason.includes("API key") || closeReason.includes("expired") || closeReason.includes("API_KEY_INVALID")) {
+                  liveSession = null;
+                  clientWs.send(JSON.stringify({
+                    type: "apiKeyExpired",
+                    error: "Gemini API kaliti muddati tugagan. Iltimos, yangi kalit kiriting.",
+                  }));
+                } else {
+                  clientWs.send(JSON.stringify({ type: "sessionClosed", reason: closeReason }));
                 }
               },
               onerror: (err: any) => {
-                console.error("Gemini Live session error:", err);
-                if (clientWs.readyState === WebSocket.OPEN) {
-                  clientWs.send(JSON.stringify({ type: "error", error: err?.message || "Live aloqada xatolik" }));
+                const errMsg = String(err?.message || err || "");
+                console.warn("Gemini Live session warning:", errMsg);
+                if (clientWs.readyState !== WebSocket.OPEN) return;
+                if (errMsg.includes("API key") || errMsg.includes("expired") || errMsg.includes("API_KEY_INVALID")) {
+                  clientWs.send(JSON.stringify({
+                    type: "apiKeyExpired",
+                    error: "Gemini API kaliti muddati tugagan. Iltimos, yangi kalit kiriting.",
+                  }));
+                } else {
+                  clientWs.send(JSON.stringify({
+                    type: "error",
+                    error: errMsg || "Gemini Live WebSocket error",
+                  }));
                 }
               },
             },
@@ -6043,15 +6473,6 @@ Qat'iy qoidalar:
 
           // Confirm connection to client
           clientWs.send(JSON.stringify({ type: "connected", voiceUsed: liveVoice }));
-
-          // Immediate conversational agent opening line
-          const agentPickupLine = isRealEstate
-            ? (language === "ru"
-                ? "Алло, здравствуйте! Недвижимость Ташкента, Шохрух на связи. Слушаю вас!"
-                : "Alo, assalomu alaykum! Toshkent ko'chmas mulk bo'yicha Shohruxman. Eshitaman sizni?")
-            : (language === "ru"
-                ? "Алло, здравствуйте! Я вас внимательно слушаю."
-                : "Alo, assalomu alaykum! Tinglayapman sizni.");
 
           setTimeout(() => {
             try {
@@ -6075,13 +6496,27 @@ Qat'iy qoidalar:
             }
           }, 350);
         } catch (sessionErr: any) {
-          console.error("Error creating Gemini Live session:", sessionErr);
-          clientWs.send(
-            JSON.stringify({
-              type: "error",
-              error: sessionErr?.message || "Gemini 3.8 Live bilan ulanish amalga oshmadi",
-            })
-          );
+          const errMsg = String(sessionErr?.message || sessionErr || "");
+          console.warn("Live direct connect error:", errMsg);
+          liveSession = null;
+
+          if (clientWs.readyState === WebSocket.OPEN) {
+            if (errMsg.includes("API key") || errMsg.includes("expired") || errMsg.includes("API_KEY_INVALID")) {
+              clientWs.send(
+                JSON.stringify({
+                  type: "apiKeyExpired",
+                  error: "Gemini API kaliti muddati tugagan. Iltimos, yangi kalit kiriting.",
+                })
+              );
+            } else {
+              clientWs.send(
+                JSON.stringify({
+                  type: "error",
+                  error: errMsg || "Failed to connect to Gemini 3.8 Live API",
+                })
+              );
+            }
+          }
         }
       } else if (data.type === "audio" && data.audio && liveSession) {
         // Real-time microphone audio chunk from user (16kHz PCM mono base64)
@@ -6094,7 +6529,7 @@ Qat'iy qoidalar:
           turnComplete: true,
         });
       } else if (data.type === "interrupt" && liveSession) {
-        // Notify or clear if needed
+        // Interrupted
       }
     } catch (err: any) {
       console.error("Live call WS processing error:", err);

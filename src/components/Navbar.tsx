@@ -13,6 +13,7 @@ import {
   User,
   Zap,
   ShieldCheck,
+  Key,
 } from 'lucide-react';
 
 export type AppTab = 'studio' | 'voiceover' | 'dialogue' | 'agent' | 'exclusive' | 'cms' | 'voices' | 'guide';
@@ -222,6 +223,16 @@ export const Navbar: React.FC<NavbarProps> = ({
               </button>
             </div>
           )}
+
+          {/* Gemini API Key Config Button */}
+          <button
+            type="button"
+            onClick={() => window.dispatchEvent(new CustomEvent('open-api-key-modal'))}
+            className="p-1.5 text-[#5D594E] hover:text-[#0E7C86] hover:bg-black/5 rounded-full transition-colors cursor-pointer"
+            title={lang === 'uz' ? "Gemini API kalitini sozlash" : "Настроить ключ Gemini API"}
+          >
+            <Key className="w-4 h-4" />
+          </button>
 
           {/* Language switch */}
           <div className="flex items-center gap-0.5 bg-[#ECE7DB] p-0.5 rounded-full border border-[rgba(22,21,17,0.14)] text-[10px] font-mono shrink-0">

@@ -6,6 +6,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { validateSafeUrl } from "./mediaIngest/adapters/baseAdapter.js";
 
 export interface ExtractedMedia {
   platform: "youtube" | "instagram" | "tiktok" | "direct";
@@ -30,6 +31,13 @@ export function detectMediaPlatform(url: string): "youtube" | "instagram" | "tik
  */
 export async function extractMediaAudio(url: string): Promise<ExtractedMedia> {
   const trimmedUrl = url.trim();
+
+  // Validate URL to prevent SSRF attacks
+  const urlCheck = validateSafeUrl(trimmedUrl);
+  if (!urlCheck.valid) {
+    throw new Error(urlCheck.reason || "Xavfsizlik: Ushbu URL manziliga ruxsat berilmaydi.");
+  }
+
   const platform = detectMediaPlatform(trimmedUrl);
 
   // 1. Direct audio/video files (mp4, webm, mp3, wav, m4a)
@@ -73,6 +81,7 @@ export async function extractMediaAudio(url: string): Promise<ExtractedMedia> {
       "50M",
       "-o",
       tempOutputFile,
+      "--",
       trimmedUrl,
     ];
 

@@ -17,6 +17,7 @@ import { VoiceAgentTab } from './components/VoiceAgentTab';
 import { ExclusiveProductionHub } from './components/ExclusiveProductionHub';
 import { DocumentSourceModal } from './components/DocumentSourceModal';
 import { NotebookLMIntegrationModal } from './components/NotebookLMIntegrationModal';
+import { ApiKeyModal } from './components/ApiKeyModal';
 import { AuthModal } from './components/AuthModal';
 import { PricingModal } from './components/PricingModal';
 import { LandingPage } from './components/LandingPage';
@@ -233,9 +234,17 @@ export default function App() {
   const [isGuideOpen, setIsGuideOpen] = useState(false);
   const [isDocumentModalOpen, setIsDocumentModalOpen] = useState(false);
   const [isNotebookLMModalOpen, setIsNotebookLMModalOpen] = useState(false);
+  const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
   const [documentModalFormat, setDocumentModalFormat] = useState<'podcast' | 'interview' | 'voiceover'>('podcast');
   const [interviewTopic, setInterviewTopic] = useState<string>('');
   const [interviewTurns, setInterviewTurns] = useState<any[] | undefined>(undefined);
+
+  // Global event listener for opening API key modal from anywhere in app
+  useEffect(() => {
+    const handleOpenKeyModal = () => setIsApiKeyModalOpen(true);
+    window.addEventListener('open-api-key-modal', handleOpenKeyModal);
+    return () => window.removeEventListener('open-api-key-modal', handleOpenKeyModal);
+  }, []);
 
   // CMS Podcast Library
   const [podcasts, setPodcasts] = useState<CMSPodcastItem[]>(() => {
@@ -364,6 +373,9 @@ export default function App() {
         let errMessage = lang === 'uz' ? 'Ovoz sintezida xatolik' : 'Ошибка при синтезе речи';
         try {
           const err = await res.json();
+          if (err.code === 'API_KEY_EXPIRED' || err.isApiKeyExpired || (err.error && err.error.includes('API key expired'))) {
+            window.dispatchEvent(new CustomEvent('open-api-key-modal'));
+          }
           errMessage = (lang === 'ru' && err.message_ru) ? err.message_ru : (err.message || err.error || errMessage);
         } catch {
           const raw = await res.text().catch(() => '');
@@ -908,6 +920,11 @@ export default function App() {
 
       <AuthModal lang={lang} />
       <PricingModal lang={lang} />
+      <ApiKeyModal
+        isOpen={isApiKeyModalOpen}
+        onClose={() => setIsApiKeyModalOpen(false)}
+        lang={lang}
+      />
     </>
   );
 }

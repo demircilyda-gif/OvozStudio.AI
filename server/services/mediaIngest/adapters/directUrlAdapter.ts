@@ -22,12 +22,52 @@ export class DirectUrlAdapter extends BaseMediaAdapter {
     }
 
     try {
-      const response = await fetch(url, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-        },
-        redirect: "follow",
-      });
+      let currentUrl = url;
+      let hops = 0;
+      let response: Response;
+
+      while (true) {
+        response = await fetch(currentUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+          },
+          redirect: "manual",
+        });
+
+        if (response.status >= 300 && response.status < 400) {
+          hops++;
+          if (hops > 3) {
+            return {
+              success: false,
+              bytes: 0,
+              state: "provider_failed",
+              error: "Juda ko'p qayta yo'naltirishlar (max 3).",
+            };
+          }
+          const location = response.headers.get("location");
+          if (!location) {
+            return {
+              success: false,
+              bytes: 0,
+              state: "provider_failed",
+              error: "Qayta yo'naltirish manzili topilmadi.",
+            };
+          }
+          const nextUrl = new URL(location, currentUrl).toString();
+          const redirectVal = this.validateUrl(nextUrl);
+          if (!redirectVal.valid) {
+            return {
+              success: false,
+              bytes: 0,
+              state: "source_unavailable",
+              error: `Xavfsizlik: Qayta yo'naltirish manzili ruxsat etilmagan (${redirectVal.reason})`,
+            };
+          }
+          currentUrl = nextUrl;
+          continue;
+        }
+        break;
+      }
 
       if (!response.ok) {
         return {

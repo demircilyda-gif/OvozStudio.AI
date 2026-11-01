@@ -41,6 +41,7 @@ export class YtDlpAdapter extends BaseMediaAdapter {
       "--ffmpeg-location", "/usr/bin/ffmpeg",
       "--max-filesize", "80M",
       "-o", destinationPath,
+      "--",
       url.trim(),
     ];
 

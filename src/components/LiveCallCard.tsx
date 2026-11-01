@@ -38,6 +38,9 @@ interface LiveCallCardProps {
   agentVoiceName?: string;
   onSendText?: (text: string) => void;
   micWarning?: string | null;
+  apiKeyNotice?: string | null;
+  callErrorMessage?: string | null;
+  onDismissNotice?: () => void;
 }
 
 export const LiveCallCard: React.FC<LiveCallCardProps> = ({
@@ -61,6 +64,9 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
   agentVoiceName = 'SHOKHRUKH',
   onSendText,
   micWarning,
+  apiKeyNotice,
+  callErrorMessage,
+  onDismissNotice,
 }) => {
   const [activeWordIdx, setActiveWordIdx] = useState(0);
   const [localInput, setLocalInput] = useState('');
@@ -239,6 +245,58 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
           </span>
         </div>
       </div>
+
+      {/* Call error notification */}
+      {callErrorMessage && (
+        <div className="bg-rose-500/10 border border-rose-500/30 rounded-xl p-3 text-xs text-rose-800 flex items-center justify-between gap-2 shadow-xs">
+          <div className="flex items-center gap-2">
+            <span className="text-base">⚠️</span>
+            <span className="leading-snug">{callErrorMessage}</span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {(callErrorMessage.toLowerCase().includes('api key') ||
+              callErrorMessage.toLowerCase().includes('kalit') ||
+              callErrorMessage.toLowerCase().includes('истёк')) && (
+              <button
+                type="button"
+                onClick={() => window.dispatchEvent(new CustomEvent('open-api-key-modal'))}
+                className="btn-pill btn-solid text-[11px] py-1 px-2.5 flex items-center gap-1 cursor-pointer shadow-xs"
+              >
+                <Key className="w-3 h-3" />
+                <span>{lang === 'uz' ? "Kalitni kiritish" : "Ввести ключ"}</span>
+              </button>
+            )}
+            {onDismissNotice && (
+              <button
+                type="button"
+                onClick={onDismissNotice}
+                className="text-xs px-2 py-0.5 rounded hover:bg-rose-500/20 text-rose-700 font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* API Key / Speech Fallback Notice */}
+      {apiKeyNotice && (
+        <div className="bg-[#0E7C86]/10 border border-[#0E7C86]/30 rounded-xl p-3 text-xs text-[#0A5A62] flex items-center justify-between gap-2 shadow-xs">
+          <div className="flex items-center gap-2">
+            <span className="text-base">ℹ️</span>
+            <span className="leading-snug">{apiKeyNotice}</span>
+          </div>
+          {onDismissNotice && (
+            <button
+              type="button"
+              onClick={onDismissNotice}
+              className="text-xs px-2 py-0.5 rounded hover:bg-[#0E7C86]/20 text-[#0E7C86] font-bold cursor-pointer"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      )}
 
       {/* ------------------------------------------------------------- */}
       {/* STATE 1: IDLE (Before Call)                                  */}

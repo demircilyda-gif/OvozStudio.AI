@@ -18,6 +18,7 @@ import {
   Zap,
   Plus,
   X,
+  Key,
 } from 'lucide-react';
 
 export type AppTab = 'landing' | 'studio' | 'dialogue' | 'voiceover' | 'agent' | 'exclusive' | 'cms' | 'voices' | 'guide' | 'docs';
@@ -595,6 +596,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <LogOut className="w-4 h-4" />
               </motion.button>
             )}
+
+            {/* API Key Config Button */}
+            <motion.button
+              type="button"
+              whileHover={{ scale: 1.1 }}
+              whileTap={{ scale: 0.9 }}
+              onClick={() => window.dispatchEvent(new CustomEvent('open-api-key-modal'))}
+              className="p-2 rounded-full text-[#7D7A70] hover:text-[#0E7C86] hover:bg-[#1D1D1B] transition-colors cursor-pointer shrink-0"
+              title={lang === 'uz' ? 'Gemini API kaliti' : 'Ключ Gemini API'}
+            >
+              <Key className="w-4 h-4" />
+            </motion.button>
 
             {/* Language Switcher */}
             <AnimatePresence initial={false}>

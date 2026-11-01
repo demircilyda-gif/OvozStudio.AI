@@ -38,6 +38,7 @@ interface AuthContextType {
   ) => Promise<void>;
   logout: () => Promise<void>;
   refreshProfile: () => Promise<void>;
+  loginAsLocalAdmin: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -79,7 +80,70 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const isLocalDevAuthAllowed =
+    Boolean(import.meta.env.DEV) &&
+    import.meta.env.VITE_LOCAL_DEV_AUTH === 'true';
+
+  const createMockAdminUser = () => ({
+    uid: 'admin_demircilyda_local',
+    email: 'demircilyda@gmail.com',
+    displayName: 'Demir Cilyda (Admin)',
+    getIdToken: async () => {
+      const header = btoa(JSON.stringify({ alg: 'none', typ: 'JWT' }));
+      const payload = btoa(JSON.stringify({
+        user_id: 'admin_demircilyda_local',
+        email: 'demircilyda@gmail.com',
+        admin: true,
+        dev_auth: true,
+      }));
+      return `${header}.${payload}.mockSignature`;
+    },
+  } as unknown as User);
+
+  const loginAsLocalAdmin = () => {
+    if (!isLocalDevAuthAllowed) {
+      console.warn('Local admin mode is disabled in production environments.');
+      return;
+    }
+    const adminUser = createMockAdminUser();
+    setUser(adminUser);
+    setUserProfile({
+      uid: 'admin_demircilyda_local',
+      email: 'demircilyda@gmail.com',
+      creditsRemaining: 999999,
+      tier: 'unlimited',
+      role: 'admin',
+      displayName: 'Demir Cilyda (Admin)',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    localStorage.setItem('ovozstudio_local_admin', 'true');
+    closeAuthModal();
+  };
+
   useEffect(() => {
+    if (!isLocalDevAuthAllowed && localStorage.getItem('ovozstudio_local_admin')) {
+      localStorage.removeItem('ovozstudio_local_admin');
+    }
+
+    const isLocalAdmin = isLocalDevAuthAllowed && localStorage.getItem('ovozstudio_local_admin') === 'true';
+    if (isLocalAdmin) {
+      const adminUser = createMockAdminUser();
+      setUser(adminUser);
+      setUserProfile({
+        uid: 'admin_demircilyda_local',
+        email: 'demircilyda@gmail.com',
+        creditsRemaining: 999999,
+        tier: 'unlimited',
+        role: 'admin',
+        displayName: 'Demir Cilyda (Admin)',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+      setIsLoading(false);
+      return;
+    }
+
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
       if (currentUser) {
@@ -174,7 +238,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const logout = async () => {
-    await logoutUser();
+    localStorage.removeItem('ovozstudio_local_admin');
+    try {
+      await logoutUser();
+    } catch {}
     setUser(null);
     setUserProfile(null);
   };
@@ -202,6 +269,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         logGeneration,
         logout,
         refreshProfile,
+        loginAsLocalAdmin,
       }}
     >
       {children}

@@ -36,6 +36,9 @@ import {
   Lock,
   Play,
   Square,
+  Users,
+  Headphones,
+  Briefcase,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getVoicePreviewUrl } from '../data/voicePreviews';
@@ -77,6 +80,121 @@ function float32ToPcm16Base64(float32Array: Float32Array): string {
   return btoa(binary);
 }
 
+export interface RealtimeVoiceOption {
+  id: string;
+  nameUz: string;
+  nameRu: string;
+  gender: 'male' | 'female';
+  toneUz: string;
+  toneRu: string;
+  badgeUz: string;
+  badgeRu: string;
+}
+
+export const REALTIME_VOICES: RealtimeVoiceOption[] = [
+  {
+    id: 'Puck',
+    nameUz: 'Shohrux (Puck)',
+    nameRu: 'Шохрух (Puck)',
+    gender: 'male',
+    toneUz: 'Dinamik, samimiy va jonli erkak ovozi. Tezkor javoblar uchun eng yaxshisi.',
+    toneRu: 'Динамичный, живой и уверенный мужской тембр. Идеален для быстрых ответов.',
+    badgeUz: 'Tavsiya (Default)',
+    badgeRu: 'Основной',
+  },
+  {
+    id: 'Charon',
+    nameUz: 'Jasur (Charon)',
+    nameRu: 'Жасур (Charon)',
+    gender: 'male',
+    toneUz: 'Chuqur bariton, nufuzli va tajribali rieltor-broker ovozi.',
+    toneRu: 'Глубокий баритон, солидный и опытный риелтор-брокер.',
+    badgeUz: 'Katta Rieltor',
+    badgeRu: 'Старший Брокер',
+  },
+  {
+    id: 'Aoede',
+    nameUz: 'Madina (Aoede)',
+    nameRu: 'Мадина (Aoede)',
+    gender: 'female',
+    toneUz: 'Xarizmatik, samimiy va jozibali ayol ovozi.',
+    toneRu: 'Харизматичный, тёплый и располагающий женский тембр.',
+    badgeUz: 'Samimiy Rieltor',
+    badgeRu: 'Харизматичный',
+  },
+  {
+    id: 'Kore',
+    nameUz: 'Aziza (Kore)',
+    nameRu: 'Азиза (Kore)',
+    gender: 'female',
+    toneUz: 'Muloyim, xotirjam va ishonch uyg\'otuvchi ayol maslahatchi.',
+    toneRu: 'Мягкий, умиротворяющий и интеллигентный голос консультанта.',
+    badgeUz: 'Konsultatsiya',
+    badgeRu: 'Консультант',
+  },
+  {
+    id: 'Fenrir',
+    nameUz: 'Ulug\'bek (Fenrir)',
+    nameRu: 'Улугbek (Fenrir)',
+    gender: 'male',
+    toneUz: 'Qat\'iy, nufuzli, tajribali rahbar va biznes eksperti.',
+    toneRu: 'Авторитетный, сильный голос руководителя и эксперта.',
+    badgeUz: 'Biznes Ekspert',
+    badgeRu: 'Бизнес-Эксперт',
+  },
+];
+
+const PERSONA_TOPICS: Record<AgentPersonaType, { defaultTopicUz: string; defaultTopicRu: string; quickChips: { uz: string; ru: string }[] }> = {
+  tashkent_real_estate: {
+    defaultTopicUz: "Toshkentda novostroyka, ikkilamchi bozor, ijara va narxlar",
+    defaultTopicRu: "Новостройки Ташкента, вторичный рынок, аренда и цены",
+    quickChips: [
+      { uz: "Chilonzordan arzonroq 2 xonali uy qidiryapman", ru: "Ищу 2-комнатную на Чиланзаре недорого" },
+      { uz: "Mirobodda 1 m² narxi va novostroykalar", ru: "Цены за м² в Мирабадском районе" },
+      { uz: "$50,000 ga investitsiya uchun qaysi tuman ma'qul?", ru: "Варианты инвестиций до $50,000" },
+      { uz: "Sergelida subsidiyali ipoteka shartlari qanaqa?", ru: "Условия субсидированной ипотеки в Сергели" },
+      { uz: "Kotlovandan olish va kadastr tekshirish", ru: "Покупка на стадии котлована и кадастр" },
+    ],
+  },
+  live_cohost: {
+    defaultTopicUz: "Sun'iy intellekt kelajagi va O'zbekiston IT startaplari",
+    defaultTopicRu: "Будущее ИИ и IT-стартапы в Узбекистане",
+    quickChips: [
+      { uz: "Sun'iy intellekt kasblarni qanday o'zgartirmoqda?", ru: "Как ИИ изменит рынок профессий?" },
+      { uz: "Toshkentda yashash nega qimmatlashib ketdi?", ru: "Почему в Ташкенте выросли цены на жизнь?" },
+      { uz: "Podkastni qanday qilib ommalashtirish mumkin?", ru: "Как раскрутить новый подкаст?" },
+      { uz: "O'zbekistonda startaplarga investitsiya jalb qilish", ru: "Привлечение инвестиций в стартапы" },
+    ],
+  },
+  caller_in_air: {
+    defaultTopicUz: "Efirga savol: Zamonaviy kasblar va chet elda ta'lim",
+    defaultTopicRu: "Вопрос в эфир: Современные профессии и учеба",
+    quickChips: [
+      { uz: "Assalomu alaykum, sizga bitta shaxsiy savolim bor edi", ru: "Здравствуйте, у меня к вам личный вопрос" },
+      { uz: "Dasturlashni o'rganishni nimadan boshlash kerak?", ru: "С чего начать изучение программирования?" },
+      { uz: "Chet elga ketgan ma'qulmi yoki O'zbekistonda qolishmi?", ru: "Стоит ли уезжать или развиваться здесь?" },
+    ],
+  },
+  exclusive_mentor: {
+    defaultTopicUz: "Media biznes va shaxsiy brend strategiyasi",
+    defaultTopicRu: "Медиа-бизнес и стратегия личного бренда",
+    quickChips: [
+      { uz: "0 dan boshlab birinchi $10,000 ga qanday chiqish mumkin?", ru: "Как выйти на первые $10,000 с нуля?" },
+      { uz: "Kompaniyada jamoani qanday to'g'ri boshqarish kerak?", ru: "Как правильно выстроить сильную команду?" },
+      { uz: "Shaxsiy brendni rivojlantirishdagi eng asosiy xatolar", ru: "Главные ошибки при развитии личного бренда" },
+    ],
+  },
+  business_consultant: {
+    defaultTopicUz: "Biznesni raqamlashtirish va sotuvlarni oshirish",
+    defaultTopicRu: "Цифровизация бизнеса и масштабирование продаж",
+    quickChips: [
+      { uz: "Marketing byudjetini qanday optimallashtirish kerak?", ru: "Оптимизация маркетингового бюджета" },
+      { uz: "CRM va avtomatlashtirish qachon kerak bo'ladi?", ru: "Когда внедрять CRM и автоворонки?" },
+      { uz: "Franshiza orqali hududlarga kengayish yo'llari", ru: "Масштабирование через франчайзинг" },
+    ],
+  },
+};
+
 export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
   voices,
   userClonedVoiceId,
@@ -85,13 +203,41 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
   const { isAuthenticated, requireAuth, useCredit, syncCredits, logGeneration } = useAuth();
   const shokhrukhVoiceId = userClonedVoiceId || 'voice_17raj9ewke3g';
 
-  // Engine: 'shokhrukh_natural' (Recommended, 0% accent, authentic Shahrukh voice) vs 'ovoz_live'
-  const [callEngine, setCallEngine] = useState<'shokhrukh_natural' | 'ovoz_live'>('shokhrukh_natural');
 
-  // Call Configuration (Defaults to Real Estate Broker with Shahrukh's voice)
+
+  // Call Engine Mode: 'live' = Gemini 3.8 Live API WebSocket (~0.3s, 5 official voices), 'cloned' = Custom Cloned Voice via Gemini 3.8 Flash TTS
+  const [callMode, setCallMode] = useState<'live' | 'cloned'>('live');
   const [selectedPersona, setSelectedPersona] = useState<AgentPersonaType>('tashkent_real_estate');
   const [callTopic, setCallTopic] = useState<string>('Toshkentda novostroyka, ikkilamchi bozor, ijara va narxlar');
-  const [agentVoiceId, setAgentVoiceId] = useState<string>(shokhrukhVoiceId);
+  const [agentVoiceId, setAgentVoiceId] = useState<string>('Puck');
+
+  // Replicated / Custom voices from user's library (plus default Shohrux cloned voice)
+  const clonedVoiceOptions = React.useMemo<VoiceProfile[]>(() => {
+    const customList = voices.filter((v) => v.isReplicatedVoice || v.isUserCustomVoice || v.id.startsWith('voice_'));
+    const hasShohrux = customList.some((v) => v.id === shokhrukhVoiceId || v.voiceId === shokhrukhVoiceId);
+    if (!hasShohrux) {
+      return [
+        {
+          id: shokhrukhVoiceId,
+          voiceId: shokhrukhVoiceId,
+          name: lang === 'ru' ? 'Шохрух (Клонированный голос)' : 'Shohrux (Klonlangan ovoz)',
+          gender: 'male',
+          baseVoice: 'Puck',
+          timbre: 'Samimiy va jonli',
+          tempo: '1.0x',
+          pitchLevel: "O'rta (Bariton)",
+          style: lang === 'ru'
+            ? 'Оригинальный клонированный тембр автора (Gemini Voice Replication)'
+            : 'Muallifning maxsus klonlangan shaxsiy ovozi (Gemini Voice Replication)',
+          customPersonaPrompt: 'Shaxsiy podkast va rieltor ohangi',
+          isUserCustomVoice: true,
+          isReplicatedVoice: true,
+        },
+        ...customList,
+      ];
+    }
+    return customList;
+  }, [voices, shokhrukhVoiceId, lang]);
 
   // Built-in instant voice preview (0 tokens, pre-saved)
   const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null);
@@ -124,6 +270,10 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
 
   // Call Lifecycle: 'idle' -> 'calling' (ringing) -> 'connected' (live) -> 'ended'
   const [callStatus, setCallStatus] = useState<'idle' | 'calling' | 'connected' | 'ended'>('idle');
+  const callStatusRef = useRef<'idle' | 'calling' | 'connected' | 'ended'>('idle');
+  useEffect(() => {
+    callStatusRef.current = callStatus;
+  }, [callStatus]);
   const [callDuration, setCallDuration] = useState<number>(0);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [agentSpeaking, setAgentSpeaking] = useState<boolean>(false);
@@ -132,8 +282,10 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
   const [transcriptLines, setTranscriptLines] = useState<TranscriptLine[]>([]);
   const [textInput, setTextInput] = useState<string>('');
   const [audioLevel, setAudioLevel] = useState<number>(0);
-  const [isLoadingTurn, setIsLoadingTurn] = useState<boolean>(false);
   const [micWarning, setMicWarning] = useState<string | null>(null);
+  const [apiKeyNotice, setApiKeyNotice] = useState<string | null>(null);
+  const [callErrorMessage, setCallErrorMessage] = useState<string | null>(null);
+  const [isLoadingTurn, setIsLoadingTurn] = useState<boolean>(false);
 
   // Real Estate Interactive Lead Card
   const [reLeadCard, setReLeadCard] = useState<RealEstateLeadCard>({
@@ -159,10 +311,11 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
   const [crmSummaryData, setCrmSummaryData] = useState<any>(null);
   const [isGeneratingSummary, setIsGeneratingSummary] = useState<boolean>(false);
 
-  // Audio References
+  // Audio & WebSocket References
+  const wsRef = useRef<WebSocket | null>(null);
+  const isMutedRef = useRef<boolean>(false);
   const currentAudioElemRef = useRef<HTMLAudioElement | null>(null);
   const recognitionRef = useRef<any>(null);
-  const wsRef = useRef<WebSocket | null>(null);
   const inputAudioCtxRef = useRef<AudioContext | null>(null);
   const outputAudioCtxRef = useRef<AudioContext | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
@@ -173,6 +326,11 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
   const conversationHistoryRef = useRef<TranscriptLine[]>([]);
   const interimSpeechRef = useRef<string>('');
   const speechSilenceTimerRef = useRef<any>(null);
+  const restartListeningRef = useRef<() => void>(() => {});
+
+  useEffect(() => {
+    isMutedRef.current = isMuted;
+  }, [isMuted]);
 
   // Keep history ref in sync
   useEffect(() => {
@@ -328,11 +486,10 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
       console.error('Play audio error:', e);
       setAgentSpeaking(false);
       setAudioLevel(0);
-      if (onEnd) onEnd();
     }
   }, [stopAllAudio]);
 
-  // Execute conversational turn (Natural Engine)
+  // Execute conversational turn (Gemini 3.8 Flash Neural Call)
   const executeNaturalTurn = useCallback(async (spokenText: string) => {
     if (!spokenText.trim() || isLoadingTurn) return;
 
@@ -434,19 +591,38 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
 
       if (data.audioBase64) {
         playTurnAudio(data.audioBase64, () => {
-          // Restart recognition once agent finishes speaking
-          restartListening();
+          restartListeningRef.current();
         });
       } else {
-        restartListening();
+        if (data.errorNotice === 'gemini_api_key_expired' || data.isApiKeyExpired) {
+          setCallErrorMessage(
+            lang === 'uz'
+              ? "Gemini API kaliti muddati tugagan. Davom ettirish uchun [Kalitni yangilash] tugmasini bosing."
+              : "Срок действия Gemini API ключа истёк. Нажмите [Обновить ключ] для продолжения."
+          );
+          window.dispatchEvent(new CustomEvent('open-api-key-modal'));
+        }
+        restartListeningRef.current();
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Turn error:', err);
-      restartListening();
+      const isExpired =
+        err?.message?.includes('API key expired') ||
+        err?.message?.includes('API_KEY_INVALID') ||
+        err?.code === 'API_KEY_EXPIRED';
+      if (isExpired) {
+        setCallErrorMessage(
+          lang === 'uz'
+            ? "Gemini API kaliti muddati tugagan. [Kalitni yangilash] tugmasini bosing."
+            : "Срок действия Gemini API ключа истёк. Нажмите [Обновить ключ]."
+        );
+        window.dispatchEvent(new CustomEvent('open-api-key-modal'));
+      }
+      restartListeningRef.current();
     } finally {
       setIsLoadingTurn(false);
     }
-  }, [isLoadingTurn, lang, selectedPersona, callTopic, agentVoiceId, playTurnAudio]);
+  }, [isLoadingTurn, lang, selectedPersona, callTopic, agentVoiceId, playTurnAudio, syncCredits]);
 
   // Start continuous speech recognition for customer with smart VAD silence detection
   const startContinuousListening = useCallback(() => {
@@ -554,6 +730,10 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
     }, 400);
   }, [startContinuousListening]);
 
+  useEffect(() => {
+    restartListeningRef.current = restartListening;
+  }, [restartListening]);
+
   // Cleanup all connections
   const cleanupCall = useCallback(() => {
     if (callTimerRef.current) {
@@ -563,6 +743,15 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
     if (speechSilenceTimerRef.current) {
       clearTimeout(speechSilenceTimerRef.current);
       speechSilenceTimerRef.current = null;
+    }
+    if (wsRef.current) {
+      try {
+        wsRef.current.onclose = null;
+        wsRef.current.onerror = null;
+        wsRef.current.onmessage = null;
+        wsRef.current.close();
+      } catch (e) {}
+      wsRef.current = null;
     }
     stopAllAudio();
     if (recognitionRef.current) {
@@ -582,31 +771,17 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
     closeLiveAudioContexts().catch(() => {});
     inputAudioCtxRef.current = null;
     outputAudioCtxRef.current = null;
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
     setAgentSpeaking(false);
     setUserSpeaking(false);
     setAudioLevel(0);
     setIsLoadingTurn(false);
   }, [stopAllAudio]);
 
-  // Start Call (Route by selected engine)
+  // Start Call (Route by selected engine: Realtime API or Cloned Voice)
   const handleStartCall = async () => {
-    if (
-      !requireAuth(
-        () => {},
-        lang === 'uz'
-          ? "AI Realtor Agent bilan jonli qo'ng'iroq faqat ro'yxatdan o'tgan foydalanuvchilar uchun ochiq. Begonalar API ni behuda sarflamasligi uchun avval tizimga kiring!"
-          : "Голосовой AI агент звонков доступен только для зарегистрированных пользователей."
-      )
-    ) {
-      return;
-    }
-
     cleanupCall();
     setMicWarning(null);
+    setCallErrorMessage(null);
     setCallStatus('calling');
     playRingtone();
     setCurrentSubtitle('');
@@ -628,12 +803,9 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
       );
     }
 
-    if (callEngine === 'shokhrukh_natural') {
-      // ----------------------------------------------------
-      // MODE 1: SHAHRUKH AUTHENTIC VOICE (0% ACCENT, NATURAL TTS LIVE)
-      // ----------------------------------------------------
+    // Mode 2: Custom Cloned Voice via Gemini 3.8 Flash + Gemini 3.8 Flash TTS
+    const startTurnBasedCall = async () => {
       try {
-        // Fetch opening greeting from broker
         const res = await authFetch('/api/agent/start-call', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -645,128 +817,184 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
           }),
         });
 
-        if (!res.ok) throw new Error('Start call failed');
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          const errMsg = errData.error || (lang === 'uz' ? "Qo'ng'iroqni boshlashda xatolik yuz berdi" : "Не удалось начать звонок");
+          throw new Error(errMsg);
+        }
         const data = await res.json();
 
-        setTimeout(() => {
-          setCallStatus('connected');
-          setCallDuration(0);
-          callTimerRef.current = setInterval(() => {
-            setCallDuration((prev) => prev + 1);
-          }, 1000);
+        setCallStatus('connected');
+        setCallDuration(0);
+        if (callTimerRef.current) clearInterval(callTimerRef.current);
+        callTimerRef.current = setInterval(() => {
+          setCallDuration((prev) => prev + 1);
+        }, 1000);
 
-          // Deduct credit ONLY after successful connection
-          useCredit(1).catch(() => {});
-          logGeneration('agent_call', 'AI Realtor Call', 1).catch(() => {});
+        if (data.errorNotice === 'gemini_api_key_expired' || data.isApiKeyExpired) {
+          setCallErrorMessage(
+            lang === 'uz'
+              ? "Gemini API kaliti muddati tugagan. Qo'ng'iroq faqat eng so'nggi Gemini modeli bilan ishlashi uchun yangi kalit kiriting."
+              : "Срок действия Gemini API ключа истёк. Введите новый ключ для работы звонка через последнюю модель Gemini."
+          );
+          window.dispatchEvent(new CustomEvent('open-api-key-modal'));
+        }
 
-          const greeting =
-            data.greetingText ||
-            (lang === 'ru'
-              ? 'Алло, здравствуйте! Слушаю вас.'
-              : "Alo, assalomu alaykum! Xush ko'rdik, eshitaman sizni?");
-          setCurrentSubtitle(greeting);
+        useCredit(1).catch(() => {});
+        logGeneration('agent_call', 'AI Realtor Call', 1).catch(() => {});
 
-          setTranscriptLines([
-            {
-              id: `a-${Date.now()}`,
-              sender: 'agent',
-              text: greeting,
-              timestamp: new Date().toLocaleTimeString(lang === 'ru' ? 'ru-RU' : 'uz-UZ', {
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-              }),
-            },
-          ]);
+        const greeting =
+          data.greetingText ||
+          (lang === 'ru'
+            ? 'Алло, здравствуйте! Слушаю вас.'
+            : "Alo, assalomu alaykum! Xush ko'rdik, eshitaman sizni?");
+        setCurrentSubtitle(greeting);
 
-          if (data.audioBase64) {
-            playTurnAudio(data.audioBase64, () => {
-              if (micStreamRef.current) {
-                startContinuousListening();
-              }
-            });
-          } else if (micStreamRef.current) {
+        setTranscriptLines([
+          {
+            id: `a-${Date.now()}`,
+            sender: 'agent',
+            text: greeting,
+            timestamp: new Date().toLocaleTimeString(lang === 'ru' ? 'ru-RU' : 'uz-UZ', {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            }),
+          },
+        ]);
+
+        if (data.audioBase64) {
+          playTurnAudio(data.audioBase64, () => {
+            if (micStreamRef.current) {
+              startContinuousListening();
+            }
+          });
+        } else {
+          if (data.errorNotice === 'gemini_api_key_expired' || data.isApiKeyExpired) {
+            setCallErrorMessage(
+              lang === 'uz'
+                ? "Gemini API kaliti muddati tugagan. Qo'ng'iroq uchun yangi kalit kiriting."
+                : "Срок действия Gemini API ключа истёк. Введите новый ключ для звонка."
+            );
+            window.dispatchEvent(new CustomEvent('open-api-key-modal'));
+          }
+          if (micStreamRef.current) {
             startContinuousListening();
           }
-        }, 1200);
+        }
       } catch (err: any) {
         console.error('Call start error:', err);
         setCallStatus('idle');
-      }
-    } else {
-      // ----------------------------------------------------
-      // MODE 2: HIGH-SPEED OVOZSTUDIO NEURAL LIVE STREAMING
-      // ----------------------------------------------------
-      if (stream) {
-        const inputCtx = getLiveInputAudioContext();
-        inputAudioCtxRef.current = inputCtx;
-        const source = inputCtx.createMediaStreamSource(stream);
-        const processor = inputCtx.createScriptProcessor(4096, 1, 1);
-        micProcessorRef.current = processor;
-        const muteGain = inputCtx.createGain();
-        muteGain.gain.value = 0; // Eliminate local microphone echo and acoustic feedback loop
-        source.connect(processor);
-        processor.connect(muteGain);
-        muteGain.connect(inputCtx.destination);
-
-        processor.onaudioprocess = (e) => {
-          if (isMuted || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-          const inputBuffer = e.inputBuffer.getChannelData(0);
-          const pcm16Base64 = float32ToPcm16Base64(inputBuffer);
-          wsRef.current.send(JSON.stringify({ type: 'audio', audio: pcm16Base64 }));
-        };
-      }
-
-      // Initialize 24kHz AudioContext singleton for model output playback
-      outputAudioCtxRef.current = getLiveOutputAudioContext();
-
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const idToken = await getCurrentIdToken();
-      const wsUrl = `${protocol}//${window.location.host}/api/live-call?token=${encodeURIComponent(idToken || '')}`;
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        ws.send(
-          JSON.stringify({
-            type: 'start',
-            persona: selectedPersona,
-            topic: callTopic,
-            voiceName: agentVoiceId,
-            language: lang,
-          })
+        const isExpired =
+          err?.message?.includes('API key expired') ||
+          err?.message?.includes('API_KEY_INVALID') ||
+          err?.code === 'API_KEY_EXPIRED';
+        if (isExpired) {
+          window.dispatchEvent(new CustomEvent('open-api-key-modal'));
+        }
+        setCallErrorMessage(
+          isExpired
+            ? (lang === 'uz' ? "Gemini API kaliti muddati tugagan. [Kalitni yangilash] tugmasini bosing." : "Срок действия Gemini API ключа истёк. Нажмите [Обновить ключ].")
+            : (err.message || 'Call start failed')
         );
-      };
+      }
+    };
 
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.type === 'connected') {
-            setCallStatus('connected');
-            setCallDuration(0);
-            if (callTimerRef.current) clearInterval(callTimerRef.current);
-            callTimerRef.current = setInterval(() => {
-              setCallDuration((prev) => prev + 1);
-            }, 1000);
+    // Mode 1: Realtime API (Gemini 3.8 Live over WebSocket /api/live-call)
+    const startLiveWebSocketCall = async () => {
+      try {
+        const token = await getCurrentIdToken().catch(() => null);
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProtocol}//${window.location.host}/api/live-call${
+          token ? `?token=${encodeURIComponent(token)}` : ''
+        }`;
 
-            // Deduct credit ONLY after successful connection
-            useCredit(1).catch(() => {});
-            logGeneration('agent_call', 'AI Realtor Live Call', 1).catch(() => {});
-          } else if (data.type === 'audio' && data.audio) {
-            playLiveAudioChunk(data.audio);
-          } else if (data.type === 'text' && data.text) {
-            setCurrentSubtitle(data.text);
-            setTranscriptLines((prev) => {
-              const last = prev[prev.length - 1];
-              if (last && last.sender === 'agent') {
-                return [...prev.slice(0, -1), { ...last, text: last.text + ' ' + data.text }];
-              } else {
+        const ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          ws.send(
+            JSON.stringify({
+              type: 'start',
+              persona: selectedPersona,
+              topic: callTopic,
+              voiceName: agentVoiceId,
+              language: lang,
+            })
+          );
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+
+            if (msg.type === 'connected') {
+              setCallStatus('connected');
+              setCallDuration(0);
+              if (callTimerRef.current) clearInterval(callTimerRef.current);
+              callTimerRef.current = setInterval(() => {
+                setCallDuration((prev) => prev + 1);
+              }, 1000);
+
+              useCredit(1).catch(() => {});
+              logGeneration('agent_call', 'AI Live Call (gemini-3.8-live)', 1).catch(() => {});
+
+              // Stream 16kHz PCM microphone input to Gemini Live WebSocket
+              if (micStreamRef.current) {
+                try {
+                  const inputCtx = getLiveInputAudioContext();
+                  inputAudioCtxRef.current = inputCtx;
+                  if (inputCtx.state === 'suspended') {
+                    inputCtx.resume().catch(() => {});
+                  }
+                  const source = inputCtx.createMediaStreamSource(micStreamRef.current);
+                  const processor = inputCtx.createScriptProcessor(4096, 1, 1);
+                  micProcessorRef.current = processor;
+
+                  processor.onaudioprocess = (e) => {
+                    if (isMutedRef.current || ws.readyState !== WebSocket.OPEN) return;
+                    const inputData = e.inputBuffer.getChannelData(0);
+
+                    let sum = 0;
+                    for (let i = 0; i < inputData.length; i++) {
+                      sum += inputData[i] * inputData[i];
+                    }
+                    const rms = Math.sqrt(sum / inputData.length);
+                    if (rms > 0.018) {
+                      setUserSpeaking(true);
+                      setAudioLevel(Math.min(1, rms * 8));
+                    } else {
+                      setUserSpeaking(false);
+                    }
+
+                    const base64Audio = float32ToPcm16Base64(inputData);
+                    ws.send(JSON.stringify({ type: 'audio', audio: base64Audio }));
+                  };
+
+                  source.connect(processor);
+                  processor.connect(inputCtx.destination);
+                } catch (audioErr) {
+                  console.warn('Live mic stream setup warning:', audioErr);
+                }
+              }
+            } else if (msg.type === 'audio' && msg.audio) {
+              playLiveAudioChunk(msg.audio);
+            } else if (msg.type === 'text' && msg.text) {
+              setCurrentSubtitle(msg.text);
+              setTranscriptLines((prev) => {
+                const last = prev[prev.length - 1];
+                if (last && last.sender === 'agent' && Date.now() - Number(last.id.split('-')[1] || 0) < 3500) {
+                  return [
+                    ...prev.slice(0, -1),
+                    { ...last, text: `${last.text} ${msg.text}`.trim() },
+                  ];
+                }
                 return [
                   ...prev,
                   {
                     id: `a-${Date.now()}`,
                     sender: 'agent',
-                    text: data.text,
+                    text: msg.text,
                     timestamp: new Date().toLocaleTimeString(lang === 'ru' ? 'ru-RU' : 'uz-UZ', {
                       hour: '2-digit',
                       minute: '2-digit',
@@ -774,21 +1002,58 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                     }),
                   },
                 ];
+              });
+            } else if (msg.type === 'interrupted') {
+              stopAllAudio();
+            } else if (msg.type === 'apiKeyExpired') {
+              cleanupCall();
+              setCallStatus('idle');
+              setCallErrorMessage(
+                lang === 'uz'
+                  ? "Gemini API kaliti muddati tugagan. Realtime API (gemini-3.8-live) ishlashi uchun yangi kalit kiriting."
+                  : "Срок действия Gemini API ключа истёк. Введите новый ключ для работы Realtime API (gemini-3.8-live)."
+              );
+              window.dispatchEvent(new CustomEvent('open-api-key-modal'));
+            } else if (msg.type === 'error') {
+              setCallErrorMessage(msg.error || 'Gemini Live error');
+            } else if (msg.type === 'sessionClosed') {
+              if (callStatusRef.current === 'calling') {
+                setCallStatus('idle');
               }
-            });
-          } else if (data.type === 'interrupted') {
-            stopAllAudio();
-          } else if (data.type === 'sessionClosed') {
-            handleEndCall();
-          } else if (data.type === 'error') {
-            console.warn('Live API error:', data.error);
+            }
+          } catch (parseErr) {
+            console.warn('WS message parse warning:', parseErr);
           }
-        } catch (e) {}
-      };
+        };
 
-      ws.onerror = (err) => {
-        console.warn('Live call WebSocket error:', err);
-      };
+        ws.onerror = (err) => {
+          console.warn('Live WebSocket error:', err);
+          if (callStatusRef.current === 'calling') {
+            setCallStatus('idle');
+            setCallErrorMessage(
+              lang === 'uz'
+                ? "Realtime WebSocket ulanishida xatolik yuz berdi."
+                : "Ошибка подключения Realtime WebSocket."
+            );
+          }
+        };
+
+        ws.onclose = () => {
+          if (callStatusRef.current === 'calling') {
+            setCallStatus('idle');
+          }
+        };
+      } catch (err: any) {
+        console.error('Live WebSocket start error:', err);
+        setCallStatus('idle');
+        setCallErrorMessage(err.message || 'Live call start failed');
+      }
+    };
+
+    if (callMode === 'live') {
+      await startLiveWebSocketCall();
+    } else {
+      await startTurnBasedCall();
     }
   };
 
@@ -845,22 +1110,33 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
   // Interrupt agent mid-speech
   const handleInterruptAgent = () => {
     stopAllAudio();
-    if (callEngine === 'shokhrukh_natural') {
-      restartListening();
-    } else if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'interrupt' }));
+    } else {
+      restartListening();
     }
   };
 
   // Quick prompt button click
   const handleSendQuickPrompt = (text: string) => {
     if (!text.trim()) return;
-    if (callEngine === 'shokhrukh_natural') {
-      stopAllAudio();
-      executeNaturalTurn(text.trim());
-    } else if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    stopAllAudio();
+    if (callMode === 'live' && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      const userLine: TranscriptLine = {
+        id: `u-${Date.now()}`,
+        sender: 'user',
+        text: text.trim(),
+        timestamp: new Date().toLocaleTimeString(lang === 'ru' ? 'ru-RU' : 'uz-UZ', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        }),
+      };
+      setTranscriptLines((prev) => [...prev, userLine]);
       wsRef.current.send(JSON.stringify({ type: 'text', text: text.trim() }));
+      return;
     }
+    executeNaturalTurn(text.trim());
   };
 
   // Immediate send when user clicks "Finished Speaking"
@@ -912,7 +1188,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
     content += `Mavzu: ${callTopic}\n`;
     content += `Persona: ${selectedPersona}\n`;
     content += `Ovoz: ${agentVoiceId}\n`;
-    content += `Dvigatel: ${callEngine === 'shokhrukh_natural' ? 'Shohrux Haqiqiy Ovoz (Ultra-Natural TTS Live)' : 'OvozStudio Real-time API'}\n`;
+    content += `Dvigatel: Google Gemini 3.8 Flash & TTS (Neural Call)\n`;
     content += `Sana: ${new Date().toLocaleString()}\n`;
     content += `Davomiyligi: ${formatTime(callDuration)}\n\n`;
     content += `==============================================\n\n`;
@@ -1003,7 +1279,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
               <span className="w-2.5 h-2.5 rounded-full bg-[#0E7C86] animate-pulse" />
               <span className="px-2.5 py-0.5 rounded-full bg-[rgba(14,124,134,0.1)] text-[#0E7C86] text-[11px] font-mono tracking-wider font-semibold border border-[#0E7C86]/30 flex items-center gap-1 uppercase">
                 <Zap className="w-3 h-3 text-[#0E7C86]" />
-                {callEngine === 'shokhrukh_natural' ? 'SHOHRUX HAQIQIY OVOZ LIVE (0% AKSENT)' : 'OVOZSTUDIO REAL-TIME API'}
+                GEMINI 3.8 FLASH & TTS (NEURAL CALL)
               </span>
             </div>
             <h2 className="font-serif text-2xl sm:text-3xl text-[#161511] tracking-tight">
@@ -1014,13 +1290,9 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
               )}
             </h2>
             <p className="text-xs sm:text-sm text-[#5D594E] mt-1.5 max-w-2xl leading-relaxed">
-              {callEngine === 'shokhrukh_natural'
-                ? (lang === 'uz'
-                    ? "Shohruxning haqiqiy ovoz nusxasi bilan to'liq jonli muloqot! Hech qanday chet elcha aksentsiz, sof o'zbek tilida Toshkent ko'chmas mulki bo'yicha maslahat oling."
-                    : '100% живой голос Шохруха без американского акцента! Естественный разговорный диалог по недвижимости Ташкента.')
-                : (lang === 'uz'
-                    ? "Eksperimental to'g'ridan-to'g'ri WebSocket Speech-to-Speech audio oqimi."
-                    : 'Экспериментальный прямой WebSocket Speech-to-Speech поток.')}
+              {lang === 'uz'
+                ? "Google Gemini 3.8 Flash intellekti va Gemini 3.8 Flash TTS neyron ovozlari orqali haqiqiy telefon muloqoti. Rasmiy tembrlar, jonli transkript va BANT lead kvalifikatsiyasi."
+                : 'Живой телефонный диалог через нейронные модели Google Gemini 3.8 Flash и Gemini 3.8 Flash TTS. Официальные тембры, транскрипт и BANT квалификация лидов.'}
             </p>
           </div>
 
@@ -1037,38 +1309,56 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
           )}
         </div>
 
-        {/* Engine Switcher & Sub-navigation tabs */}
-        {callStatus === 'idle' && (
-          <div className="mt-5 pt-4 border-t border-[rgba(22,21,17,0.1)] flex flex-wrap items-center justify-between gap-3">
-            {/* Engine Toggle */}
-            <div className="flex items-center gap-1.5 bg-[#ECE7DB] p-1 rounded-full border border-[rgba(22,21,17,0.12)]">
+        {/* Global Alert Banners for Call / API Key */}
+        {callErrorMessage && (
+          <div className="mt-3 p-3 bg-rose-500/15 border border-rose-500/40 rounded-xl text-rose-800 text-xs flex items-center justify-between shadow-xs">
+            <span className="flex items-center gap-2">
+              <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>{callErrorMessage}</span>
+            </span>
+            <div className="flex items-center gap-2 shrink-0">
+              {(callErrorMessage.toLowerCase().includes('api key') ||
+                callErrorMessage.toLowerCase().includes('kalit') ||
+                callErrorMessage.toLowerCase().includes('истёк')) && (
+                <button
+                  type="button"
+                  onClick={() => window.dispatchEvent(new CustomEvent('open-api-key-modal'))}
+                  className="btn-pill btn-solid text-[11px] py-1 px-2.5 flex items-center gap-1 cursor-pointer shadow-xs"
+                >
+                  <Key className="w-3 h-3" />
+                  <span>{lang === 'uz' ? "Kalitni yangilash" : "Обновить ключ"}</span>
+                </button>
+              )}
               <button
                 type="button"
-                onClick={() => {
-                  setCallEngine('shokhrukh_natural');
-                  setAgentVoiceId(shokhrukhVoiceId);
-                }}
-                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
-                  callEngine === 'shokhrukh_natural'
-                    ? 'bg-[#161511] text-[#F4F1EA] shadow-2xs'
-                    : 'text-[#5D594E] hover:text-[#161511]'
-                }`}
+                onClick={() => setCallErrorMessage(null)}
+                className="text-xs px-2 py-0.5 rounded hover:bg-rose-500/20 text-rose-700 cursor-pointer font-bold"
               >
-                <span>⭐ Shohrux Haqiqiy Ovoz (0% Aksent)</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setCallEngine('ovoz_live')}
-                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
-                  callEngine === 'ovoz_live'
-                    ? 'bg-[#161511] text-[#F4F1EA] shadow-2xs'
-                    : 'text-[#5D594E] hover:text-[#161511]'
-                }`}
-              >
-                <span>⚡ OvozStudio Real-time API</span>
+                ✕
               </button>
             </div>
+          </div>
+        )}
 
+        {apiKeyNotice && (
+          <div className="mt-3 p-3 bg-[#0E7C86]/15 border border-[#0E7C86]/35 rounded-xl text-[#0A5A62] text-xs flex items-center justify-between shadow-xs">
+            <span className="flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-[#0E7C86] shrink-0" />
+              <span>{apiKeyNotice}</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setApiKeyNotice(null)}
+              className="text-xs px-2 py-0.5 rounded hover:bg-[#0E7C86]/20 text-[#0E7C86] cursor-pointer font-bold"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        {/* Sub-navigation tabs */}
+        {callStatus === 'idle' && (
+          <div className="mt-5 pt-4 border-t border-[rgba(22,21,17,0.1)] flex flex-wrap items-center justify-end gap-3">
             {/* Navigation Tabs */}
             <div className="flex flex-wrap items-center gap-1.5">
               <button
@@ -1179,6 +1469,12 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
             agentVoiceName={agentVoiceId === shokhrukhVoiceId ? 'SHOHRUX' : 'MADINA'}
             onSendText={handleSendQuickPrompt}
             micWarning={micWarning}
+            apiKeyNotice={apiKeyNotice}
+            callErrorMessage={callErrorMessage}
+            onDismissNotice={() => {
+              setApiKeyNotice(null);
+              setCallErrorMessage(null);
+            }}
           />
         </div>
       )}
@@ -1984,279 +2280,338 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
           )}
 
           {activeTabSubView === 'agent' && (
-            <div className="space-y-8">
-              {/* Primary Visual Layer: Live Call Card (State 1: IDLE before call) */}
-              <LiveCallCard
-                callStatus={callStatus}
-                callDuration={callDuration}
-                agentSpeaking={agentSpeaking}
-                userSpeaking={userSpeaking}
-                currentSubtitle={currentSubtitle}
-                transcriptLines={transcriptLines}
-                callTopic={callTopic}
-                reLeadCard={reLeadCard}
-                onStartCall={handleStartCall}
-                onEndCall={handleEndCall}
-                onToggleMute={handleToggleMute}
-                isMuted={isMuted}
-                onResetCall={() => {
-                  setCallStatus('idle');
-                  setCallDuration(0);
-                }}
-                onGoToCRM={() => {
-                  setCallStatus('idle');
-                  setActiveTabSubView('summary');
-                  if (!crmSummaryData && conversationHistoryRef.current.length >= 2) {
-                    handleGenerateSummary();
-                  }
-                }}
-                onGoToLead={() => {
-                  setCallStatus('idle');
-                  setActiveTabSubView('lead');
-                }}
-                isAuthenticated={isAuthenticated}
-                lang={lang}
-                agentVoiceName={agentVoiceId === shokhrukhVoiceId ? 'SHOHRUX' : 'MADINA'}
-                onSendText={handleSendQuickPrompt}
-                micWarning={micWarning}
-              />
-
-              {/* 3D Voice Gallery row for Agent Voice Picker */}
-              <VoiceGallery3D
-                voices={voices}
-                selectedVoiceId={agentVoiceId}
-                onSelectVoice={(id) => setAgentVoiceId(id)}
-                lang={lang}
-                title={lang === 'uz' ? '3D Agent Ovozlar Galereyasi' : '3D Галерея Голосов Агента'}
-                subtitle={lang === 'uz' ? 'SHISHA SHARLARNI AYLANTRING VA AGENT OVOZINI TANLANG' : 'ВРАЩАЙТЕ СФЕРЫ ДЛЯ ВЫБОРА ГОЛОСА'}
-              />
-
-              {/* Persona & Voice Timbre Setup */}
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              {/* Left Column: Persona & Setup (7 cols) */}
-              <div className="lg:col-span-7 space-y-5">
-                {/* Step 1: Select Persona */}
-                <div className="bg-white border border-[rgba(22,21,17,0.14)] rounded-[22px] p-6 space-y-3.5 shadow-sm">
-                  <label className="text-xs font-mono uppercase tracking-wider text-[#5D594E] font-bold flex items-center gap-2">
-                    <Bot className="w-4 h-4 text-[#0E7C86]" />
-                    <span>{lang === 'uz' ? '1. Suhbatdosh Personasi (Rol)' : '1. Персонаж и Роль Агента'}</span>
-                  </label>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    {(Object.keys(personaConfig) as AgentPersonaType[]).map((key) => {
-                      const conf = personaConfig[key];
-                      const isSel = selectedPersona === key;
-                      const Icon = conf.icon;
-                      return (
-                        <button
-                          key={key}
-                          type="button"
-                          onClick={() => {
-                            setSelectedPersona(key);
-                            if (key === 'tashkent_real_estate') {
-                              setCallTopic('Toshkentda novostroyka, ikkilamchi bozor, ijara va narxlar');
-                            }
-                          }}
-                          className={`p-4 rounded-xl border text-left transition-all cursor-pointer relative ${
-                            isSel
-                              ? 'bg-[rgba(14,124,134,0.06)] border-[#0E7C86] shadow-2xs'
-                              : 'bg-[#F4F1EA]/60 border-[rgba(22,21,17,0.1)] hover:border-[#161511]'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between mb-1.5">
-                            <span className="text-xs font-bold text-[#161511] flex items-center gap-1.5">
-                              <Icon className={`w-3.5 h-3.5 ${isSel ? 'text-[#0E7C86]' : 'text-[#5D594E]'}`} />
-                              {conf.titleUz.split('(')[0]}
-                            </span>
-                            {isSel && <span className="w-2 h-2 rounded-full bg-[#0E7C86]" />}
-                          </div>
-                          <p className="text-[11px] text-[#5D594E] line-clamp-2 leading-relaxed">
-                            {lang === 'uz' ? conf.descUz : conf.descRu}
-                          </p>
-                        </button>
-                      );
-                    })}
+            <div className="space-y-6">
+              {/* STEP 1: Select Persona & Role */}
+              <div className="bg-white border border-[rgba(22,21,17,0.14)] rounded-[22px] p-5 sm:p-7 space-y-4 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-[rgba(14,124,134,0.1)] text-[#0E7C86] text-xs font-mono font-bold flex items-center justify-center">1</span>
+                    <h3 className="font-serif text-lg sm:text-xl font-normal text-[#161511]">
+                      {lang === 'uz' ? "Rol va Personajni Tanlang" : "Выберите Роль и Персонажа"}
+                    </h3>
                   </div>
+                  <span className="text-xs text-[#5D594E]">
+                    {lang === 'uz' ? "AI kim nomidan gapiradi" : "Кто ведёт диалог"}
+                  </span>
                 </div>
 
-                {/* Step 2: Topic & Context */}
-                <div className="bg-white border border-[rgba(22,21,17,0.14)] rounded-[22px] p-6 space-y-3.5 shadow-sm">
-                  <label className="text-xs font-mono uppercase tracking-wider text-[#5D594E] font-bold flex items-center gap-2">
-                    <Radio className="w-4 h-4 text-[#0E7C86]" />
-                    <span>{lang === 'uz' ? '2. Qo\'ng\'iroq Mavzusi yoki Savol' : '2. Тема Звонка или Вопрос'}</span>
-                  </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  {(Object.keys(personaConfig) as AgentPersonaType[]).map((key) => {
+                    const conf = personaConfig[key];
+                    const isSel = selectedPersona === key;
+                    const Icon = conf.icon;
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => {
+                          setSelectedPersona(key);
+                          const topics = PERSONA_TOPICS[key];
+                          if (topics) {
+                            setCallTopic(lang === 'ru' ? topics.defaultTopicRu : topics.defaultTopicUz);
+                          }
+                        }}
+                        className={`p-4 rounded-xl border text-left transition-all cursor-pointer relative flex flex-col justify-between ${
+                          isSel
+                            ? 'bg-[rgba(14,124,134,0.08)] border-[#0E7C86] shadow-2xs ring-1 ring-[#0E7C86]'
+                            : 'bg-[#F4F1EA]/60 border-[rgba(22,21,17,0.1)] hover:border-[#161511]'
+                        }`}
+                      >
+                        <div>
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="p-2 rounded-lg bg-white border border-[rgba(22,21,17,0.08)]">
+                              <Icon className={`w-4 h-4 ${isSel ? 'text-[#0E7C86]' : 'text-[#5D594E]'}`} />
+                            </span>
+                            {isSel && (
+                              <span className="w-2.5 h-2.5 rounded-full bg-[#0E7C86]" />
+                            )}
+                          </div>
+                          <h4 className="text-sm font-bold text-[#161511] mb-1">
+                            {conf.titleUz.split('(')[0].trim()}
+                          </h4>
+                          <p className="text-[11px] text-[#5D594E] line-clamp-3 leading-relaxed">
+                            {lang === 'uz' ? conf.descUz : conf.descRu}
+                          </p>
+                        </div>
+                        <div className="mt-3 pt-2 border-t border-[rgba(22,21,17,0.06)] text-[10px] font-mono font-semibold text-[#0E7C86]">
+                          {isSel ? (lang === 'uz' ? '✓ Tanlangan' : '✓ Выбрано') : (lang === 'uz' ? 'Tanlash uchun bosing' : 'Выбрать')}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
 
+              {/* STEP 2: Topic & Context Input with Role-Specific Chips */}
+              <div className="bg-white border border-[rgba(22,21,17,0.14)] rounded-[22px] p-5 sm:p-7 space-y-4 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-[rgba(14,124,134,0.1)] text-[#0E7C86] text-xs font-mono font-bold flex items-center justify-center">2</span>
+                    <h3 className="font-serif text-lg sm:text-xl font-normal text-[#161511]">
+                      {lang === 'uz' ? "Muloqot Mavzusi yoki Savol" : "Тема Разговора или Контекст"}
+                    </h3>
+                  </div>
+                  <span className="text-xs text-[#5D594E]">
+                    {lang === 'uz' ? "AI qaysi mavzuda gapiradi" : "О чём пойдёт речь"}
+                  </span>
+                </div>
+
+                <div className="space-y-3">
                   <input
                     type="text"
                     value={callTopic}
                     onChange={(e) => setCallTopic(e.target.value)}
-                    placeholder="Mavzuni kiriting..."
-                    className="w-full bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.14)] rounded-xl px-4 py-2.5 text-xs sm:text-sm text-[#161511] focus:outline-none focus:border-[#0E7C86] transition-colors"
+                    placeholder={lang === 'uz' ? "Muloqot mavzusini kiriting yoki quyidagi variantlardan tanlang..." : "Введите тему разговора или выберите быстрый вариант ниже..."}
+                    className="w-full bg-[#F4F1EA]/70 border border-[rgba(22,21,17,0.14)] rounded-xl px-4 py-3 text-xs sm:text-sm text-[#161511] focus:outline-none focus:border-[#0E7C86] transition-colors font-mono"
                   />
 
-                  {/* Quick Topic Chips */}
-                  <div className="flex flex-wrap gap-1.5 pt-1">
-                    {selectedPersona === 'tashkent_real_estate' ? (
-                      [
-                        'Chilonzordan arzonroq 2 xonali uy qidiryapman',
-                        'Mirobodda novostroyka olish shartlari',
-                        '$50,000 ga investitsiya varianti',
-                        'Sergelida subsidiyali ipoteka',
-                        'Kotlovandan olish va kadastr',
-                      ].map((chip) => (
-                        <button
-                          key={chip}
-                          type="button"
-                          onClick={() => setCallTopic(chip)}
-                          className="px-3 py-1 bg-white hover:bg-[#ECE7DB] border border-[rgba(22,21,17,0.14)] text-[11px] text-[#161511] rounded-full transition-all cursor-pointer font-medium"
-                        >
-                          + {chip}
-                        </button>
-                      ))
-                    ) : (
-                      [
-                        'Sun\'iy intellekt kelajagi',
-                        'O\'zbekiston IT startaplari',
-                        'Podkastni monetizatsiya qilish',
-                        'Amir Temur davri sirlari',
-                      ].map((chip) => (
-                        <button
-                          key={chip}
-                          type="button"
-                          onClick={() => setCallTopic(chip)}
-                          className="px-3 py-1 bg-white hover:bg-[#ECE7DB] border border-[rgba(22,21,17,0.14)] text-[11px] text-[#5D594E] hover:text-[#161511] rounded-full transition-all cursor-pointer font-medium"
-                        >
-                          + {chip}
-                        </button>
-                      ))
-                    )}
+                  {/* Dynamic Topic Prompt Chips tailored to the active persona */}
+                  <div>
+                    <div className="text-[11px] font-medium text-[#5D594E] mb-1.5 flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-[#0E7C86]" />
+                      <span>{lang === 'uz' ? "Ushbu rol uchun tavsiya etilgan mavzular:" : "Рекомендованные темы для этой роли:"}</span>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {(PERSONA_TOPICS[selectedPersona]?.quickChips || []).map((chip, idx) => {
+                        const chipText = lang === 'ru' ? chip.ru : chip.uz;
+                        return (
+                          <button
+                            key={idx}
+                            type="button"
+                            onClick={() => setCallTopic(chipText)}
+                            className="px-3 py-1.5 bg-[#F4F1EA]/60 hover:bg-[#ECE7DB] border border-[rgba(22,21,17,0.12)] text-[11px] text-[#161511] rounded-full transition-all cursor-pointer font-medium flex items-center gap-1 active:scale-95"
+                          >
+                            <span>+</span>
+                            <span>{chipText}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                 </div>
               </div>
 
-              {/* Right Column: Voice Selection & Call Trigger (5 cols) */}
-              <div className="lg:col-span-5 space-y-5">
-                {/* Step 3: Agent Voice Selection */}
-                <div className="bg-white border border-[rgba(22,21,17,0.14)] rounded-[22px] p-6 space-y-3.5 shadow-sm">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs font-mono uppercase tracking-wider text-[#5D594E] font-bold flex items-center gap-2">
-                      <Volume2 className="w-4 h-4 text-[#0E7C86]" />
-                      <span>{lang === 'uz' ? '3. Ovoz Tembrini Tanlang' : '3. Тембр Голоса'}</span>
-                    </label>
-                    <span className="text-[10px] text-[#0E7C86] font-mono font-bold bg-[rgba(14,124,134,0.1)] px-2.5 py-0.5 rounded-full border border-[#0E7C86]/30">
-                      Tavsiya: Shohrux
-                    </span>
+              {/* STEP 3: Engine & Voice Selection */}
+              <div className="bg-white border border-[rgba(22,21,17,0.14)] rounded-[22px] p-5 sm:p-7 space-y-5 shadow-sm">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[rgba(22,21,17,0.08)] pb-4">
+                  <div className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-[rgba(14,124,134,0.1)] text-[#0E7C86] text-xs font-mono font-bold flex items-center justify-center">3</span>
+                    <h3 className="font-serif text-lg sm:text-xl font-normal text-[#161511]">
+                      {lang === 'uz' ? "Dvigatel va Ovoz Tembrini Tanlang" : "Движок и Тембр Голоса"}
+                    </h3>
                   </div>
 
-                  <div className="space-y-2">
-                    {[
-                      {
-                        id: shokhrukhVoiceId,
-                        name: 'SHOKHRUKH (Mening Haqiqiy Ovozim)',
-                        tag: '⭐ SHAXSIY REPLIKATSIYA (0% AKSENT)',
-                        desc: 'OvozStudio neyron replikatsiyasi — 100% tabiiy o\'zbekcha talaffuz!',
-                      },
-                      { id: 'Aoede', name: 'Madina (Tavsiya)', tag: '🔥 Samimiy & xarizmatik ayol ovozi', desc: 'Juda jonli, iliq, xarizmatik broker' },
-                      { id: 'Charon', name: 'Jasur', tag: '🎩 Katta rieltor-broker', desc: 'Vazmin, nufuzli, chuqur bariton' },
-                      { id: 'Puck', name: 'Otabek', tag: '⚡ Dinamik & yosh broker', desc: 'Faol, tezkor, optimistik' },
-                      { id: 'Kore', name: 'Aziza', tag: '🌸 Muloyim maslahatchi', desc: 'Iliq, ishonchli ayol ovozi' },
-                      { id: 'Fenrir', name: 'Ulug\'bek', tag: '💪 Tajribali ekspert', desc: 'Kuchli, qat\'iy, aniq' },
-                    ].map((v) => {
-                      const isVoicePlaying = previewingVoiceId === v.id;
-                      return (
-                        <div
-                          key={v.id}
-                          onClick={() => setAgentVoiceId(v.id)}
-                          className={`w-full p-3 rounded-xl border flex items-center justify-between gap-2 transition-all cursor-pointer ${
-                            agentVoiceId === v.id
-                              ? 'bg-[rgba(14,124,134,0.08)] border-[#0E7C86] text-[#161511] shadow-2xs'
-                              : 'bg-[#F4F1EA]/50 border-[rgba(22,21,17,0.1)] text-[#5D594E] hover:border-[#161511]'
-                          }`}
-                        >
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center justify-between gap-1">
-                              <p className="text-xs font-bold text-[#161511] truncate">{v.name}</p>
-                              <span className="text-[10px] font-mono text-[#0E7C86] font-semibold shrink-0">{v.tag}</span>
-                            </div>
-                            <p className="text-[10px] text-[#5D594E] mt-0.5 truncate">{v.desc}</p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              toggleVoicePreview(v.id);
-                            }}
-                            className={`w-7 h-7 rounded-full shrink-0 flex items-center justify-center transition-all cursor-pointer ${
-                              isVoicePlaying
-                                ? 'bg-[#0E7C86] text-white shadow-sm'
-                                : 'bg-white border border-[rgba(22,21,17,0.14)] text-[#161511] hover:bg-[#ECE7DB]'
-                            }`}
-                            title={
-                              isVoicePlaying
-                                ? (lang === 'uz' ? "To'xtatish" : 'Остановить')
-                                : (lang === 'uz' ? "Ovoz namunasini tinglash (0s kutish, tekin)" : 'Прослушать голос (встроено)')
-                            }
-                          >
-                            {isVoicePlaying ? (
-                              <Square className="w-3 h-3 fill-current" />
-                            ) : (
-                              <Play className="w-3 h-3 fill-current translate-x-0.5" />
-                            )}
-                          </button>
-                        </div>
-                      );
-                    })}
+                  {/* Engine Switcher: Realtime API vs Cloned Voice */}
+                  <div className="flex flex-wrap items-center gap-2 bg-[#F4F1EA] p-1 rounded-full border border-[rgba(22,21,17,0.12)]">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCallMode('live');
+                        if (agentVoiceId.startsWith('voice_')) {
+                          setAgentVoiceId('Puck');
+                        }
+                      }}
+                      className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
+                        callMode === 'live'
+                          ? 'bg-[#0E7C86] text-white shadow-xs'
+                          : 'text-[#5D594E] hover:text-[#161511]'
+                      }`}
+                    >
+                      <Zap className="w-3.5 h-3.5" />
+                      <span>{lang === 'uz' ? '⚡ Realtime API (0.3s Jonli)' : '⚡ Realtime API (0.3с Живой)'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCallMode('cloned');
+                        setAgentVoiceId(shokhrukhVoiceId);
+                      }}
+                      className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
+                        callMode === 'cloned'
+                          ? 'bg-[#161511] text-[#F4F1EA] shadow-xs'
+                          : 'text-[#5D594E] hover:text-[#161511]'
+                      }`}
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-[#C98A12]" />
+                      <span>{lang === 'uz' ? '⭐ Shaxsiy Klonlangan Ovoz (1.5-2.5s)' : '⭐ Свой Клонированный Голос (1.5-2.5с)'}</span>
+                    </button>
                   </div>
                 </div>
 
-                {/* Big Call Action Card */}
-                <div className="bg-white border border-[rgba(22,21,17,0.14)] rounded-[22px] p-6 text-center space-y-4 shadow-sm">
-                  <div className="w-14 h-14 rounded-full bg-[rgba(14,124,134,0.1)] border border-[#0E7C86]/30 flex items-center justify-center text-[#0E7C86] mx-auto shadow-2xs">
-                    <PhoneCall className="w-7 h-7" />
+                {/* MODE 1: Gemini 3.8 Live Realtime API Official Voices Grid */}
+                {callMode === 'live' ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between text-xs text-[#5D594E]">
+                      <p>
+                        {lang === 'uz'
+                          ? "⚡ Google Gemini 3.8 Live API (WebSocket) — 0.3 soniyada javob qaytaruvchi 5 ta rasmiy neyron ovoz (gapni bo'lish imkoniyati bilan):"
+                          : "⚡ Google Gemini 3.8 Live API (WebSocket) — ультрабыстрый живой эфир (~0.3 сек) с 5 официальными нейронными голосами Google и поддержкой перебивания:"}
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                      {REALTIME_VOICES.map((v) => {
+                        const isSel = agentVoiceId.toLowerCase() === v.id.toLowerCase();
+                        const isVoicePlaying = previewingVoiceId === v.id.toLowerCase();
+                        return (
+                          <div
+                            key={v.id}
+                            onClick={() => setAgentVoiceId(v.id)}
+                            className={`p-4 rounded-xl border transition-all cursor-pointer relative flex flex-col justify-between ${
+                              isSel
+                                ? 'bg-[rgba(14,124,134,0.08)] border-[#0E7C86] shadow-2xs ring-1 ring-[#0E7C86]'
+                                : 'bg-[#F4F1EA]/60 border-[rgba(22,21,17,0.1)] hover:border-[#161511]'
+                            }`}
+                          >
+                            <div className="space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <span className="font-bold text-sm text-[#161511] flex items-center gap-1.5">
+                                  {lang === 'ru' ? v.nameRu : v.nameUz}
+                                </span>
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-[rgba(14,124,134,0.1)] text-[#0E7C86] border border-[#0E7C86]/30">
+                                  {lang === 'ru' ? v.badgeRu : v.badgeUz}
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-[#5D594E] leading-relaxed">
+                                {lang === 'ru' ? v.toneRu : v.toneUz}
+                              </p>
+                            </div>
+
+                            <div className="mt-3 pt-2.5 border-t border-[rgba(22,21,17,0.06)] flex items-center justify-between">
+                              <span className="text-[10px] font-mono text-[#7D7A70]">
+                                {v.gender === 'male' ? (lang === 'uz' ? 'Erkak ovozi' : 'Мужской тембр') : (lang === 'uz' ? 'Ayol ovozi' : 'Женский тембр')}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleVoicePreview(v.id.toLowerCase());
+                                }}
+                                className={`px-2.5 py-1 rounded-full text-[11px] font-mono font-medium flex items-center gap-1 transition-all cursor-pointer ${
+                                  isVoicePlaying
+                                    ? 'bg-[#0E7C86] text-white'
+                                    : 'bg-white border border-[rgba(22,21,17,0.14)] text-[#161511] hover:bg-[#ECE7DB]'
+                                }`}
+                                title={isVoicePlaying ? "To'xtatish" : "Ovozni tinglash"}
+                              >
+                                {isVoicePlaying ? (
+                                  <>
+                                    <Square className="w-2.5 h-2.5 fill-current" />
+                                    <span>Pauza</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Play className="w-2.5 h-2.5 fill-current" />
+                                    <span>Tinglash</span>
+                                  </>
+                                )}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
+                ) : (
+                  /* MODE 2: Custom Cloned Voices (Shohrux & User Replicated Voices via Gemini 3.8 Flash TTS) */
+                  <div className="space-y-3">
+                    <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/25 text-xs text-[#161511] flex items-start gap-2.5">
+                      <Sparkles className="w-4 h-4 text-[#C98A12] shrink-0 mt-0.5" />
+                      <div>
+                        <b className="font-semibold block">
+                          {lang === 'uz'
+                            ? "Shaxsiy Klonlangan Ovoz Rejimi (Gemini 3.8 Flash TTS)"
+                            : "Режим Клонированного Голоса (Gemini 3.8 Flash TTS)"}
+                        </b>
+                        <p className="text-[11px] text-[#5D594E] mt-0.5 leading-relaxed">
+                          {lang === 'uz'
+                            ? "Realtime API (gemini-3.8-live) faqat Google'ning 5 ta bazaviy ovozini qo'llab-quvvatlaydi. Shaxsiy klonlangan ovozda (Shohrux yoki «Ovozlarim» bo'limida yaratilgan ovozlarda) gaplashish uchun ushbu rejim ishlatiladi."
+                            : "Realtime API (gemini-3.8-live) на стороне Google поддерживает только 5 встроенных голосов. Чтобы говорить вашим собственным клонированным голосом (голос Шохруха или голоса из раздела «Голоса»), используется этот режим на базе Gemini 3.8 Flash TTS."}
+                        </p>
+                      </div>
+                    </div>
 
-                  <div>
-                    <h4 className="font-serif text-lg font-normal text-[#161511]">
-                      {lang === 'uz' ? <>Shohrux bilan <em className="italic text-[#0E7C86]">Jonli Muloqot</em></> : <>Живой Разговор с <em className="italic text-[#0E7C86]">Шохрухом</em></>}
-                    </h4>
-                    <p className="text-xs text-[#5D594E] mt-1 max-w-xs mx-auto leading-relaxed">
-                      {lang === 'uz'
-                        ? 'Tugmani bosing. Go\'shak ko\'tarilgach, Shohrux salom berib sizni tinglaydi. Erkin savol bering!'
-                        : 'Нажмите кнопку. Когда Шохрух поднимет трубку и поздоровается, говорите свободно в микрофон!'}
-                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                      {clonedVoiceOptions.map((cv) => {
+                        const targetId = cv.voiceId || cv.id;
+                        const isSel = agentVoiceId === targetId || agentVoiceId === cv.id;
+                        return (
+                          <div
+                            key={cv.id}
+                            onClick={() => setAgentVoiceId(targetId)}
+                            className={`p-4 rounded-xl border transition-all cursor-pointer relative flex flex-col justify-between ${
+                              isSel
+                                ? 'bg-[rgba(14,124,134,0.08)] border-[#0E7C86] shadow-2xs ring-1 ring-[#0E7C86]'
+                                : 'bg-[#F4F1EA]/60 border-[rgba(22,21,17,0.1)] hover:border-[#161511]'
+                            }`}
+                          >
+                            <div className="space-y-1.5">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-bold text-sm text-[#161511] truncate">
+                                  {cv.name}
+                                </span>
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-amber-500/15 text-[#C98A12] border border-amber-500/30 shrink-0">
+                                  {lang === 'ru' ? 'Клон голоса' : 'Klonlangan'}
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-[#5D594E] line-clamp-2 leading-relaxed">
+                                {cv.style || cv.customPersonaPrompt || cv.timbre}
+                              </p>
+                            </div>
+                            <div className="mt-3 pt-2.5 border-t border-[rgba(22,21,17,0.06)] flex items-center justify-between text-[10px] font-mono text-[#0E7C86]">
+                              <span>ID: {targetId.slice(0, 14)}...</span>
+                              <span className="font-bold">
+                                {isSel ? (lang === 'uz' ? '✓ Tanlangan' : '✓ Выбрано') : (lang === 'uz' ? 'Tanlash' : 'Выбрать')}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
+                )}
 
-                  <button
-                    type="button"
-                    onClick={handleStartCall}
-                    className="w-full btn-pill btn-solid py-3.5 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2.5"
-                  >
-                    {!isAuthenticated ? (
-                      <>
-                        <Lock className="w-4 h-4 text-[#5CC8CF]" />
-                        <span>{lang === 'uz' ? '🔒 Ro\'yxatdan O\'tish & Qo\'ng\'iroq' : '🔒 Войти & Начать Звонок'}</span>
-                      </>
-                    ) : (
-                      <>
-                        <PhoneCall className="w-4 h-4 fill-current text-[#5CC8CF]" />
-                        <span>{lang === 'uz' ? '📞 Qo\'ng\'iroqni Boshlash (Jonli)' : '📞 Начать Звонок (Живой)'}</span>
-                      </>
-                    )}
-                  </button>
+                {/* Big Prominent Call Action Bar */}
+                <div className="pt-2 border-t border-[rgba(22,21,17,0.08)]">
+                  <div className="p-5 rounded-2xl bg-[#F4F1EA]/80 border border-[rgba(22,21,17,0.12)] flex flex-col sm:flex-row items-center justify-between gap-4">
+                    <div className="space-y-1 text-center sm:text-left">
+                      <div className="flex items-center justify-center sm:justify-start gap-2">
+                        <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+                        <h4 className="text-base font-bold text-[#161511]">
+                          {callMode === 'live'
+                            ? (lang === 'uz' ? "Realtime API (0.3s Jonli Efir) tayyor" : "Realtime API (0.3с Живой Эфир) готов")
+                            : (lang === 'uz' ? "Shaxsiy Klonlangan Ovoz rejimi tayyor" : "Режим Клонированного Голоса готов")}
+                        </h4>
+                      </div>
+                      <p className="text-xs text-[#5D594E] leading-relaxed">
+                        {callMode === 'live'
+                          ? (lang === 'uz'
+                              ? "⚡ Gemini 3.8 Live API WebSocket orqali ~0.3s tezkor suhbat. Gapni bo'lish va jonli dialog."
+                              : "⚡ Прямое двустороннее соединение через Gemini 3.8 Live API WebSocket (~0.3 сек задержка).")
+                          : (lang === 'uz'
+                              ? "⭐ Shaxsiy klonlangan ovozda (Gemini 3.8 Flash TTS) telefon muloqoti."
+                              : "⭐ Телефонный диалог вашим клонированным голосом через Gemini 3.8 Flash TTS.")}
+                      </p>
+                    </div>
 
-                  <div className="flex items-center justify-center gap-1.5 text-[11px] text-[#5D594E]">
-                    <ShieldCheck className="w-3.5 h-3.5 text-[#0E7C86]" />
-                    <span>
-                      {callEngine === 'shokhrukh_natural'
-                        ? (lang === 'uz' ? 'Shohrux haqiqiy ovozi • 0% aksent' : 'Настоящий голос Шохруха • 0% акцента')
-                        : 'OvozStudio Real-time API'}
-                    </span>
+                    <button
+                      type="button"
+                      onClick={handleStartCall}
+                      className="w-full sm:w-auto px-8 py-4 rounded-full bg-[#161511] hover:bg-[#0A5A62] text-[#F4F1EA] font-semibold text-sm sm:text-base flex items-center justify-center gap-3 transition-all cursor-pointer shadow-md active:scale-98 shrink-0"
+                    >
+                      <PhoneCall className="w-5 h-5 fill-current text-[#5CC8CF]" />
+                      <span>
+                        {callMode === 'live'
+                          ? (lang === 'uz' ? "📞 Realtime Qo'ng'iroqni Boshlash (0.3s)" : "📞 Начать Realtime Звонок (0.3с)")
+                          : (lang === 'uz' ? "📞 Klonlangan Ovozda Qo'ng'iroq" : "📞 Звонок Клонированным Голосом")}
+                      </span>
+                    </button>
                   </div>
                 </div>
               </div>
             </div>
-          </div>
-        )}
+          )}
         </>
       )}
     </div>

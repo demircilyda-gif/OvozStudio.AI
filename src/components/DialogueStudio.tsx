@@ -884,6 +884,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           let errMessage = lang === 'uz' ? 'Muloqot sintezida xatolik yuz berdi' : 'Ошибка при синтезе диалога';
           try {
             const err = await res.json();
+            if (err.code === 'API_KEY_EXPIRED' || err.isApiKeyExpired || (err.error && err.error.includes('API key expired'))) {
+              window.dispatchEvent(new CustomEvent('open-api-key-modal'));
+            }
             errMessage = (lang === 'ru' && err.message_ru) ? err.message_ru : (err.message || err.error || errMessage);
           } catch {
             const raw = await res.text().catch(() => '');

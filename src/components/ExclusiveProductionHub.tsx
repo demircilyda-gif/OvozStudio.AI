@@ -785,10 +785,13 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
 
               {generatedSvg ? (
                 <div className="space-y-3">
-                  <div
-                    className="w-full aspect-square max-w-[320px] mx-auto rounded-2xl overflow-hidden border border-[rgba(22,21,17,0.18)] shadow-md flex items-center justify-center bg-[#141414]"
-                    dangerouslySetInnerHTML={{ __html: generatedSvg }}
-                  />
+                  <div className="w-full aspect-square max-w-[320px] mx-auto rounded-2xl overflow-hidden border border-[rgba(22,21,17,0.18)] shadow-md flex items-center justify-center bg-[#141414]">
+                    <img
+                      src={`data:image/svg+xml;utf8,${encodeURIComponent(generatedSvg)}`}
+                      alt="Cover Art Preview"
+                      className="w-full h-full object-contain"
+                    />
+                  </div>
                   <button
                     type="button"
                     onClick={downloadSvg}
