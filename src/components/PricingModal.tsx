@@ -273,6 +273,37 @@ export const PricingModal: React.FC<PricingModalProps> = ({ lang }) => {
     }
   };
 
+  // Handle Direct Payme / Click Checkout (Uzbekistan Instant Payment Gateway)
+  const handleUzDirectCheckout = async (provider: 'payme' | 'click') => {
+    if (!user) {
+      closePricingModal();
+      openAuthModal(lang === 'uz' ? "To'lov uchun tizimga kiring" : 'Войдите в аккаунт для оплаты');
+      return;
+    }
+
+    setIsProcessing(true);
+    setErrorMessage(null);
+
+    try {
+      const res = await authFetch('/api/billing/create-uz-checkout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          planId: selectedPlan,
+          provider,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.checkoutUrl) {
+        throw new Error(data.error || "To'lov havolasini yaratib bo'lmadi");
+      }
+      window.location.href = data.checkoutUrl;
+    } catch (err: any) {
+      setErrorMessage(err.message || "To'lov tizimiga ulanishda xatolik");
+      setIsProcessing(false);
+    }
+  };
+
   // Submit Payment Request for Admin Verification via server endpoint
   const handleSubmitPaymentRequest = async () => {
     if (!user) {
@@ -637,6 +668,40 @@ export const PricingModal: React.FC<PricingModalProps> = ({ lang }) => {
                       <span className="text-sm font-mono font-bold text-[#0E7C86]">{currentPlan.priceUz}</span>
                     </div>
                   </div>
+
+                  {/* Direct 1-Click Payme / Click Merchant Checkout Banner */}
+                  {(selectedPayment === 'payme' || selectedPayment === 'click') && (
+                    <div className="p-3.5 rounded-2xl bg-[#0E7C86]/10 border border-[#0E7C86]/30 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                      <div>
+                        <div className="text-xs font-bold text-[#161511] flex items-center gap-1.5">
+                          <Zap className="w-3.5 h-3.5 text-[#0E7C86]" />
+                          <span>
+                            {selectedPayment === 'payme'
+                              ? (lang === 'uz' ? "Payme Avtomatik To'lov (24/7)" : 'Автоматическая оплата Payme (24/7)')
+                              : (lang === 'uz' ? "Click Up Avtomatik To'lov (24/7)" : 'Автоматическая оплата Click Up (24/7)')}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-[#5D594E] mt-0.5">
+                          {lang === 'uz'
+                            ? `To'g'ridan-to'g'ri ${selectedPayment === 'payme' ? 'Payme' : 'Click'} sahifasi orqali to'lang — +${currentPlan.credits} kredit avtomatik tushadi.`
+                            : `Оплатите напрямую через ${selectedPayment === 'payme' ? 'Payme' : 'Click'} — +${currentPlan.credits} кредитов зачислятся автоматически.`}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleUzDirectCheckout(selectedPayment)}
+                        disabled={isProcessing}
+                        className="btn-pill btn-teal text-xs py-2 px-4 font-bold shrink-0 flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <span>
+                          {selectedPayment === 'payme'
+                            ? (lang === 'uz' ? "Payme orqali to'lash" : 'Оплатить в Payme')
+                            : (lang === 'uz' ? "Click orqali to'lash" : 'Оплатить в Click')}
+                        </span>
+                        <ArrowRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
 
                   {/* Card Number & 1-Click Copy */}
                   <div className="flex items-center justify-between bg-[#ECE7DB] border border-[rgba(22,21,17,0.12)] px-4 py-3 rounded-2xl shadow-2xs">

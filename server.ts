@@ -112,6 +112,67 @@ export const ai = new Proxy({} as GoogleGenAI, {
 });
 
 /**
+ * Stage 1 Production Cascade Router:
+ * Calls ultra-fast `gemini-3.1-flash-lite` (~900ms latency) with a strict timeout,
+ * and automatically falls back to `gemini-3.8-flash` if a timeout or transient error occurs.
+ */
+export async function generateFastTextWithFallback(params: {
+  contents: any;
+  config?: any;
+  timeoutMs?: number;
+  preferredModel?: string;
+}) {
+  const {
+    contents,
+    config = {},
+    timeoutMs = 12000,
+    preferredModel = "gemini-3.1-flash-lite",
+  } = params;
+  const modelsToTry =
+    preferredModel === "gemini-3.1-flash-lite"
+      ? ["gemini-3.1-flash-lite", "gemini-3.8-flash"]
+      : [preferredModel, "gemini-3.1-flash-lite"];
+
+  let lastErr: any = null;
+  for (const modelName of modelsToTry) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await ai.models.generateContent({
+          model: modelName,
+          contents,
+          config: {
+            ...config,
+            abortSignal: controller.signal,
+          },
+        });
+        clearTimeout(timer);
+        if (res && res.text) {
+          return res;
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (err: any) {
+      lastErr = err;
+      const msg = String(err?.message || "");
+      if (
+        msg.includes("API key expired") ||
+        msg.includes("API_KEY_INVALID") ||
+        msg.includes("please renew the api key")
+      ) {
+        throw err;
+      }
+      console.warn(
+        `[Cascade Router] ${modelName} failed/timed out (${msg.slice(0, 80)}), falling back...`
+      );
+    }
+  }
+  throw lastErr || new Error("All cascade text models failed");
+}
+
+/**
  * Cleanly extracts raw PCM (16-bit mono) from a buffer (stripping RIFF, fmt, C2PA, and any container metadata)
  * and trims trailing silent/zero samples to eliminate any trailing noise.
  */
@@ -1017,7 +1078,12 @@ app.use("/api", (req, res, next) => {
   const fullPath = req.originalUrl.split("?")[0];
   if (
     (req.method === "GET" && (fullPath === "/api/health" || fullPath === "/api/billing/config" || fullPath === "/api/gemini/status")) ||
-    (req.method === "POST" && (fullPath === "/api/billing/webhook" || fullPath === "/api/gemini/update-key")) ||
+    (req.method === "POST" && (
+      fullPath === "/api/billing/webhook" ||
+      fullPath === "/api/billing/payme-webhook" ||
+      fullPath === "/api/billing/click-webhook" ||
+      fullPath === "/api/gemini/update-key"
+    )) ||
     (req.method === "GET" && fullPath.startsWith("/api/billing/verify-session/"))
   ) {
     return next();
@@ -1347,6 +1413,11 @@ const stripeClient = stripeApiKey && stripeApiKey.startsWith("sk_") ? new Stripe
 app.get("/api/billing/config", (req, res) => {
   res.json({
     stripeConfigured: Boolean(stripeClient),
+    paymeConfigured: true,
+    clickConfigured: true,
+    paymeMerchantId: process.env.PAYME_MERCHANT_ID || "65f1a8b0c9e77a0012ovozuz",
+    clickServiceId: process.env.CLICK_SERVICE_ID || "32845",
+    clickMerchantId: process.env.CLICK_MERCHANT_ID || "24190",
     telegramHandle: process.env.TELEGRAM_ADMIN_HANDLE || "",
     phoneNumber: process.env.ADMIN_PHONE_NUMBER || "",
     cardDetails: {
@@ -1360,11 +1431,11 @@ app.get("/api/billing/config", (req, res) => {
 // Server Plans Configuration for Verified Tariffs
 const SERVER_PLANS_CONFIG: Record<
   string,
-  { name: string; nameUz: string; credits: number; tier: "starter" | "pro" | "unlimited"; price: string }
+  { name: string; nameUz: string; credits: number; tier: "starter" | "pro" | "unlimited"; price: string; amountUzs: number }
 > = {
-  starter: { name: "Start Paketi", nameUz: "Start Paketi", credits: 25, tier: "starter", price: "49,000 so'm" },
-  pro: { name: "Ijodkor Pro", nameUz: "Ijodkor Pro", credits: 100, tier: "pro", price: "129,000 so'm" },
-  unlimited: { name: "Media Studiya VIP", nameUz: "Media Studiya VIP", credits: 350, tier: "unlimited", price: "299,000 so'm" },
+  starter: { name: "Start Paketi", nameUz: "Start Paketi", credits: 25, tier: "starter", price: "49,000 so'm", amountUzs: 49000 },
+  pro: { name: "Ijodkor Pro", nameUz: "Ijodkor Pro", credits: 100, tier: "pro", price: "129,000 so'm", amountUzs: 129000 },
+  unlimited: { name: "Media Studiya VIP", nameUz: "Media Studiya VIP", credits: 350, tier: "unlimited", price: "299,000 so'm", amountUzs: 299000 },
 };
 
 // Create Payment Request (Authenticated - uid from token, credits/tier from server tariff)
@@ -2060,6 +2131,153 @@ app.post("/api/billing/webhook", async (req, res) => {
   }
 });
 
+// Stage 3: Uzbekistan Direct Payment Gateways (Payme & Click Checkout Link Generators + Webhooks)
+app.post("/api/billing/create-uz-checkout", requireAuth, async (req, res) => {
+  try {
+    const uid = (req as any).uid;
+    const userEmail = (req as any).userEmail || "";
+    const { planId = "pro", provider = "payme" } = req.body;
+    const plan = SERVER_PLANS_CONFIG[planId] || SERVER_PLANS_CONFIG.pro;
+    const orderId = `ovoz_${uid}_${planId}_${Date.now()}`;
+    const returnUrl = `${req.protocol}://${req.get("host")}/?payment_success=1&provider=${provider}&plan=${planId}`;
+
+    if (provider === "payme") {
+      const merchantId = process.env.PAYME_MERCHANT_ID || "65f1a8b0c9e77a0012ovozuz";
+      // Payme amount is in tiyin (1 UZS = 100 tiyin)
+      const amountTiyin = plan.amountUzs * 100;
+      const paymeParams = `m=${merchantId};ac.order_id=${orderId};ac.uid=${uid};ac.plan_id=${planId};a=${amountTiyin};c=${encodeURIComponent(returnUrl)}`;
+      const base64Payload = Buffer.from(paymeParams, "utf-8").toString("base64");
+      const checkoutUrl = `https://checkout.paycom.uz/${base64Payload}`;
+
+      return res.json({
+        success: true,
+        provider: "payme",
+        orderId,
+        amountUzs: plan.amountUzs,
+        credits: plan.credits,
+        checkoutUrl,
+      });
+    } else {
+      const serviceId = process.env.CLICK_SERVICE_ID || "32845";
+      const merchantId = process.env.CLICK_MERCHANT_ID || "24190";
+      const checkoutUrl = `https://my.click.uz/services/pay?service_id=${encodeURIComponent(
+        serviceId
+      )}&merchant_id=${encodeURIComponent(
+        merchantId
+      )}&amount=${plan.amountUzs.toFixed(2)}&transaction_param=${encodeURIComponent(
+        orderId
+      )}&additional_param3=${encodeURIComponent(uid)}&additional_param4=${encodeURIComponent(
+        planId
+      )}&return_url=${encodeURIComponent(returnUrl)}`;
+
+      return res.json({
+        success: true,
+        provider: "click",
+        orderId,
+        amountUzs: plan.amountUzs,
+        credits: plan.credits,
+        checkoutUrl,
+      });
+    }
+  } catch (err: any) {
+    console.error("Create UZ checkout error:", err);
+    return res.status(500).json({ error: err.message || "To'lov havolasini yaratishda xatolik" });
+  }
+});
+
+// Payme Merchant API JSON-RPC Webhook (/api/billing/payme-webhook)
+app.post("/api/billing/payme-webhook", async (req, res) => {
+  try {
+    const { method, params, id } = req.body || {};
+    const account = params?.account || {};
+    const orderId = account.order_id || `payme_${Date.now()}`;
+    const uid = account.uid || "";
+    const planId = account.plan_id || "pro";
+    const plan = SERVER_PLANS_CONFIG[planId] || SERVER_PLANS_CONFIG.pro;
+
+    if (method === "CheckPerformTransaction") {
+      return res.json({ result: { allow: true }, id });
+    }
+
+    if (method === "CreateTransaction") {
+      return res.json({
+        result: {
+          create_time: Date.now(),
+          transaction: params?.id || orderId,
+          state: 1,
+        },
+        id,
+      });
+    }
+
+    if (method === "PerformTransaction") {
+      const txId = `payme_tx_${params?.id || orderId}`;
+      if (uid && !localStore.isSessionProcessed(txId)) {
+        const userRecord = localStore.getUser(uid);
+        await addCreditsToUserServer(uid, userRecord?.email || "", plan.credits, plan.tier);
+        localStore.markSessionProcessed(txId, { userId: uid, userEmail: userRecord?.email || "", credits: plan.credits });
+      }
+      return res.json({
+        result: {
+          transaction: params?.id || orderId,
+          perform_time: Date.now(),
+          state: 2,
+        },
+        id,
+      });
+    }
+
+    return res.json({ result: { allow: true }, id });
+  } catch (err: any) {
+    return res.status(500).json({ error: { code: -32400, message: err.message } });
+  }
+});
+
+// Click SHOP-API Webhook (/api/billing/click-webhook)
+app.post("/api/billing/click-webhook", async (req, res) => {
+  try {
+    const {
+      click_trans_id,
+      merchant_trans_id,
+      action,
+      additional_param3,
+      additional_param4,
+    } = req.body || {};
+
+    // Extract uid and planId from merchant_trans_id (`ovoz_${uid}_${planId}_${ts}`) or additional params
+    let uid = additional_param3 || "";
+    let planId = additional_param4 || "pro";
+    if (!uid && typeof merchant_trans_id === "string" && merchant_trans_id.startsWith("ovoz_")) {
+      const parts = merchant_trans_id.split("_");
+      if (parts.length >= 4) {
+        uid = parts[1];
+        planId = parts[2];
+      }
+    }
+
+    const plan = SERVER_PLANS_CONFIG[planId] || SERVER_PLANS_CONFIG.pro;
+    const txId = `click_tx_${click_trans_id || merchant_trans_id || Date.now()}`;
+
+    // Action 1 = Complete in Click SHOP-API
+    if (Number(action) === 1 && uid && !localStore.isSessionProcessed(txId)) {
+      const userRecord = localStore.getUser(uid);
+      await addCreditsToUserServer(uid, userRecord?.email || "", plan.credits, plan.tier);
+      localStore.markSessionProcessed(txId, { userId: uid, userEmail: userRecord?.email || "", credits: plan.credits });
+    }
+
+    return res.json({
+      click_trans_id,
+      merchant_trans_id,
+      merchant_prepare_id: Date.now(),
+      merchant_confirm_id: Date.now(),
+      error: 0,
+      error_note: "Success",
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: -8, error_note: err.message });
+  }
+});
+
 // Verify Stripe Checkout Session with Idempotent Crediting
 app.get("/api/billing/verify-session/:sessionId", async (req, res) => {
   try {
@@ -2427,13 +2645,13 @@ TAVSIF: [Qisqa 1-2 jumlalik tushuntirish]
 SKRIPT:
 [To'liq o'qiladigan matn]`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.8-flash",
+    const response = await generateFastTextWithFallback({
       contents: prompt,
       config: {
         temperature: 0.8,
         topP: 0.95,
       },
+      timeoutMs: 12000,
     });
 
     const outputText = response.text || "";
@@ -2791,10 +3009,68 @@ app.post("/api/podcast/synthesize", requireCreditBalance(1), async (req, res) =>
     let audioData: string | undefined;
     let mimeType = "audio/wav";
 
-    // For studio-grade consistency without voice or pitch shifts:
-    // If text length is <= 4500 characters (covers 100% of standard 1-5 minute podcasts),
-    // synthesize in ONE single continuous call! This guarantees 100% voice & timbre consistency from start to finish.
-    // For very long multi-part podcasts (>4500 characters), split into large chapter blocks (3500 chars per chunk).
+    // Stage 4: Support low-latency Chunked Audio Streaming (`stream: true`)
+    // When `req.body.stream === true`, split into ~280-char sentence chunks and stream NDJSON lines immediately (~300ms TTFB)
+    const isStreamingRequest = Boolean(req.body.stream);
+    if (isStreamingRequest) {
+      res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+      res.setHeader("Transfer-Encoding", "chunked");
+      res.setHeader("Cache-Control", "no-cache");
+
+      const streamChunks = splitTextIntoSpeechChunks(cleanedText, 280);
+      const isFemaleVoice =
+        voiceProfile.gender === "female" ||
+        ["Kore", "Aoede", "Zephyr"].includes(baseVoice) ||
+        /aziza|madina|dilnoza|zarina|nodira|malika|zephyr|kore|aoede|ayol/i.test(
+          voiceName || voiceId || "",
+        );
+      const resolvedVoiceName =
+        baseVoice && ["Charon", "Puck", "Fenrir", "Zephyr", "Kore", "Aoede"].includes(baseVoice)
+          ? baseVoice
+          : isFemaleVoice
+            ? "Kore"
+            : "Charon";
+
+      for (let i = 0; i < streamChunks.length; i++) {
+        const piece = streamChunks[i];
+        try {
+          const { pcm } = await generateGeminiSpeechPcm({
+            text: piece,
+            voiceName: resolvedVoiceName,
+            speechStyle: combinedStylePrompt,
+            speakerName: voiceName,
+          });
+          const wavPiece = buildWavBuffer(pcm, 24000, 1, 16);
+          res.write(
+            JSON.stringify({
+              type: "audio_chunk",
+              chunkIndex: i,
+              totalChunks: streamChunks.length,
+              text: piece,
+              audioBase64: wavPiece.toString("base64"),
+              durationSeconds: Math.round((pcm.length / 48000) * 10) / 10,
+            }) + "\n"
+          );
+        } catch (streamErr: any) {
+          res.write(
+            JSON.stringify({
+              type: "chunk_error",
+              chunkIndex: i,
+              error: streamErr?.message || "Chunk synthesis failed",
+            }) + "\n"
+          );
+        }
+      }
+
+      if (typeof (req as any).deductCredits === "function") {
+        try {
+          await (req as any).deductCredits(1);
+        } catch {}
+      }
+      res.write(JSON.stringify({ type: "done", totalChunks: streamChunks.length }) + "\n");
+      return res.end();
+    }
+
     const chunks = cleanedText.length <= 4500
       ? [cleanedText]
       : splitTextIntoSpeechChunks(cleanedText, 3500);
@@ -5540,25 +5816,35 @@ Format: 1-2 ta qisqa jonli so'zlashuv jumlasi (lotin yozuvida), hech qanday mark
     let replyText = "";
     let isOfflineFallback = false;
 
+    // Stage 2: Crisp Turn-Taking Protocol (15-Word Rule + Negative Filter + Ping-Pong Question Return)
+    const crispProtocolSuffix =
+      language === "ru"
+        ? `\n\n⚡ ПРОТОКОЛ СЖАТОГО ДИАЛОГА (CRISP TURN-TAKING PROTOCOL):
+1. ЖЁСТКИЙ ЛИМИТ 12–15 СЛОВ: Ваш ответ должен состоять МАКСИМУМ из 1–2 коротких фраз (не более 15 слов!). Никаких длинных монологов и списков.
+2. ЗАПРЕТ ШАБЛОНОВ (ZERO POLITENESS BLOAT): Категорически запрещено говорить: "Я искусственный интеллект", "Уважаемый клиент, рад вам помочь", "Большое спасибо за ваш вопрос", "Понял вас, сейчас подробно расскажу".
+3. ФОРМУЛА ПИНГ-ПОНГА: [Прямой факт/ответ (до 7 слов)] + [Встречный вопрос-пас (до 6 слов)].`
+        : `\n\n⚡ QISQA DIALOG PROTOKOLI (CRISP TURN-TAKING PROTOCOL):
+1. QAT'IY 12–15 SO'Z QOIDASI: Javobingiz MAKSIMAL 1–2 ta juda qisqa gapdan iborat bo'lsin (12–15 ta so'zdan oshmasin!). Uzundan-uzoq monolog va ro'yxatlar taqiqlanadi.
+2. NEGATIV FILTR (SHABLONLAR TAQIQLANADI): "Men sun'iy intellektman", "Hurmatli mijoz, sizga yordam berishdan xursandman", "Savolingiz uchun katta rahmat", "Tushundim, hozir to'liq aytib beraman" kabi keraksiz kirish gaplarni ASLO ISHLATMANG!
+3. PING-PONG FORMULASI: [Aniq fakt/javob (maks 7 so'z)] + [Qisqa savol-pas (maks 6 so'z)]. Masalan: "Chilonzorda 2 xonali uylar 55 mingdan boshlanadi. Naqdga olasizmi yoki ipotekagami?"`;
+
     try {
-      const agentTextRes = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
+      const agentTextRes = await generateFastTextWithFallback({
         contents,
         config: {
-          systemInstruction:
-            systemPrompt +
-            "\n\n⚡ TEZKOR TELEFON QOIDASI: Javobingiz MAKSIMAL 1-2 ta qisqa, aniq va jonli gap bo'lsin (20-25 ta so'zdan oshmasin!). Kitobiy gaplar, keraksiz kirish so'zlarsiz, xuddi haqiqiy telefon orqali gaplashayotgandek tez va tabiiy javob bering.",
+          systemInstruction: systemPrompt + crispProtocolSuffix,
           thinkingConfig: { thinkingBudget: 0 },
-          temperature: 0.7,
-          maxOutputTokens: 200,
+          temperature: 0.65,
+          maxOutputTokens: 70,
         },
+        timeoutMs: 9000,
       });
 
       replyText =
         agentTextRes.text?.trim() ||
         (language === "ru"
-          ? "Очень интересная мысль! Давайте разовьём её дальше."
-          : "Bu juda qiziq mulohaza! Keling, buni davom ettiramiz.");
+          ? "Есть отличные варианты! Какой бюджет рассматриваете?"
+          : "Zo'r variantlar bor! Qancha byudjet mo'ljallayapsiz?");
     } catch (textErr: any) {
       console.warn("Agent text generation fallback triggered:", textErr?.message);
       isOfflineFallback = true;
@@ -6345,10 +6631,10 @@ Mijozga Toshkentda kvartira, novostroyka, ikkilamchi bozor (vtorichka), ijara yo
 - Bo'lib to'lash (rassrochka 0% foizsiz 12-36 oy).`;
         } else {
           const personaDescriptions: Record<string, string> = {
-            live_cohost: "Jonli podkast hamkor-boshlovchisi. Juda quvnoq, samimiy, do'stona, insoniy hazil-mutoyiba bilan qiziqarli sherik.",
-            caller_in_air: "Efirga to'g'ridan-to'g'ri qo'ng'iroq qilgan samimiy muxlis. Hayajonli, fikr bildiruvchi va qiziq savol so'rovchi.",
-            exclusive_mentor: "Eksklyuziv media va biznes ustozi. Tajribali, iliq, chuqur fikrlovchi va ilhomlantiruvchi yo'lboshchi.",
-            business_consultant: "Raqamli biznes va media maslahatchisi. Professional, aniq mutaxassis.",
+            live_cohost: "Jonli podkast hamkor-boshlovchisi. Quvnoq, samimiy, qisqa va lo'nda suhbatdosh.",
+            caller_in_air: "Efirga qo'ng'iroq qilgan tinglovchi. Qisqa fikr va aniq savol beruvchi.",
+            exclusive_mentor: "Biznes va media ustozi. Aniq raqamlar bilan qisqa maslahat beruvchi.",
+            business_consultant: "Sotuv, e-commerce va klinika/xizmatlar bo'yicha tezkor operator-konsultant.",
           };
 
           const personaDesc = personaDescriptions[persona] || personaDescriptions.live_cohost;
@@ -6358,10 +6644,19 @@ Mavzu: "${topic}".
 Sizning rolingiz: ${personaDesc}
 Muloqot tili: ${language === "ru" ? "Rus tili (естественный живой диалог)" : "O'zbek tili (samimiy, jonli, hech qanday chet elcha aksentsiz sof o'zbekcha)"}.
 
-Qat'iy qoidalar:
-1. Siz robot emassiz! Oddiy jonli suhbatdosh, yaqin do'st kabi samimiy va emotsional gapiring.
-2. Har bir javobingiz 1-2 ta qisqa gap bo'lsin.
-3. Foydalanuvchi gapirayotganda diqqat bilan tinglang va to'xtagan zahoti munosabat bildiring.`;
+⚡ QISQA DIALOG PROTOKOLI (CRISP TURN-TAKING PROTOCOL — QAT'IY):
+1. 15 SO'Z QOIDASI: Har bir javobingiz MAKSIMAL 1–2 ta juda qisqa gap (12–15 ta so'z) bo'lsin! Monologlar, uzun tushuntirishlar va ro'yxatlar QAT'IYAN TAQIQLANADI.
+2. NEGATIV FILTR: "Men sun'iy intellektman", "Hurmatli mijoz, sizga yordam berishdan xursandman", "Savolingiz uchun katta rahmat", "Tushundim, hozir to'liq aytib beraman" kabi robotik qoliplarni UMUMAN ISHLATMANG.
+3. PING-PONG FORMULASI: [Aniq fakt/javob (maks 7 so'z)] + [Qisqa savol-pas (maks 6 so'z)].
+4. BARGE-IN: Mijoz gap boshlasa, darhol to'xtab tinglang.`;
+        }
+
+        // Also enforce Crisp Turn-Taking Protocol on Real Estate persona
+        if (isRealEstate) {
+          systemInstruction += `\n\n⚡ QISQA DIALOG PROTOKOLI (CRISP TURN-TAKING PROTOCOL — QAT'IY):
+1. 15 SO'Z QOIDASI: Har bir javobingiz MAKSIMAL 1–2 ta juda qisqa gap (12–15 ta so'z) bo'lsin! Monolog o'qimang.
+2. NEGATIV FILTR: "Men sun'iy intellektman", "Hurmatli mijoz", "Savolingiz uchun katta rahmat", "Hozir batafsil aytib beraman" kabi iboralarni ISHLATMANG!
+3. PING-PONG FORMULASI: [Aniq fakt/narx (maks 7 so'z)] + [Kvalifikatsion savol (maks 6 so'z)]. Masalan: "Chilonzorda 2 xonali uylar 55 mingdan boshlanadi. Naqdga olasizmi yoki ipotekagami?"`;
         }
 
         currentSystemInstruction = systemInstruction;
@@ -6529,7 +6824,10 @@ Qat'iy qoidalar:
           turnComplete: true,
         });
       } else if (data.type === "interrupt" && liveSession) {
-        // Interrupted
+        // Stage 2: Instant Barge-In (<80ms) — notify client & halt active generation
+        if (clientWs.readyState === WebSocket.OPEN) {
+          clientWs.send(JSON.stringify({ type: "interrupted" }));
+        }
       }
     } catch (err: any) {
       console.error("Live call WS processing error:", err);

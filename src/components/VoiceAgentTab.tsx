@@ -277,6 +277,10 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
   const [callDuration, setCallDuration] = useState<number>(0);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [agentSpeaking, setAgentSpeaking] = useState<boolean>(false);
+  const agentSpeakingRef = useRef<boolean>(false);
+  useEffect(() => {
+    agentSpeakingRef.current = agentSpeaking;
+  }, [agentSpeaking]);
   const [userSpeaking, setUserSpeaking] = useState<boolean>(false);
   const [currentSubtitle, setCurrentSubtitle] = useState<string>('');
   const [transcriptLines, setTranscriptLines] = useState<TranscriptLine[]>([]);
@@ -963,6 +967,11 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                     if (rms > 0.018) {
                       setUserSpeaking(true);
                       setAudioLevel(Math.min(1, rms * 8));
+                      // Stage 2: <80ms Client-Side Barge-In when user interrupts agent mid-sentence
+                      if (rms > 0.028 && agentSpeakingRef.current) {
+                        stopAllAudio();
+                        ws.send(JSON.stringify({ type: 'interrupt' }));
+                      }
                     } else {
                       setUserSpeaking(false);
                     }
