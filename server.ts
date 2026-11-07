@@ -17,6 +17,12 @@ import { getFirestore } from "firebase-admin/firestore";
 import rateLimit from "express-rate-limit";
 import { localStore } from "./server/localStore.js";
 import { isEmailAdmin, getAdminEmails } from "./server/authUtils.js";
+import {
+  getSuperTaxiGreetingWav,
+  handleSuperTaxiConnection,
+  SUPER_TAXI_VOICES,
+  SUPER_TAXI_GREETING,
+} from "./server/agents/superTaxi.js";
 
 dotenv.config();
 
@@ -1078,6 +1084,8 @@ app.use("/api", (req, res, next) => {
   const fullPath = req.originalUrl.split("?")[0];
   if (
     (req.method === "GET" && (fullPath === "/api/health" || fullPath === "/api/billing/config" || fullPath === "/api/gemini/status")) ||
+    // Super Taksi public demo: greeting WAV is cached per voice (one Live call per voice, then 0 tokens)
+    (req.method === "GET" && (fullPath === "/api/super-taxi/greeting" || fullPath === "/api/super-taxi/config")) ||
     (req.method === "POST" && (
       fullPath === "/api/billing/webhook" ||
       fullPath === "/api/billing/payme-webhook" ||
@@ -1130,6 +1138,25 @@ app.use([
   "/api/podcast/expand-interview",
   "/api/podcast/enrich-emotions",
 ], geminiConcurrencyLimitMiddleware);
+
+// -------------------------------------------------------------
+// Super Taksi demo operator (Gemini Live only)
+// -------------------------------------------------------------
+app.get("/api/super-taxi/config", (_req, res) => {
+  res.json({ voices: SUPER_TAXI_VOICES, greeting: SUPER_TAXI_GREETING });
+});
+
+app.get("/api/super-taxi/greeting", async (req, res) => {
+  try {
+    const wav = await getSuperTaxiGreetingWav(getGeminiClient(), req.query.voice);
+    res.setHeader("Content-Type", "audio/wav");
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.send(wav);
+  } catch (err: any) {
+    console.warn("[Super Taksi] greeting unavailable:", err?.message || err);
+    res.status(503).json({ error: "greeting_unavailable", message: err?.message || "Greeting unavailable" });
+  }
+});
 
 // Health check
 app.get("/api/health", (_req, res) => {
@@ -6537,10 +6564,19 @@ if (process.env.NODE_ENV !== "production") {
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
+const superTaxiWss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 
 server.on("upgrade", async (req, socket, head) => {
   try {
     const url = new URL(req.url || "", `http://${req.headers.host || "localhost"}`);
+    if (url.pathname === "/api/super-taxi-call") {
+      const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+      const ip = forwarded || req.socket.remoteAddress || "unknown";
+      superTaxiWss.handleUpgrade(req, socket, head, (ws) => {
+        handleSuperTaxiConnection(ws, getGeminiClient(), ip);
+      });
+      return;
+    }
     if (url.pathname === "/api/live-call") {
       const token = url.searchParams.get("token");
       let verified: { uid: string; email?: string } | null = null;

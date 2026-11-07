@@ -6,6 +6,7 @@ import {
   Users2,
   Film,
   PhoneCall,
+  Car,
   Sliders,
   Crown,
   FolderKanban,
@@ -21,7 +22,7 @@ import {
   Key,
 } from 'lucide-react';
 
-export type AppTab = 'landing' | 'studio' | 'dialogue' | 'voiceover' | 'agent' | 'exclusive' | 'cms' | 'voices' | 'guide' | 'docs';
+export type AppTab = 'landing' | 'studio' | 'dialogue' | 'voiceover' | 'agent' | 'taxi' | 'exclusive' | 'cms' | 'voices' | 'guide' | 'docs';
 
 interface SidebarProps {
   activeTab: AppTab;
@@ -99,6 +100,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
       sublabelRu: 'Звонки и CRM лиды',
       icon: PhoneCall,
       active: activeTab === 'agent',
+    },
+    {
+      id: 'taxi',
+      tab: 'taxi' as AppTab,
+      labelUz: 'Super Taksi operatori',
+      labelRu: 'Оператор Super Taksi',
+      sublabelUz: 'Demo · Gemini Live',
+      sublabelRu: 'Демо · Gemini Live',
+      icon: Car,
+      active: activeTab === 'taxi',
     },
   ];
 
