@@ -92,6 +92,23 @@ export const SlimIconRail: React.FC<SlimIconRailProps> = ({
       },
     },
     {
+      id: 'taxi',
+      labelUz: 'Super Taksi',
+      labelRu: 'Super Taksi',
+      icon: (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M2.5 10V8l1.4-3.3c.2-.4.6-.7 1-.7h6.2c.4 0 .8.3 1 .7L13.5 8v2" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+          <rect x="1.5" y="8" width="13" height="3.5" rx="1" stroke="currentColor" strokeWidth="1.4" />
+          <path d="M4 11.5V13M12 11.5V13M6.5 2.5h3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+        </svg>
+      ),
+      active: activeTab === 'taxi',
+      onClick: () => {
+        setActiveTab('taxi');
+        setIsMobileDrawerOpen(false);
+      },
+    },
+    {
       id: 'studio-voiceover',
       labelUz: 'Video Dublyaj',
       labelRu: 'Видео Дубляж',

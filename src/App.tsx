@@ -14,6 +14,7 @@ import { PodcastGuideModal } from './components/PodcastGuideModal';
 import { VoiceoverStudio } from './components/VoiceoverStudio';
 import { DialogueStudio } from './components/DialogueStudio';
 import { VoiceAgentTab } from './components/VoiceAgentTab';
+import { SuperTaxiDemo } from './components/SuperTaxiDemo';
 import { ExclusiveProductionHub } from './components/ExclusiveProductionHub';
 import { DocumentSourceModal } from './components/DocumentSourceModal';
 import { NotebookLMIntegrationModal } from './components/NotebookLMIntegrationModal';
@@ -59,6 +60,7 @@ export default function App() {
       const h = window.location.hash;
       if (h === '#studio' || h === '#dialogue' || h === '#voiceover') return 'studio';
       if (h === '#agent') return 'agent';
+      if (h === '#taxi') return 'taxi';
       if (h === '#exclusive') return 'exclusive';
       if (h === '#cms') return 'cms';
       if (h === '#voices') return 'voices';
@@ -91,6 +93,8 @@ export default function App() {
         setStudioMode('voiceover');
       } else if (h === '#agent') {
         setActiveTab('agent');
+      } else if (h === '#taxi') {
+        setActiveTab('taxi');
       } else if (h === '#exclusive') {
         setActiveTab('exclusive');
       } else if (h === '#cms') {
@@ -114,6 +118,7 @@ export default function App() {
       if (activeTab === 'studio') {
         targetHash = studioMode === 'solo' ? '#studio' : studioMode === 'interview' ? '#dialogue' : '#voiceover';
       } else if (activeTab === 'agent') targetHash = '#agent';
+      else if (activeTab === 'taxi') targetHash = '#taxi';
       else if (activeTab === 'exclusive') targetHash = '#exclusive';
       else if (activeTab === 'cms') targetHash = '#cms';
       else if (activeTab === 'voices') targetHash = '#voices';
@@ -331,6 +336,7 @@ export default function App() {
     if (activeTab === 'dialogue') return lang === 'uz' ? '2 OVOZLI INTERVYU' : 'ДИАЛОГ';
     if (activeTab === 'voiceover') return lang === 'uz' ? 'VIDEO DUBLYAJ' : 'ДУБЛЯЖ';
     if (activeTab === 'agent') return lang === 'uz' ? 'AI QOʻNGʻIROQ AGENTI' : 'ГОЛОСОВОЙ АГЕНТ';
+    if (activeTab === 'taxi') return lang === 'uz' ? 'SUPER TAKSI OPERATORI' : 'ОПЕРАТОР SUPER TAKSI';
     if (activeTab === 'exclusive') return lang === 'uz' ? 'EKSKLYUZIV VIP HUB' : 'ЭКСКЛЮЗИВ VIP';
     if (activeTab === 'cms') return lang === 'uz' ? 'MENING KUTUBXONAM' : 'МЕДИАТЕКА';
     if (activeTab === 'voices') return lang === 'uz' ? 'OVOZLAR LABORATORIYASI' : 'ЛАБОРАТОРИЯ ГОЛОСОВ';
@@ -778,6 +784,9 @@ export default function App() {
                       lang={lang}
                     />
                   )}
+
+                  {/* TAB: SUPER TAKSI DEMO OPERATOR */}
+                  {activeTab === 'taxi' && <SuperTaxiDemo lang={lang} />}
 
                   {/* TAB: EXCLUSIVE VIP */}
                   {activeTab === 'exclusive' && (
