@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { VoiceProfile, AgentPersonaType, RealEstateLeadCard } from '../types/podcast';
+import { VoiceProfile, AgentPersonaType, RealEstateLeadCard, TaxiOrderCard } from '../types/podcast';
 import { LiveCallCard } from './LiveCallCard';
 import { VoiceGallery3D } from './VoiceGallery3D';
 import {
@@ -39,6 +39,7 @@ import {
   Users,
   Headphones,
   Briefcase,
+  Navigation,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { getVoicePreviewUrl } from '../data/voicePreviews';
@@ -145,6 +146,17 @@ export const REALTIME_VOICES: RealtimeVoiceOption[] = [
 ];
 
 const PERSONA_TOPICS: Record<AgentPersonaType, { defaultTopicUz: string; defaultTopicRu: string; quickChips: { uz: string; ru: string }[] }> = {
+  supertaxi_ivr: {
+    defaultTopicUz: "Assalomu alaykum, Skverga mashina yuboring (Amir Temur xiyoboni)",
+    defaultTopicRu: "Assalomu alaykum, Skverga mashina yuboring (Amir Temur xiyoboni)",
+    quickChips: [
+      { uz: "Assalomu alaykum, Skverga mashina yuboring", ru: "Assalomu alaykum, Skverga mashina yuboring" },
+      { uz: "Chilonzor 9-kvartal, Parus oldiga bitta taksi", ru: "Chilonzor 9-kvartal, Parus oldiga bitta taksi" },
+      { uz: "Yunusobod Mega Planet oldiga mashina kerak", ru: "Yunusobod Mega Planet oldiga mashina kerak" },
+      { uz: "Xalqaro Aeroportga taksi yuboring", ru: "Xalqaro Aeroportga taksi yuboring" },
+      { uz: "Chorsu bozori bosh bekatiga mashina kerak", ru: "Chorsu bozori bosh bekatiga mashina kerak" },
+    ],
+  },
   tashkent_real_estate: {
     defaultTopicUz: "Toshkentda novostroyka, ikkilamchi bozor, ijara va narxlar",
     defaultTopicRu: "Новостройки Ташкента, вторичный рынок, аренда и цены",
@@ -203,13 +215,11 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
   const { isAuthenticated, requireAuth, useCredit, syncCredits, logGeneration } = useAuth();
   const shokhrukhVoiceId = userClonedVoiceId || 'voice_17raj9ewke3g';
 
-
-
   // Call Engine Mode: 'live' = Gemini 3.8 Live API WebSocket (~0.3s, 5 official voices), 'cloned' = Custom Cloned Voice via Gemini 3.8 Flash TTS
   const [callMode, setCallMode] = useState<'live' | 'cloned'>('live');
-  const [selectedPersona, setSelectedPersona] = useState<AgentPersonaType>('tashkent_real_estate');
-  const [callTopic, setCallTopic] = useState<string>('Toshkentda novostroyka, ikkilamchi bozor, ijara va narxlar');
-  const [agentVoiceId, setAgentVoiceId] = useState<string>('Puck');
+  const [selectedPersona, setSelectedPersona] = useState<AgentPersonaType>('supertaxi_ivr');
+  const [callTopic, setCallTopic] = useState<string>("Assalomu alaykum, Skverga mashina yuboring (Amir Temur xiyoboni)");
+  const [agentVoiceId, setAgentVoiceId] = useState<string>('Aoede');
 
   // Replicated / Custom voices from user's library (plus default Shohrux cloned voice)
   const clonedVoiceOptions = React.useMemo<VoiceProfile[]>(() => {
@@ -315,6 +325,12 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
   const [crmSummaryData, setCrmSummaryData] = useState<any>(null);
   const [isGeneratingSummary, setIsGeneratingSummary] = useState<boolean>(false);
 
+  // SuperTaxi IVR Order Dispatch Card & Auto-Disconnect State
+  const [taxiOrderCard, setTaxiOrderCard] = useState<TaxiOrderCard | null>(null);
+  const taxiOrderConfirmedRef = useRef<boolean>(false);
+  const isGreetingPlayingRef = useRef<boolean>(false);
+  const autoDisconnectTimerRef = useRef<any>(null);
+
   // Audio & WebSocket References
   const wsRef = useRef<WebSocket | null>(null);
   const isMutedRef = useRef<boolean>(false);
@@ -340,6 +356,14 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
   useEffect(() => {
     conversationHistoryRef.current = transcriptLines;
   }, [transcriptLines]);
+
+  // SuperTaxi IVR 30-second Hard Cap SLA Enforcement
+  useEffect(() => {
+    if (selectedPersona === 'supertaxi_ivr' && callStatus === 'connected' && callDuration >= 30) {
+      cleanupCall();
+      setCallStatus('ended');
+    }
+  }, [selectedPersona, callStatus, callDuration]);
 
   // Clean up live audio contexts on unmount
   useEffect(() => {
@@ -744,6 +768,10 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
       clearInterval(callTimerRef.current);
       callTimerRef.current = null;
     }
+    if (autoDisconnectTimerRef.current) {
+      clearTimeout(autoDisconnectTimerRef.current);
+      autoDisconnectTimerRef.current = null;
+    }
     if (speechSilenceTimerRef.current) {
       clearTimeout(speechSilenceTimerRef.current);
       speechSilenceTimerRef.current = null;
@@ -907,6 +935,27 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
     // Mode 1: Realtime API (Gemini 3.8 Live over WebSocket /api/live-call)
     const startLiveWebSocketCall = async () => {
       try {
+        const isSuperTaxiCall = selectedPersona === 'supertaxi_ivr';
+        taxiOrderConfirmedRef.current = false;
+
+        if (isSuperTaxiCall) {
+          setTaxiOrderCard({
+            orderId: `ST-${Math.floor(10000 + Math.random() * 90000)}`,
+            pickupLocation: '',
+            callDurationSec: 0,
+            estimatedCostUsd: '$0.0015',
+            estimatedCostUzs: "20 so'm",
+            status: 'listening',
+            timestamp: new Date().toLocaleTimeString('uz-UZ', {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            }),
+          });
+        } else {
+          setTaxiOrderCard(null);
+        }
+
         const token = await getCurrentIdToken().catch(() => null);
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${wsProtocol}//${window.location.host}/api/live-call${
@@ -922,8 +971,9 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
               type: 'start',
               persona: selectedPersona,
               topic: callTopic,
-              voiceName: agentVoiceId,
-              language: lang,
+              voiceName: isSuperTaxiCall && agentVoiceId.startsWith('voice_') ? 'Aoede' : agentVoiceId,
+              language: isSuperTaxiCall ? 'uz' : lang,
+              skipInitialGreeting: isSuperTaxiCall,
             })
           );
         };
@@ -941,7 +991,64 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
               }, 1000);
 
               useCredit(1).catch(() => {});
-              logGeneration('agent_call', 'AI Live Call (gemini-3.8-live)', 1).catch(() => {});
+              logGeneration(
+                'agent_call',
+                isSuperTaxiCall ? 'SuperTaksi IVR Live Call (0-Token WAV + gemini-3.8-live)' : 'AI Live Call (gemini-3.8-live)',
+                1
+              ).catch(() => {});
+
+              // Play 0-Token Pre-Recorded WAV Greeting immediately on SuperTaxi pickup
+              if (isSuperTaxiCall) {
+                const greetingText = 'Assalomu alaykum, SuperTaksi! Eshitaman sizni.';
+                setCurrentSubtitle(greetingText);
+                setTranscriptLines([
+                  {
+                    id: `a-${Date.now()}`,
+                    sender: 'agent',
+                    text: greetingText,
+                    timestamp: new Date().toLocaleTimeString('uz-UZ', {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      second: '2-digit',
+                    }),
+                  },
+                ]);
+
+                try {
+                  const greetingAudio = new Audio('/api/agent/supertaxi-greeting.wav');
+                  currentAudioElemRef.current = greetingAudio;
+                  isGreetingPlayingRef.current = true;
+                  setAgentSpeaking(true);
+                  setAudioLevel(0.7);
+
+                  const releaseGreetingLock = () => {
+                    isGreetingPlayingRef.current = false;
+                    setAgentSpeaking(false);
+                    setAudioLevel(0);
+                    currentAudioElemRef.current = null;
+                  };
+
+                  const fallbackTimer = setTimeout(releaseGreetingLock, 4000);
+
+                  greetingAudio.onended = () => {
+                    clearTimeout(fallbackTimer);
+                    releaseGreetingLock();
+                  };
+                  greetingAudio.onerror = () => {
+                    clearTimeout(fallbackTimer);
+                    releaseGreetingLock();
+                  };
+                  greetingAudio.play().catch(() => {
+                    clearTimeout(fallbackTimer);
+                    releaseGreetingLock();
+                  });
+                } catch (wavErr) {
+                  isGreetingPlayingRef.current = false;
+                  console.warn('0-token WAV greeting playback warning:', wavErr);
+                }
+              } else {
+                isGreetingPlayingRef.current = false;
+              }
 
               // Stream 16kHz PCM microphone input to Gemini Live WebSocket
               if (micStreamRef.current) {
@@ -956,7 +1063,8 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                   micProcessorRef.current = processor;
 
                   processor.onaudioprocess = (e) => {
-                    if (isMutedRef.current || ws.readyState !== WebSocket.OPEN) return;
+                    // Do not stream mic audio while muted or while the 0-token WAV greeting is playing (prevents speaker echo)
+                    if (isMutedRef.current || isGreetingPlayingRef.current || ws.readyState !== WebSocket.OPEN) return;
                     const inputData = e.inputBuffer.getChannelData(0);
 
                     let sum = 0;
@@ -964,16 +1072,21 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                       sum += inputData[i] * inputData[i];
                     }
                     const rms = Math.sqrt(sum / inputData.length);
-                    if (rms > 0.018) {
+                    if (rms > 0.022) {
                       setUserSpeaking(true);
                       setAudioLevel(Math.min(1, rms * 8));
-                      // Stage 2: <80ms Client-Side Barge-In when user interrupts agent mid-sentence
-                      if (rms > 0.028 && agentSpeakingRef.current) {
+                      // Only trigger client barge-in on non-IVR calls with strong voice signal so speaker echo never cuts off SuperTaxi confirmation
+                      if (!isSuperTaxiCall && rms > 0.09 && agentSpeakingRef.current) {
                         stopAllAudio();
                         ws.send(JSON.stringify({ type: 'interrupt' }));
                       }
                     } else {
                       setUserSpeaking(false);
+                    }
+
+                    // Do not forward speaker echo to Gemini while SuperTaxi operator is speaking its final confirmation
+                    if (isSuperTaxiCall && agentSpeakingRef.current) {
+                      return;
                     }
 
                     const base64Audio = float32ToPcm16Base64(inputData);
@@ -988,6 +1101,42 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
               }
             } else if (msg.type === 'audio' && msg.audio) {
               playLiveAudioChunk(msg.audio);
+            } else if (msg.type === 'userTranscript' && msg.text) {
+              setTranscriptLines((prev) => {
+                const last = prev[prev.length - 1];
+                if (last && last.sender === 'user' && Date.now() - Number(last.id.split('-')[1] || 0) < 4000) {
+                  return [
+                    ...prev.slice(0, -1),
+                    { ...last, text: `${last.text} ${msg.text}`.trim() },
+                  ];
+                }
+                return [
+                  ...prev,
+                  {
+                    id: `u-${Date.now()}`,
+                    sender: 'user',
+                    text: msg.text.trim(),
+                    timestamp: new Date().toLocaleTimeString('uz-UZ', {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      second: '2-digit',
+                    }),
+                  },
+                ];
+              });
+            } else if (msg.type === 'taxiOrderConfirmed' && msg.order) {
+              taxiOrderConfirmedRef.current = true;
+              setTaxiOrderCard((prev) => ({
+                orderId: msg.order.orderId || prev?.orderId || `ST-${Math.floor(10000 + Math.random() * 90000)}`,
+                pickupLocation: msg.order.pickupLocation || prev?.pickupLocation || 'Toshkent markazi',
+                landmark: msg.order.landmark,
+                destinationLocation: msg.order.destinationLocation,
+                callDurationSec: callDuration,
+                estimatedCostUsd: '$0.0015',
+                estimatedCostUzs: "20 so'm",
+                status: 'driver_assigned',
+                timestamp: msg.order.timestamp || new Date().toLocaleTimeString('uz-UZ'),
+              }));
             } else if (msg.type === 'text' && msg.text) {
               setCurrentSubtitle(msg.text);
               setTranscriptLines((prev) => {
@@ -1012,6 +1161,16 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                   },
                 ];
               });
+            } else if (msg.type === 'turnComplete') {
+              if (isSuperTaxiCall && (msg.taxiOrderDispatched || taxiOrderConfirmedRef.current)) {
+                const ctxNow = outputAudioCtxRef.current?.currentTime || 0;
+                const remainingAudioMs = Math.max(0, (nextPlaybackTimeRef.current - ctxNow) * 1000);
+                if (autoDisconnectTimerRef.current) clearTimeout(autoDisconnectTimerRef.current);
+                autoDisconnectTimerRef.current = setTimeout(() => {
+                  cleanupCall();
+                  setCallStatus('ended');
+                }, remainingAudioMs + 1600);
+              }
             } else if (msg.type === 'interrupted') {
               stopAllAudio();
             } else if (msg.type === 'apiKeyExpired') {
@@ -1059,7 +1218,11 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
       }
     };
 
-    if (callMode === 'live') {
+    // SuperTaxi IVR strictly uses Gemini 3.8 Live API
+    if (selectedPersona === 'supertaxi_ivr' || callMode === 'live') {
+      if (selectedPersona === 'supertaxi_ivr' && callMode !== 'live') {
+        setCallMode('live');
+      }
       await startLiveWebSocketCall();
     } else {
       await startTurnBasedCall();
@@ -1226,6 +1389,14 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
     AgentPersonaType,
     { titleUz: string; titleRu: string; descUz: string; descRu: string; badge: string; icon: any }
   > = {
+    supertaxi_ivr: {
+      titleUz: '🚕 SuperTaksi IVR Dispetcheri (15–20s, O\'zbekcha)',
+      titleRu: '🚕 SuperTaksi IVR Оператор (15–20с, Узбекский)',
+      descUz: '0 tokenlik WAV salomlashuv + Gemini 3.8 Live API. Mijozdan manzil/mo\'ljalni qabul qiladi, haydovchi qo\'ng\'iroq qilishini aytib, avtomatik ravishda xayrlashadi (15-20s).',
+      descRu: '0-токен WAV приветствие + Gemini 3.8 Live API. Принимает адрес/ориентир на узбекском языке, назначает водителя и автоматически завершает звонок за 15-20 сек.',
+      badge: '15-20s IVR • 0 Token Salom',
+      icon: Navigation,
+    },
     tashkent_real_estate: {
       titleUz: '🏢 Toshkent Rieltor-Eksperti (Shohrux / Malika)',
       titleRu: '🏢 Топ-Риелтор Ташкента (Шохрух / Малика)',
@@ -1284,24 +1455,41 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
       <div className="border border-[rgba(22,21,17,0.14)] rounded-[22px] bg-[rgba(255,255,255,0.52)] backdrop-blur-md p-6 sm:p-7 shadow-[0_30px_50px_-30px_rgba(22,21,17,0.35)] relative overflow-hidden">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 relative z-10">
           <div>
-            <div className="flex items-center gap-2 mb-2">
+            <div className="flex flex-wrap items-center gap-2 mb-2">
               <span className="w-2.5 h-2.5 rounded-full bg-[#0E7C86] animate-pulse" />
               <span className="px-2.5 py-0.5 rounded-full bg-[rgba(14,124,134,0.1)] text-[#0E7C86] text-[11px] font-mono tracking-wider font-semibold border border-[#0E7C86]/30 flex items-center gap-1 uppercase">
                 <Zap className="w-3 h-3 text-[#0E7C86]" />
-                GEMINI 3.8 FLASH & TTS (NEURAL CALL)
+                {selectedPersona === 'supertaxi_ivr'
+                  ? '0-TOKEN WAV SALOMLASHUV + GEMINI 3.8 LIVE API (15–20S)'
+                  : 'GEMINI 3.8 LIVE & TTS (NEURAL CALL)'}
               </span>
+              {selectedPersona === 'supertaxi_ivr' && (
+                <span className="px-2.5 py-0.5 rounded-full bg-[#C98A12]/15 text-[#8F5F08] text-[11px] font-mono font-bold border border-[#C98A12]/35">
+                  1000 qo'ng'iroq = ~$1.54 (~19 800 so'm)
+                </span>
+              )}
             </div>
             <h2 className="font-serif text-2xl sm:text-3xl text-[#161511] tracking-tight">
-              {lang === 'uz' ? (
+              {selectedPersona === 'supertaxi_ivr' ? (
+                lang === 'uz' ? (
+                  <>🚕 SuperTaksi IVR <em className="italic text-[#0E7C86]">Ovozli Dispetcheri (15–20s)</em></>
+                ) : (
+                  <>🚕 Голосовой IVR-Оператор <em className="italic text-[#0E7C86]">SuperTaksi (15–20 сек, Узбекский)</em></>
+                )
+              ) : lang === 'uz' ? (
                 <>Toshkent Ko'chmas Mulki & <em className="italic text-[#0E7C86]">Ovozli Agenti</em></>
               ) : (
                 <>Голосовой AI-Агент <em className="italic text-[#0E7C86]">Недвижимости Ташкента</em></>
               )}
             </h2>
             <p className="text-xs sm:text-sm text-[#5D594E] mt-1.5 max-w-2xl leading-relaxed">
-              {lang === 'uz'
-                ? "Google Gemini 3.8 Flash intellekti va Gemini 3.8 Flash TTS neyron ovozlari orqali haqiqiy telefon muloqoti. Rasmiy tembrlar, jonli transkript va BANT lead kvalifikatsiyasi."
-                : 'Живой телефонный диалог через нейронные модели Google Gemini 3.8 Flash и Gemini 3.8 Flash TTS. Официальные тембры, транскрипт и BANT квалификация лидов.'}
+              {selectedPersona === 'supertaxi_ivr'
+                ? lang === 'uz'
+                  ? "1) Go'shak ko'tarilishi bilan 0 tokenlik WAV salomlashuv («Assalomu alaykum, SuperTaksi! Eshitaman sizni.»). 2) Mijoz manzil/mo'ljalni aytadi (masalan: «Skverga»). 3) Operator: «Yaxshi, [manzil] ga buyurtma qabul qilindi, hozir haydovchimiz sizga qo'ng'iroq qiladi. Xayr, salomat bo'ling!» deb aytadi va qo'ng'iroq avtomatik uziladi."
+                  : '1) При поднятии трубки звучит WAV-приветствие за 0 токенов («Assalomu alaykum, SuperTaksi! Eshitaman sizni.»). 2) Клиент называет адрес/ориентир. 3) Оператор подтверждает заказ на чистом узбекском («Yaxshi, [manzil] ga buyurtma qabul qilindi, hozir haydovchimiz sizga qo\'ng\'iroq qiladi. Xayr, salomat bo\'ling!»), автоматически завершает вызов и создаёт карточку водителю.'
+                : lang === 'uz'
+                ? "Google Gemini 3.8 Live intellekti va neyron ovozlari orqali haqiqiy telefon muloqoti. Rasmiy tembrlar, jonli transkript va BANT lead kvalifikatsiyasi."
+                : 'Живой телефонный диалог через нейронные модели Google Gemini 3.8 Live. Официальные тембры, транскрипт и BANT квалификация лидов.'}
             </p>
           </div>
 
@@ -1367,7 +1555,42 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
 
         {/* Sub-navigation tabs */}
         {callStatus === 'idle' && (
-          <div className="mt-5 pt-4 border-t border-[rgba(22,21,17,0.1)] flex flex-wrap items-center justify-end gap-3">
+          <div className="mt-5 pt-4 border-t border-[rgba(22,21,17,0.1)] flex flex-wrap items-center justify-between gap-3">
+            {/* Quick Persona Switcher Pill right in the header */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedPersona('supertaxi_ivr');
+                  setCallMode('live');
+                  setAgentVoiceId('Aoede');
+                  setCallTopic("Assalomu alaykum, Skverga mashina yuboring (Amir Temur xiyoboni)");
+                  setActiveTabSubView('agent');
+                }}
+                className={`px-3.5 py-1.5 rounded-full text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                  selectedPersona === 'supertaxi_ivr'
+                    ? 'bg-[#C98A12] text-white shadow-xs'
+                    : 'bg-[#C98A12]/10 text-[#8F5F08] hover:bg-[#C98A12]/20 border border-[#C98A12]/30'
+                }`}
+              >
+                <span>🚕 SuperTaksi IVR (15–20s, O'zbekcha)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedPersona('tashkent_real_estate');
+                  setCallTopic("Toshkentda novostroyka, ikkilamchi bozor, ijara va narxlar");
+                }}
+                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
+                  selectedPersona === 'tashkent_real_estate'
+                    ? 'bg-[#161511] text-white shadow-xs'
+                    : 'bg-white/80 text-[#5D594E] hover:text-[#161511] border border-[rgba(22,21,17,0.14)]'
+                }`}
+              >
+                <span>🏢 Toshkent Rieltor</span>
+              </button>
+            </div>
+
             {/* Navigation Tabs */}
             <div className="flex flex-wrap items-center gap-1.5">
               <button
@@ -1441,10 +1664,10 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
       </div>
 
       {/* ------------------------------------------------------------- */}
-      {/* ACTIVE CALL & ENDED SCREEN: Single unified LiveCallCard       */}
+      {/* ALWAYS VISIBLE LIVE CALL CARD AT THE TOP OF AGENT SCREEN      */}
       {/* ------------------------------------------------------------- */}
-      {callStatus !== 'idle' && (
-        <div className="py-2">
+      {(callStatus !== 'idle' || activeTabSubView === 'agent') && (
+        <div className="py-1">
           <LiveCallCard
             callStatus={callStatus}
             callDuration={callDuration}
@@ -1454,6 +1677,8 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
             transcriptLines={transcriptLines}
             callTopic={callTopic}
             reLeadCard={reLeadCard}
+            selectedPersona={selectedPersona}
+            taxiOrderCard={taxiOrderCard}
             onStartCall={handleStartCall}
             onEndCall={handleEndCall}
             onToggleMute={handleToggleMute}
@@ -1475,7 +1700,15 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
             }}
             isAuthenticated={isAuthenticated}
             lang={lang}
-            agentVoiceName={agentVoiceId === shokhrukhVoiceId ? 'SHOHRUX' : 'MADINA'}
+            agentVoiceName={
+              agentVoiceId === shokhrukhVoiceId
+                ? 'SHOHRUX'
+                : agentVoiceId.toLowerCase() === 'aoede'
+                ? 'MADINA'
+                : agentVoiceId.toLowerCase() === 'puck'
+                ? 'SHOHRUX'
+                : agentVoiceId.toUpperCase()
+            }
             onSendText={handleSendQuickPrompt}
             micWarning={micWarning}
             apiKeyNotice={apiKeyNotice}

@@ -130,11 +130,24 @@ export interface MultiSpeakerProject {
 // 3. Live Voice AI Agent Types
 // ----------------------------------------------------
 export type AgentPersonaType = 
+  | 'supertaxi_ivr'        // SuperTaksi IVR Dispetcheri (15-20s, O'zbekcha)
   | 'tashkent_real_estate' // Toshkent Ko'chmas Mulk Eksperti (Rieltor)
   | 'live_cohost'          // Podkast Hamkor-boshlovchisi
   | 'caller_in_air'        // Efirga qo'ng'iroq qiluvchi muxlis
   | 'exclusive_mentor'     // Eksklyuziv ekspert / Mentor
   | 'business_consultant'; // Biznes va audio-marketing bo'yicha assistent
+
+export interface TaxiOrderCard {
+  orderId: string;
+  pickupLocation: string;
+  landmark?: string;
+  destinationLocation?: string;
+  callDurationSec: number;
+  estimatedCostUsd: string;
+  estimatedCostUzs: string;
+  status: 'listening' | 'clarifying' | 'driver_assigned';
+  timestamp: string;
+}
 
 export interface MatchedProperty {
   id: string;

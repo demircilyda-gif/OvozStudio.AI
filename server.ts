@@ -6,7 +6,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import Stripe from "stripe";
-import { GoogleGenAI, Modality } from "@google/genai";
+import { GoogleGenAI, Modality, Type } from "@google/genai";
 import { YoutubeTranscript } from "youtube-transcript";
 import { extractMediaAudio } from "./server/services/mediaExtractor.js";
 import { runMediaDubbingPipeline, getPipelineLogs } from "./server/services/mediaPipeline.js";
@@ -56,24 +56,34 @@ console.log(
 let cachedAi: GoogleGenAI | null = null;
 let lastUsedKey = "";
 
-export function getGeminiClient(customKey?: string): GoogleGenAI {
+export function resolveActiveGeminiKey(customKey?: string): string {
   try {
     const envPath = path.resolve(__dirname, ".env");
     if (fs.existsSync(envPath)) {
       dotenv.config({ path: envPath, override: true });
     }
   } catch (e) {}
-  
-  const storeKey = localStore.getGeminiApiKey();
-  const currentKey = (
-    customKey ||
-    process.env.CUSTOM_GEMINI_API_KEY ||
-    storeKey ||
-    process.env.GEMINI_API_KEY ||
-    process.env.GOOGLE_API_KEY ||
-    process.env.API_KEY ||
-    ""
-  ).trim();
+
+  const candidates = [
+    customKey,
+    process.env.CUSTOM_GEMINI_API_KEY,
+    localStore.getGeminiApiKey(),
+    process.env.API_KEY,
+    process.env.GEMINI_API_KEY,
+    process.env.GOOGLE_API_KEY,
+  ]
+    .map((k) => (k || "").trim())
+    .filter(Boolean);
+
+  // Always prefer a permanent Google AI Studio key (AIza...) over an ephemeral session token (AQ....)
+  const permanentKey = candidates.find((k) => k.startsWith("AIza"));
+  if (permanentKey) return permanentKey;
+
+  return candidates[0] || "";
+}
+
+export function getGeminiClient(customKey?: string): GoogleGenAI {
+  const currentKey = resolveActiveGeminiKey(customKey);
 
   if (!cachedAi || currentKey !== lastUsedKey) {
     lastUsedKey = currentKey;
@@ -91,9 +101,11 @@ export function getGeminiClient(customKey?: string): GoogleGenAI {
 
 export function resetGeminiClient(newKey?: string) {
   if (newKey) {
-    process.env.CUSTOM_GEMINI_API_KEY = newKey.trim();
-    process.env.GEMINI_API_KEY = newKey.trim();
-    localStore.setGeminiApiKey(newKey.trim());
+    const clean = newKey.trim();
+    process.env.CUSTOM_GEMINI_API_KEY = clean;
+    process.env.GEMINI_API_KEY = clean;
+    process.env.API_KEY = clean;
+    localStore.setGeminiApiKey(clean);
   }
   cachedAi = null;
   lastUsedKey = "";
@@ -684,6 +696,29 @@ try {
   }
 }
 
+// Restore persisted Gemini API key from Firestore across container restarts
+if (adminDb) {
+  adminDb
+    .collection("system_config")
+    .doc("gemini_api")
+    .get()
+    .then((snap: any) => {
+      if (snap && snap.exists) {
+        const data = snap.data();
+        if (data?.apiKey && typeof data.apiKey === "string" && data.apiKey.trim()) {
+          const restoredKey = data.apiKey.trim();
+          if (!localStore.getGeminiApiKey()) {
+            resetGeminiClient(restoredKey);
+            console.log("[Gemini Key] Restored persistent API key from Firestore system_config");
+          }
+        }
+      }
+    })
+    .catch((err: any) => {
+      console.warn("[Gemini Key] Firestore key check notice:", err?.message || err);
+    });
+}
+
 // -------------------------------------------------------------
 // Admin Verification (ADMIN_EMAILS env variable, never trust role)
 // -------------------------------------------------------------
@@ -1077,7 +1112,12 @@ app.use("/api", globalLimiter);
 app.use("/api", (req, res, next) => {
   const fullPath = req.originalUrl.split("?")[0];
   if (
-    (req.method === "GET" && (fullPath === "/api/health" || fullPath === "/api/billing/config" || fullPath === "/api/gemini/status")) ||
+    (req.method === "GET" && (
+      fullPath === "/api/health" ||
+      fullPath === "/api/billing/config" ||
+      fullPath === "/api/gemini/status" ||
+      fullPath === "/api/agent/supertaxi-greeting.wav"
+    )) ||
     (req.method === "POST" && (
       fullPath === "/api/billing/webhook" ||
       fullPath === "/api/billing/payme-webhook" ||
@@ -1137,19 +1177,14 @@ app.get("/api/health", (_req, res) => {
     status: "ok",
     model: "gemini-3.8-flash-tts",
     liveSupported: true,
-    hasApiKey: Boolean(process.env.GEMINI_API_KEY || localStore.getGeminiApiKey()),
+    hasApiKey: Boolean(resolveActiveGeminiKey()),
   });
 });
 
 // Check Gemini API Key Status
 app.get("/api/gemini/status", async (_req, res) => {
   try {
-    const currentKey = (
-      process.env.CUSTOM_GEMINI_API_KEY ||
-      localStore.getGeminiApiKey() ||
-      process.env.GEMINI_API_KEY ||
-      ""
-    ).trim();
+    const currentKey = resolveActiveGeminiKey();
 
     if (!currentKey) {
       return res.json({
@@ -1165,7 +1200,6 @@ app.get("/api/gemini/status", async (_req, res) => {
       await testClient.models.generateContent({
         model: "gemini-3.8-flash",
         contents: "ping",
-        config: { maxOutputTokens: 2 },
       });
       return res.json({
         configured: true,
@@ -1214,7 +1248,6 @@ app.post("/api/gemini/update-key", async (req, res) => {
       await testGenAi.models.generateContent({
         model: "gemini-3.8-flash",
         contents: "ping",
-        config: { maxOutputTokens: 2 },
       });
     } catch (testErr: any) {
       return res.status(400).json({
@@ -1225,6 +1258,21 @@ app.post("/api/gemini/update-key", async (req, res) => {
 
     // Persist to localStore
     localStore.setGeminiApiKey(cleanKey);
+
+    // Persist to Firestore so it survives container restarts
+    if (adminDb) {
+      try {
+        await adminDb.collection("system_config").doc("gemini_api").set(
+          {
+            apiKey: cleanKey,
+            updatedAt: new Date().toISOString(),
+          },
+          { merge: true }
+        );
+      } catch (fsErr) {
+        console.warn("Notice: could not persist key to Firestore system_config:", fsErr);
+      }
+    }
 
     // Persist to .env
     try {
@@ -5580,6 +5628,76 @@ function generateOfflineRealEstateReply(
     : "Bu juda qiziq savol! Batafsilroq aytsangiz, aynan qaysi jihatiga ko'proq e'tibor qaratamiz?";
 }
 
+// Pre-recorded 0-token WAV greeting for SuperTaxi IVR ("Assalomu alaykum, SuperTaksi! Eshitaman sizni.")
+app.get("/api/agent/supertaxi-greeting.wav", async (_req, res) => {
+  try {
+    const previewsDir = path.resolve(process.cwd(), "public", "audio", "previews");
+    const cachedGreetingPath = path.join(previewsDir, "supertaxi-greeting.wav");
+
+    if (fs.existsSync(cachedGreetingPath)) {
+      const stat = fs.statSync(cachedGreetingPath);
+      if (stat.size > 1000) {
+        res.setHeader("Content-Type", "audio/wav");
+        res.setHeader("Cache-Control", "public, max-age=86400");
+        return res.sendFile(cachedGreetingPath);
+      }
+    }
+
+    // Generate once and cache permanently on disk so all calls play at 0 token cost
+    try {
+      const ttsResponse = await ai.models.generateContent({
+        model: "gemini-3.8-flash-tts",
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: "Assalomu alaykum, SuperTaksi! Eshitaman sizni.",
+                speechMetadata: {
+                  speaker: "Madina",
+                  style:
+                    "Toshkentlik samimiy, xushmuomala va tezkor taksi dispetcher-operatori. Aniq, jarangdor, 0% aksentsiz sof o'zbek tili.",
+                },
+              },
+            ],
+          },
+        ],
+        config: {
+          responseModalities: ["AUDIO"],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } },
+          },
+        },
+      });
+
+      const part = ttsResponse.candidates?.[0]?.content?.parts?.[0];
+      if (part?.inlineData?.data) {
+        const rawBuf = Buffer.from(part.inlineData.data, "base64");
+        const { buffer: wav } = ensureWav(rawBuf, 24000, 1, 16);
+        fs.mkdirSync(previewsDir, { recursive: true });
+        fs.writeFileSync(cachedGreetingPath, wav);
+        res.setHeader("Content-Type", "audio/wav");
+        res.setHeader("Cache-Control", "public, max-age=86400");
+        return res.send(wav);
+      }
+    } catch (ttsErr: any) {
+      console.warn("SuperTaxi greeting synthesis fallback to cached preview:", ttsErr?.message);
+    }
+
+    // Fallback to existing static preview wav if offline
+    const fallbackWavPath = path.join(previewsDir, "aoede.wav");
+    if (fs.existsSync(fallbackWavPath)) {
+      res.setHeader("Content-Type", "audio/wav");
+      return res.sendFile(fallbackWavPath);
+    }
+
+    return res.status(404).end();
+  } catch (err: any) {
+    console.error("SuperTaxi greeting wav error:", err);
+    return res.status(500).end();
+  }
+});
+
 // Start interactive agent call
 app.post("/api/agent/start-call", async (req, res) => {
   try {
@@ -5591,6 +5709,7 @@ app.post("/api/agent/start-call", async (req, res) => {
     } = req.body;
 
     const personaGreetings: Record<string, string> = {
+      supertaxi_ivr: `Assalomu alaykum, SuperTaksi! Eshitaman sizni.`,
       tashkent_real_estate: language === "ru"
         ? `Алло, здравствуйте! Слушаю вас.`
         : `Alo, assalomu alaykum! Xush ko'rdik, eshitaman sizni?`,
@@ -6524,7 +6643,7 @@ app.use("/audio", express.static(path.resolve(process.cwd(), "public", "audio"))
 if (process.env.NODE_ENV !== "production") {
   const { createServer: createViteServer } = await import("vite");
   const vite = await createViteServer({
-    server: { middlewareMode: true },
+    server: { middlewareMode: true, hmr: false, watch: null },
     appType: "spa",
   });
   app.use(vite.middlewares);
@@ -6588,17 +6707,44 @@ wss.on("connection", (clientWs: WebSocket) => {
           topic = "Toshkentda uy xarid qilish va ijara maslahati",
           voiceName = "Puck",
           language = "uz",
+          skipInitialGreeting = false,
         } = data;
 
         currentPersona = persona;
         currentTopic = topic;
         currentLang = language;
 
+        const isSuperTaxi = persona === "supertaxi_ivr";
         const isRealEstate = persona === "tashkent_real_estate";
 
         let systemInstruction = "";
 
-        if (isRealEstate) {
+        if (isSuperTaxi) {
+          systemInstruction = `Siz "SuperTaksi" (Toshkent va O'zbekiston) tezkor ovozli IVR dispetcher-operatorisiz (Madina).
+Muloqot tili: FAQAT SOF VA TABIIY O'ZBEK TILI (Toshkent jonli talaffuzi, 0% chet el aksenti).
+
+📌 MUHIM KONTEKST:
+Telefon ko'tarilganda mijozga allaqachon: "Assalomu alaykum, SuperTaksi! Eshitaman sizni." degan salomlashuv eshittirildi. Qaytadan uzoq salomlashmang, mijoz nima deyishini diqqat bilan oxirigacha tinglang!
+
+🚕 SIZNING VAZIFANGIZ (15-20 SONIYALIK TEZKOR TAKSI BUYURTMASI):
+1. MIJOZNI OXIRIGACHA ESHITING:
+   - Agar mijoz faqat "Alo", "Assalomu alaykum", "Salom" yoki "Eshityapsizmi?" deb gapirib, HALI MANZIL YOKI MO'LJALNI AYTMAGAN BO'LSA — aslo "Yaxshi" deb xayrlashmang! Qisqa va xushmuomala qilib:
+     "Va alaykum assalom! Qaysi manzilga mashina yuboraylik?" deb so'rang va manzilni kuting.
+2. MANZIL AYTILGANDA (1 TA TO'LIQ VA UZLUKSIZ JUMALA BILAN TASDIQLASH):
+   - Mijoz qayerda turganini (ketish nuqtasi / mo'ljal) yoki qayerga borishini aytishi bilan (masalan: "Skverga mashina kerak", "Chilonzor 9-kvartal Parus oldiga", "Mega Planet oldiga bitta taksi", "Aeroportga"), qo'shimcha savol bermang ("Qayerga borasiz?", "Qanaqa tarif?" DEB SO'RAMANG!).
+   - Faqat "Yaxshi" deb to'xtab qolmang! Bitta uzluksiz, ravon va tabiiy jumlada TO'LIQ mana shu gapni oxirigacha ayting:
+     "Yaxshi, [mijoz aytgan manzil/mo'ljal] ga buyurtma qabul qilindi, hozir haydovchimiz sizga qo'ng'iroq qiladi. Xayr, salomat bo'ling!"
+   - DIQQAT: Hech qachon faqat "Yaxshi" deb jim bo'lib qolmang va hech qachon "Sizga haydovchi taqdim etiladi" kabi sun'iy tarjima gaplarni ishlatmang!
+3. TOSHKENT MO'LJALLARI LUG'ATI (TO'G'RI TUSHUNISH VA TALAFFUZ QILISH):
+   - Skver -> Amir Temur xiyoboni (Skver)
+   - Maksim Gorkiy -> Buyuk Ipak Yo'li (Maksim Gorkiy)
+   - Drujba -> Xalqlar Do'stligi
+   - Chilonzor (1-26 kvartallar, Qatortol, Parus, Novza, Gagarin)
+   - Yunusobod (1-19 kvartallar, Mega Planet, Shahriston, Bodomzor, Universam)
+   - Qo'yliq, Chorsu, Sergeli, Oloy bozori, TashMI, Xalqaro Aeroport, Shimoliy Vokzal, Magic City, Tashkent City, Samarqand Darvoza, Next, Compass.
+4. O'ZBEK FONETIKASI:
+   - "Q" (qabul, qilindi, qo'ng'iroq), "G'" (qo'ng'iroq, sog' bo'ling), "X" (xayr, xiyobon), "H" (hozir, haydovchimiz), "O'" (mo'ljal, ko'cha) harflarini sof Toshkent ohangida talaffuz qiling.`;
+        } else if (isRealEstate) {
           systemInstruction = `Siz Toshkent ko'chmas mulk bozoridagi eng mohir, samimiy va xarizmatik rieltor-ekspertisiz (Shohrux yoki Malika).
 Muloqot tili: ${language === "ru" ? "Rus tili (Русский язык, живой разговорный ташкентский диалог без роботизированности)" : "O'zbek tili (Sof o'zbek adabiy va jonli Toshkent shahar ohangida)"}.
 
@@ -6661,7 +6807,7 @@ Muloqot tili: ${language === "ru" ? "Rus tili (естественный живо
 
         currentSystemInstruction = systemInstruction;
 
-        let liveVoice = "Puck";
+        let liveVoice = isSuperTaxi ? "Aoede" : "Puck";
         const lowerVoice = (voiceName || "").toLowerCase();
         if (lowerVoice === "charon" || lowerVoice.includes("jasur")) {
           liveVoice = "Charon";
@@ -6679,17 +6825,23 @@ Muloqot tili: ${language === "ru" ? "Rus tili (естественный живо
           liveVoice = "Fenrir";
         } else if (lowerVoice === "zephyr") {
           liveVoice = "Zephyr";
-        } else {
+        } else if (lowerVoice === "puck" || lowerVoice.includes("shohrux") || lowerVoice.includes("otabek")) {
           liveVoice = "Puck";
         }
 
-        const agentPickupLine = isRealEstate
+        const agentPickupLine = isSuperTaxi
+          ? "Assalomu alaykum, SuperTaksi! Eshitaman sizni."
+          : isRealEstate
           ? (language === "ru"
               ? "Алло, здравствуйте! Недвижимость Ташкента, Шохрух на связи. Слушаю вас!"
               : "Alo, assalomu alaykum! Toshkent ko'chmas mulk bo'yicha Shohruxman. Eshitaman sizni?")
           : (language === "ru"
               ? "Алло, здравствуйте! Я вас внимательно слушаю."
               : "Alo, assalomu alaykum! Tinglayapman sizni.");
+
+        let lastUserTranscript = "";
+        let currentTurnAgentText = "";
+        let taxiOrderDispatched = false;
 
         // Connect to Gemini 3.8 Live API with verified prebuilt voice
         try {
@@ -6701,34 +6853,92 @@ Muloqot tili: ${language === "ru" ? "Rus tili (естественный живо
               responseModalities: [Modality.AUDIO],
               speechConfig: { voiceConfig },
               systemInstruction,
+              inputAudioTranscription: {},
+              outputAudioTranscription: {},
             },
             callbacks: {
               onmessage: (msg: any) => {
                 if (clientWs.readyState !== WebSocket.OPEN) return;
 
-                // 1. Audio stream chunks from Gemini (24kHz PCM16LE base64)
-                const audio = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-                if (audio) {
-                  clientWs.send(JSON.stringify({ type: "audio", audio }));
+                // 1. Audio stream chunks from Gemini (iterate all parts so no audio chunk is ever skipped)
+                for (const part of msg.serverContent?.modelTurn?.parts ?? []) {
+                  if (part.inlineData?.data) {
+                    clientWs.send(JSON.stringify({ type: "audio", audio: part.inlineData.data }));
+                  }
                 }
 
-                // 2. Text parts / transcripts if present
-                const text = msg.serverContent?.modelTurn?.parts
+                // 1b. Input audio transcription from user
+                const inputTranscript = msg.serverContent?.inputTranscription?.text;
+                if (inputTranscript && inputTranscript.trim()) {
+                  lastUserTranscript = `${lastUserTranscript} ${inputTranscript}`.trim();
+                  clientWs.send(JSON.stringify({ type: "userTranscript", text: inputTranscript }));
+                }
+
+                // 2. Text parts / output audio transcripts if present
+                const partText = msg.serverContent?.modelTurn?.parts
                   ?.map((p: any) => p.text)
                   .filter(Boolean)
                   .join(" ");
+                const outTranscript = msg.serverContent?.outputTranscription?.text;
+                const text = outTranscript || partText;
                 if (text) {
+                  currentTurnAgentText = `${currentTurnAgentText} ${text}`.trim();
                   clientWs.send(JSON.stringify({ type: "text", text }));
                 }
 
                 // 3. User interrupted agent mid-speech
                 if (msg.serverContent?.interrupted) {
+                  currentTurnAgentText = "";
                   clientWs.send(JSON.stringify({ type: "interrupted" }));
                 }
 
                 // 4. Agent completed its current turn
                 if (msg.serverContent?.turnComplete) {
-                  clientWs.send(JSON.stringify({ type: "turnComplete" }));
+                  const lowerTurn = currentTurnAgentText.toLowerCase();
+                  if (
+                    isSuperTaxi &&
+                    !taxiOrderDispatched &&
+                    (lowerTurn.includes("buyurtma qabul qilindi") ||
+                      lowerTurn.includes("haydovchimiz") ||
+                      lowerTurn.includes("qo'ng'iroq qiladi") ||
+                      lowerTurn.includes("salomat bo'ling"))
+                  ) {
+                    taxiOrderDispatched = true;
+                    const matchAddr = currentTurnAgentText.match(/yaxshi[,!\s]+(.+?)\s*(?:ga\s+)?buyurtma/i);
+                    const cleanedUserAddr = lastUserTranscript
+                      .replace(/^(alo|assalomu alaykum|salom|eshityapsizmi|menga|bizga|iltimos)[,!\s]*/i, "")
+                      .replace(/\b(taksi kerak|mashina kerak|buyurtma|kerak edi|borishim kerak)\b/gi, "")
+                      .trim();
+                    const extractedAddr =
+                      matchAddr?.[1]?.trim() ||
+                      cleanedUserAddr ||
+                      lastUserTranscript ||
+                      "Toshkent (Mijoz aytgan manzil)";
+
+                    clientWs.send(
+                      JSON.stringify({
+                        type: "taxiOrderConfirmed",
+                        order: {
+                          orderId: `ST-${Math.floor(10000 + Math.random() * 90000)}`,
+                          pickupLocation: extractedAddr,
+                          status: "driver_assigned",
+                          timestamp: new Date().toLocaleTimeString("uz-UZ", {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                            second: "2-digit",
+                          }),
+                        },
+                      })
+                    );
+                  }
+
+                  currentTurnAgentText = "";
+                  clientWs.send(
+                    JSON.stringify({
+                      type: "turnComplete",
+                      taxiOrderDispatched,
+                    })
+                  );
                 }
               },
               onclose: (closeEvent?: any) => {
@@ -6769,27 +6979,30 @@ Muloqot tili: ${language === "ru" ? "Rus tili (естественный живо
           // Confirm connection to client
           clientWs.send(JSON.stringify({ type: "connected", voiceUsed: liveVoice }));
 
-          setTimeout(() => {
-            try {
-              if (liveSession) {
-                liveSession.sendClientContent({
-                  turns: [
-                    {
-                      role: "user",
-                      parts: [
-                        {
-                          text: `[SYSTEM INSTRUCTION]: Telefon go'shagini ko'tardingiz. Qisqa va tabiiy ohangda faqat quyidagi gapni ayting: "${agentPickupLine}". Boshqa hech narsa qo'shmang va darhol mijoz javobini kuting.`,
-                        },
-                      ],
-                    },
-                  ],
-                  turnComplete: true,
-                });
+          // Only trigger AI greeting if client did NOT play a 0-token pre-recorded WAV greeting
+          if (!skipInitialGreeting) {
+            setTimeout(() => {
+              try {
+                if (liveSession) {
+                  liveSession.sendClientContent({
+                    turns: [
+                      {
+                        role: "user",
+                        parts: [
+                          {
+                            text: `[SYSTEM INSTRUCTION]: Telefon go'shagini ko'tardingiz. Qisqa va tabiiy ohangda faqat quyidagi gapni ayting: "${agentPickupLine}". Boshqa hech narsa qo'shmang va darhol mijoz javobini kuting.`,
+                          },
+                        ],
+                      },
+                    ],
+                    turnComplete: true,
+                  });
+                }
+              } catch (initErr) {
+                console.warn("Live greeting trigger warning:", initErr);
               }
-            } catch (initErr) {
-              console.warn("Live greeting trigger warning:", initErr);
-            }
-          }, 350);
+            }, 350);
+          }
         } catch (sessionErr: any) {
           const errMsg = String(sessionErr?.message || sessionErr || "");
           console.warn("Live direct connect error:", errMsg);
@@ -6844,6 +7057,45 @@ Muloqot tili: ${language === "ru" ? "Rus tili (естественный живо
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`PodkastUz Server running on port ${PORT}`);
+const shutdownCleanly = () => {
+  try {
+    server.close();
+  } catch {}
+  process.exit(0);
+};
+process.on("SIGTERM", shutdownCleanly);
+process.on("SIGINT", shutdownCleanly);
+
+let listenRetries = 0;
+server.on("error", async (err: any) => {
+  if (err && err.code === "EADDRINUSE" && listenRetries < 5) {
+    listenRetries++;
+    console.warn(`Port ${PORT} in use, freeing stale process and retrying in 800ms (attempt ${listenRetries}/5)...`);
+    try {
+      const { execSync } = await import("child_process");
+      const out = execSync(`ps -ef | grep "server.ts" | grep -v grep`, { encoding: "utf-8" });
+      for (const line of out.split("\n")) {
+        const parts = line.trim().split(/\s+/);
+        const pid = Number(parts[1]);
+        if (pid && pid !== process.pid && pid !== process.ppid) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {}
+        }
+      }
+    } catch {}
+    setTimeout(() => {
+      try {
+        server.close();
+      } catch {}
+      server.listen(Number(PORT));
+    }, 800);
+  } else {
+    console.error("Server error:", err);
+  }
 });
+
+server.listen(Number(PORT), () => {
+  console.log(`PodkastUz Server running on port ${PORT} (PID ${process.pid})`);
+});
+

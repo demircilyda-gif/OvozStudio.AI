@@ -400,6 +400,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           <div className="flex items-center gap-2.5">
             <button
               type="button"
+              onClick={() => onEnterApp('agent')}
+              className="px-3.5 py-2 rounded-full text-xs font-mono font-bold bg-[#C98A12] hover:bg-[#8F5F08] text-white transition-all cursor-pointer flex items-center gap-1.5 shadow-xs"
+            >
+              <span>🚕</span>
+              <span>{lang === 'uz' ? 'SuperTaksi IVR (15–20s)' : 'SuperTaksi IVR (Такси)'}</span>
+            </button>
+            <button
+              type="button"
               onClick={() => onEnterApp('studio')}
               className="btn-pill btn-solid text-xs px-4 py-2 font-semibold"
             >
@@ -509,6 +517,15 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
                 <path d="M2 8h11M9 3.5 13.5 8 9 12.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onEnterApp('agent')}
+              className="py-3 px-6 rounded-full text-sm sm:text-base font-semibold flex items-center gap-2.5 text-white bg-[#C98A12] hover:bg-[#8F5F08] shadow-md transition-all cursor-pointer"
+            >
+              <span>🚕</span>
+              <span>{lang === 'uz' ? 'SuperTaksi IVR (15–20s Jonli)' : 'SuperTaksi IVR (Оператор Такси)'}</span>
             </button>
 
             <button

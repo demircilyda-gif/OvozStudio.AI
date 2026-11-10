@@ -525,7 +525,21 @@ export default function App() {
               </div>
 
               {/* Topbar Right Controls */}
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2.5 sm:gap-3">
+                {/* Direct Quick Access Button to SuperTaxi IVR Operator */}
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('agent')}
+                  className={`px-3 py-1.5 rounded-full text-xs font-mono font-bold transition-all flex items-center gap-1.5 cursor-pointer border ${
+                    activeTab === 'agent'
+                      ? 'bg-[#C98A12] text-white border-[#C98A12] shadow-xs'
+                      : 'bg-[#C98A12]/15 text-[#8F5F08] border-[#C98A12]/40 hover:bg-[#C98A12] hover:text-white'
+                  }`}
+                >
+                  <span>🚕</span>
+                  <span>{lang === 'uz' ? 'SuperTaksi IVR' : 'SuperTaksi IVR (Такси)'}</span>
+                </button>
+
                 {/* Language Switcher */}
                 <div className="flex border border-[rgba(22,21,17,0.14)] rounded-full overflow-hidden text-[11px] font-mono">
                   <button

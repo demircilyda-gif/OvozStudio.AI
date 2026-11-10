@@ -14,8 +14,12 @@ import {
   ArrowRight,
   RotateCcw,
   Send,
+  MapPin,
+  Navigation,
+  Clock,
+  CheckCircle2,
 } from 'lucide-react';
-import { RealEstateLeadCard, TranscriptLine } from '../types/podcast';
+import { AgentPersonaType, RealEstateLeadCard, TaxiOrderCard, TranscriptLine } from '../types/podcast';
 
 interface LiveCallCardProps {
   callStatus: 'idle' | 'calling' | 'connected' | 'ended';
@@ -26,6 +30,8 @@ interface LiveCallCardProps {
   transcriptLines: TranscriptLine[];
   callTopic: string;
   reLeadCard: RealEstateLeadCard;
+  selectedPersona?: AgentPersonaType;
+  taxiOrderCard?: TaxiOrderCard | null;
   onStartCall: () => void;
   onEndCall: () => void;
   onToggleMute: () => void;
@@ -52,6 +58,8 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
   transcriptLines,
   callTopic,
   reLeadCard,
+  selectedPersona = 'tashkent_real_estate',
+  taxiOrderCard,
   onStartCall,
   onEndCall,
   onToggleMute,
@@ -173,6 +181,7 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
   const isLive = callStatus === 'calling' || callStatus === 'connected';
   const isDone = callStatus === 'ended';
   const isIdle = callStatus === 'idle';
+  const isSuperTaxi = selectedPersona === 'supertaxi_ivr';
 
   return (
     <div className="w-full max-w-[720px] mx-auto bg-white rounded-[24px] border border-[rgba(22,21,17,0.14)] shadow-[0_20px_40px_-20px_rgba(22,21,17,0.12)] p-5 sm:p-7 space-y-6 transition-all duration-300 ease-in-out relative overflow-hidden select-none">
@@ -183,7 +192,6 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
         <div className="flex items-center gap-3.5 min-w-0">
           {/* 58px Avatar tile with 3 concentric pulsing rings */}
           <div className="relative w-[58px] h-[58px] shrink-0 flex items-center justify-center">
-            {/* 3 concentric pulsing rings: 1.5px teal border, scale .7->1.5, opacity .7->0, 2.2s, staggered 0.7s */}
             <span
               className="absolute inset-0 rounded-[18px] border-[1.5px] border-[#0E7C86] pointer-events-none animate-pulse-ring-1"
               aria-hidden="true"
@@ -197,16 +205,26 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
               aria-hidden="true"
             />
 
-            {/* Avatar core: radial gradient teal #12A3B0 -> #0A5A62 */}
-            <div className="relative z-10 w-full h-full rounded-[18px] bg-[radial-gradient(circle_at_center,#12A3B0_0%,#0A5A62_100%)] text-white flex items-center justify-center shadow-sm">
-              <Building2 className="w-6 h-6 stroke-[2]" />
+            {/* Avatar core */}
+            <div className={`relative z-10 w-full h-full rounded-[18px] ${
+              isSuperTaxi
+                ? 'bg-[radial-gradient(circle_at_center,#C98A12_0%,#8F5F08_100%)]'
+                : 'bg-[radial-gradient(circle_at_center,#12A3B0_0%,#0A5A62_100%)]'
+            } text-white flex items-center justify-center shadow-sm`}>
+              {isSuperTaxi ? (
+                <Navigation className="w-6 h-6 stroke-[2]" />
+              ) : (
+                <Building2 className="w-6 h-6 stroke-[2]" />
+              )}
             </div>
           </div>
 
           {/* Agent info */}
           <div className="min-w-0">
             <h3 className="font-serif text-base sm:text-lg font-normal text-[#161511] truncate leading-tight">
-              SHOKHRUKH — Toshkent rieltor-eksperti
+              {isSuperTaxi
+                ? `${agentVoiceName || 'MADINA'} — SuperTaksi IVR Dispetcheri (15–20s)`
+                : `${agentVoiceName || 'SHOKHRUKH'} — Toshkent rieltor-eksperti`}
             </h3>
             <p
               className="font-mono text-[11px] text-[#0A5A62] font-semibold tracking-wider mt-0.5 flex items-center gap-1.5"
@@ -221,7 +239,11 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
                     : 'bg-[#0E7C86]'
                 }`}
               />
-              <span>OVOZSTUDIO NEURAL LIVE · 0% AKSENT</span>
+              <span>
+                {isSuperTaxi
+                  ? '0 TOKEN WAV SALOM · GEMINI 3.8 LIVE · O\'ZBEKCHA'
+                  : 'OVOZSTUDIO NEURAL LIVE · 0% AKSENT'}
+              </span>
             </p>
           </div>
         </div>
@@ -231,7 +253,9 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
           <div
             className={`font-mono text-base sm:text-lg font-bold tabular-nums tracking-tight ${
               isLive
-                ? 'text-[#0E7C86]'
+                ? isSuperTaxi && callDuration > 20
+                  ? 'text-[#C4552D]'
+                  : 'text-[#0E7C86]'
                 : isDone
                 ? 'text-[#161511]'
                 : 'text-[#7D7A70]'
@@ -239,9 +263,16 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
             style={{ fontFamily: '"IBM Plex Mono", monospace' }}
           >
             {isIdle ? '00:00' : formatTime(callDuration)}
+            {isSuperTaxi && <span className="text-xs text-[#7D7A70] font-normal"> / 00:20</span>}
           </div>
           <span className="font-mono text-[10px] uppercase tracking-wider text-[#7D7A70] block">
-            {isLive ? (lang === 'uz' ? 'Jonli efir' : 'В эфире') : isDone ? (lang === 'uz' ? 'Yakunlangan' : 'Завершен') : (lang === 'uz' ? 'Kutish' : 'Ожидание')}
+            {isLive
+              ? isSuperTaxi
+                ? 'SLA: 15-20s norma'
+                : lang === 'uz' ? 'Jonli efir' : 'В эфире'
+              : isDone
+              ? lang === 'uz' ? 'Yakunlangan' : 'Завершен'
+              : lang === 'uz' ? 'Kutish' : 'Ожидание'}
           </span>
         </div>
       </div>
@@ -303,19 +334,47 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
       {/* ------------------------------------------------------------- */}
       {isIdle && (
         <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
-          <div className="p-4 rounded-2xl bg-[#F4F1EA]/65 border border-[rgba(22,21,17,0.08)] flex items-start gap-3">
-            <div className="p-2 rounded-xl bg-[#0E7C86]/10 text-[#0E7C86] shrink-0 mt-0.5">
-              <Sparkles className="w-4 h-4" />
+          {isSuperTaxi ? (
+            <div className="p-4 rounded-2xl bg-[#F4F1EA]/80 border border-[rgba(22,21,17,0.12)] space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-mono font-bold text-[#161511] flex items-center gap-1.5">
+                  <Navigation className="w-3.5 h-3.5 text-[#C98A12]" />
+                  <span>SUPERTAKSI IVR PROTOKOLI (FAQAT O'ZBEK TILIDA · 15–20 SONIYA):</span>
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-emerald-600/15 text-emerald-800 text-[10px] font-mono font-bold">
+                  ~$0.0015 / qo'ng'iroq (~20 so'm)
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px] font-mono">
+                <div className="p-2.5 rounded-xl bg-white border border-[rgba(22,21,17,0.08)]">
+                  <span className="text-[#C98A12] font-bold block">1. 0–3s (0 Token WAV)</span>
+                  <span className="text-[#161511]">«Assalomu alaykum, SuperTaksi! Eshitaman sizni.»</span>
+                </div>
+                <div className="p-2.5 rounded-xl bg-white border border-[rgba(22,21,17,0.08)]">
+                  <span className="text-[#0E7C86] font-bold block">2. 3–10s (Mijoz manzili)</span>
+                  <span className="text-[#161511]">Mijoz manzil/mo'ljalni aytadi (masalan: «Skverga»)</span>
+                </div>
+                <div className="p-2.5 rounded-xl bg-white border border-[rgba(22,21,17,0.08)]">
+                  <span className="text-emerald-700 font-bold block">3. 10–18s (Avto-uzish)</span>
+                  <span className="text-[#161511]">«Yaxshi, [manzil] ga buyurtma qabul qilindi, hozir haydovchimiz sizga qo'ng'iroq qiladi. Xayr, salomat bo'ling!»</span>
+                </div>
+              </div>
             </div>
-            <div className="space-y-1">
-              <h4 className="text-xs font-semibold text-[#161511]">
-                {lang === 'uz' ? 'Qo\'ng\'iroq mavzusi va maqsadi:' : 'Тема и контекст звонка:'}
-              </h4>
-              <p className="text-xs text-[#5D594E] leading-relaxed">
-                "{callTopic}"
-              </p>
+          ) : (
+            <div className="p-4 rounded-2xl bg-[#F4F1EA]/65 border border-[rgba(22,21,17,0.08)] flex items-start gap-3">
+              <div className="p-2 rounded-xl bg-[#0E7C86]/10 text-[#0E7C86] shrink-0 mt-0.5">
+                <Sparkles className="w-4 h-4" />
+              </div>
+              <div className="space-y-1">
+                <h4 className="text-xs font-semibold text-[#161511]">
+                  {lang === 'uz' ? 'Qo\'ng\'iroq mavzusi va maqsadi:' : 'Тема и контекст звонка:'}
+                </h4>
+                <p className="text-xs text-[#5D594E] leading-relaxed">
+                  "{callTopic}"
+                </p>
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Action Button: Start Call */}
           <button
@@ -323,17 +382,14 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
             onClick={onStartCall}
             className="w-full py-4 px-6 rounded-full bg-[#161511] hover:bg-[#0A5A62] text-[#F4F1EA] font-medium text-sm sm:text-base flex items-center justify-center gap-3 transition-all cursor-pointer shadow-md active:scale-[0.99]"
           >
-            {!isAuthenticated ? (
-              <>
-                <Lock className="w-5 h-5 text-[#5CC8CF]" />
-                <span>{lang === 'uz' ? '🔒 Ro\'yxatdan O\'tish & Qo\'ng\'iroq' : '🔒 Войти & Начать Звонок'}</span>
-              </>
-            ) : (
-              <>
-                <PhoneCall className="w-5 h-5 fill-current text-[#5CC8CF]" />
-                <span>{lang === 'uz' ? '📞 Qo\'ng\'iroqni Boshlash (Jonli)' : '📞 Начать Звонок (Живой)'}</span>
-              </>
-            )}
+            <PhoneCall className="w-5 h-5 fill-current text-[#5CC8CF]" />
+            <span>
+              {isSuperTaxi
+                ? (lang === 'uz'
+                    ? '🚕 SuperTaksi IVR Qo\'ng\'iroqni Boshlash (15–20s Jonli)'
+                    : '🚕 Позвонить Оператору SuperTaksi IVR (15–20с Живой)')
+                : (lang === 'uz' ? '📞 Qo\'ng\'iroqni Boshlash (Jonli)' : '📞 Начать Звонок (Живой)')}
+            </span>
           </button>
         </div>
       )}
@@ -418,6 +474,102 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
           )}
 
           {/* Quick text input fallback */}
+          {/* SuperTaxi 15-20s SLA Progress & Live Driver Order Card */}
+          {isSuperTaxi && (
+            <div className="space-y-3">
+              {/* 20s SLA Progress Bar */}
+              <div className="p-3 rounded-xl bg-[#F4F1EA]/90 border border-[rgba(22,21,17,0.12)] space-y-1.5">
+                <div className="flex items-center justify-between text-[11px] font-mono">
+                  <span className="font-semibold text-[#161511] flex items-center gap-1.5">
+                    <Clock className="w-3.5 h-3.5 text-[#C98A12]" />
+                    <span>SuperTaksi IVR Taymeri (Norma: 15–20s, Maks: 30s)</span>
+                  </span>
+                  <span className="text-[#0E7C86] font-bold">
+                    {callDuration <= 4
+                      ? '1-Bosqich: 0-Token WAV Salomlashuv'
+                      : taxiOrderCard?.status === 'driver_assigned'
+                      ? '3-Bosqich: Buyurtma tasdiqlandi (Auto-uzish)'
+                      : '2-Bosqich: Manzil / Mo\'ljal tinglanmoqda'}
+                  </span>
+                </div>
+                <div className="w-full h-2 rounded-full bg-black/10 overflow-hidden">
+                  <div
+                    className={`h-full transition-all duration-500 ${
+                      callDuration <= 20 ? 'bg-[#0E7C86]' : 'bg-[#C4552D]'
+                    }`}
+                    style={{ width: `${Math.min(100, (callDuration / 20) * 100)}%` }}
+                  />
+                </div>
+              </div>
+
+              {/* Quick Uzbek Address Chips for testing during Live Call */}
+              {onSendText && (
+                <div className="space-y-1.5">
+                  <span className="text-[11px] font-mono text-[#5D594E] block">
+                    🚕 Mikrofonga manzilni ayting yoki tezkor sinash uchun bosing:
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {[
+                      'Assalomu alaykum, Skverga mashina yuboring',
+                      'Chilonzor 9-kvartal, Parus oldiga bitta taksi',
+                      'Yunusobod Mega Planet oldiga mashina kerak',
+                      'Xalqaro Aeroportga taksi yuboring',
+                      'Alo, eshitilyaptimi?',
+                    ].map((phrase) => (
+                      <button
+                        key={phrase}
+                        type="button"
+                        onClick={() => onSendText(phrase)}
+                        className="px-2.5 py-1 rounded-full bg-[#F4F1EA] hover:bg-[#ECE7DB] border border-[rgba(22,21,17,0.14)] text-[11px] font-mono text-[#161511] cursor-pointer transition-all active:scale-95"
+                      >
+                        🗣️ "{phrase}"
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Live Driver Dispatch Card Status */}
+              <div className={`p-3.5 rounded-xl border transition-all ${
+                taxiOrderCard?.status === 'driver_assigned'
+                  ? 'bg-emerald-50/90 border-emerald-300 text-emerald-950'
+                  : 'bg-[#F4F1EA]/60 border-[rgba(22,21,17,0.12)] text-[#161511]'
+              }`}>
+                <div className="flex items-center justify-between text-xs font-mono">
+                  <span className="font-bold flex items-center gap-1.5">
+                    <MapPin className="w-3.5 h-3.5 text-[#0E7C86]" />
+                    <span>HAYDOVCHI BUYURTMA KARTASI:</span>
+                  </span>
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                    taxiOrderCard?.status === 'driver_assigned'
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-amber-500/20 text-[#8F5F08]'
+                  }`}>
+                    {taxiOrderCard?.status === 'driver_assigned'
+                      ? '✓ HAYDOVCHIGA YUBORILDI'
+                      : 'MANZIL KUTILMOQDA...'}
+                  </span>
+                </div>
+                {taxiOrderCard?.pickupLocation && (
+                  <div className="mt-2 pt-2 border-t border-black/10 grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs font-mono">
+                    <div>
+                      <span className="text-[10px] text-[#5D594E] block">MANZIL / MO'LJAL:</span>
+                      <span className="font-bold text-[#161511]">{taxiOrderCard.pickupLocation}</span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-[#5D594E] block">BUYURTMA ID:</span>
+                      <span className="font-bold text-[#0E7C86]">{taxiOrderCard.orderId}</span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-[#5D594E] block">API TANNARX:</span>
+                      <span className="font-bold text-[#161511]">~$0.0015 (~20 UZS)</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {onSendText && (
             <div className="flex items-center gap-2 bg-[#F4F1EA]/85 border border-[rgba(22,21,17,0.12)] rounded-full px-3.5 py-1.5 focus-within:border-[#0E7C86] transition-colors">
               <input
@@ -430,7 +582,7 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
                     setLocalInput('');
                   }
                 }}
-                placeholder={lang === 'uz' ? 'Yoki savolingizni yozib yuboring…' : 'Или напишите вопрос текстом…'}
+                placeholder={isSuperTaxi ? "Manzil yoki mo'ljalni yozib yuboring (masalan: Skverga)..." : (lang === 'uz' ? 'Yoki savolingizni yozib yuboring…' : 'Или напишите вопрос текстом…')}
                 className="flex-1 bg-transparent text-xs text-[#161511] placeholder:text-[#7D7A70] focus:outline-none font-mono"
               />
               <button
@@ -481,83 +633,134 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
       {/* ------------------------------------------------------------- */}
       {isDone && (
         <div className="space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-300">
-          {/* Top Chip: "Lead-karta to'ldirildi" with drawn-check SVG */}
-          <div className="flex flex-wrap items-center justify-between gap-2.5 p-3.5 bg-emerald-50/70 border border-emerald-200/80 rounded-2xl">
-            <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-emerald-100/70 border border-emerald-300/80 text-emerald-900 font-mono text-xs font-semibold shadow-2xs">
-              {/* Drawn-check SVG: stroke-dashoffset animation 0.5s */}
-              <svg
-                className="w-4 h-4 text-emerald-700 shrink-0"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path className="animate-draw-check" d="M20 6L9 17L4 12" />
-              </svg>
-              <span>{lang === 'uz' ? "Lead-karta to'ldirildi" : 'Лид-карта заполнена'}</span>
-            </div>
+          {isSuperTaxi ? (
+            <>
+              {/* SuperTaxi Driver Order Dispatch Card */}
+              <div className="flex flex-wrap items-center justify-between gap-2.5 p-3.5 bg-emerald-50/80 border border-emerald-300 rounded-2xl">
+                <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-emerald-100 border border-emerald-300 text-emerald-950 font-mono text-xs font-semibold shadow-2xs">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+                  <span>🚕 SuperTaksi Buyurtmasi Haydovchiga Yuborildi!</span>
+                </div>
+                <div className="text-[11px] font-mono text-emerald-950 font-bold">
+                  Qo'ng'iroq vaqti: {callDuration} soniya (Norma: 15–20s)
+                </div>
+              </div>
 
-            <div className="text-[11px] font-mono text-emerald-900/80">
-              {lang === 'uz' ? `Muloqot davomiyligi: ${formatTime(callDuration)}` : `Длительность: ${formatTime(callDuration)}`}
-            </div>
-          </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 p-4 rounded-2xl bg-[#F4F1EA]/80 border border-[rgba(22,21,17,0.14)] text-xs font-mono">
+                <div>
+                  <span className="text-[10px] uppercase text-[#7D7A70] block">BUYURTMA ID</span>
+                  <span className="font-bold text-[#0E7C86]">{taxiOrderCard?.orderId || 'ST-84920'}</span>
+                </div>
+                <div className="col-span-1 sm:col-span-2">
+                  <span className="text-[10px] uppercase text-[#7D7A70] block">QABUL QILINGAN MANZIL / MO'LJAL</span>
+                  <span className="font-bold text-[#161511]">
+                    📍 {taxiOrderCard?.pickupLocation || 'Toshkent (Mijoz manzili)'}
+                    {taxiOrderCard?.destinationLocation ? ` → ${taxiOrderCard.destinationLocation}` : ''}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] uppercase text-[#7D7A70] block">LIVE API TANNARX</span>
+                  <span className="font-bold text-emerald-700">
+                    {taxiOrderCard?.estimatedCostUsd || '$0.0015'} (~{taxiOrderCard?.estimatedCostUzs || '20 so\'m'})
+                  </span>
+                </div>
+              </div>
 
-          {/* Lead Snapshot Summary */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 p-4 rounded-2xl bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.1)] text-xs">
-            <div>
-              <span className="text-[10px] font-mono uppercase text-[#7D7A70] block">Maqsad</span>
-              <span className="font-semibold text-[#161511] capitalize">{reLeadCard.clientIntent || 'Sotib olish'}</span>
-            </div>
-            <div>
-              <span className="text-[10px] font-mono uppercase text-[#7D7A70] block">Tuman</span>
-              <span className="font-semibold text-[#161511]">{reLeadCard.district || 'Mirobod'}</span>
-            </div>
-            <div>
-              <span className="text-[10px] font-mono uppercase text-[#7D7A70] block">Byudjet</span>
-              <span className="font-semibold text-[#0E7C86] font-mono">{reLeadCard.budgetRange || '$50,000+'}</span>
-            </div>
-            <div>
-              <span className="text-[10px] font-mono uppercase text-[#7D7A70] block">Harorat</span>
-              <span className="font-semibold text-[#C4552D] font-mono uppercase flex items-center gap-1">
-                <Flame className="w-3 h-3 text-[#C4552D]" />
-                {reLeadCard.leadTemperature || 'WARM'}
-              </span>
-            </div>
-          </div>
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                <span className="text-xs font-mono text-[#5D594E]">
+                  ✓ 0-Token WAV salomlashuv + Gemini 3.8 Live API + Avto-uzish
+                </span>
+                <button
+                  type="button"
+                  onClick={onResetCall}
+                  className="px-5 py-2.5 rounded-full bg-[#161511] hover:bg-[#0A5A62] text-[#F4F1EA] text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-xs"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Yangi Taksi Qo'ng'irog'i</span>
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              {/* Top Chip: "Lead-karta to'ldirildi" with drawn-check SVG */}
+              <div className="flex flex-wrap items-center justify-between gap-2.5 p-3.5 bg-emerald-50/70 border border-emerald-200/80 rounded-2xl">
+                <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-emerald-100/70 border border-emerald-300/80 text-emerald-900 font-mono text-xs font-semibold shadow-2xs">
+                  {/* Drawn-check SVG: stroke-dashoffset animation 0.5s */}
+                  <svg
+                    className="w-4 h-4 text-emerald-700 shrink-0"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path className="animate-draw-check" d="M20 6L9 17L4 12" />
+                  </svg>
+                  <span>{lang === 'uz' ? "Lead-karta to'ldirildi" : 'Лид-карта заполнена'}</span>
+                </div>
 
-          {/* Existing CRM and Lead Buttons (Stay Unchanged) */}
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={onGoToCRM}
-                className="px-4 py-2.5 rounded-full bg-[#0E7C86] hover:bg-[#0A5A62] text-white text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer shadow-xs"
-              >
-                <FileText className="w-4 h-4" />
-                <span>{lang === 'uz' ? 'CRM Dosyega O\'tish' : 'В CRM Досье'}</span>
-              </button>
+                <div className="text-[11px] font-mono text-emerald-900/80">
+                  {lang === 'uz' ? `Muloqot davomiyligi: ${formatTime(callDuration)}` : `Длительность: ${formatTime(callDuration)}`}
+                </div>
+              </div>
 
-              <button
-                type="button"
-                onClick={onGoToLead}
-                className="px-4 py-2.5 rounded-full bg-white hover:bg-[#ECE7DB] text-[#161511] border border-[rgba(22,21,17,0.14)] text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs"
-              >
-                <Key className="w-4 h-4 text-[#C98A12]" />
-                <span>{lang === 'uz' ? 'Lead-kartani ko\'rish' : 'Лид-карта'}</span>
-              </button>
-            </div>
+              {/* Lead Snapshot Summary */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 p-4 rounded-2xl bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.1)] text-xs">
+                <div>
+                  <span className="text-[10px] font-mono uppercase text-[#7D7A70] block">Maqsad</span>
+                  <span className="font-semibold text-[#161511] capitalize">{reLeadCard.clientIntent || 'Sotib olish'}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] font-mono uppercase text-[#7D7A70] block">Tuman</span>
+                  <span className="font-semibold text-[#161511]">{reLeadCard.district || 'Mirobod'}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] font-mono uppercase text-[#7D7A70] block">Byudjet</span>
+                  <span className="font-semibold text-[#0E7C86] font-mono">{reLeadCard.budgetRange || '$50,000+'}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] font-mono uppercase text-[#7D7A70] block">Harorat</span>
+                  <span className="font-semibold text-[#C4552D] font-mono uppercase flex items-center gap-1">
+                    <Flame className="w-3 h-3 text-[#C4552D]" />
+                    {reLeadCard.leadTemperature || 'WARM'}
+                  </span>
+                </div>
+              </div>
 
-            <button
-              type="button"
-              onClick={onResetCall}
-              className="px-4 py-2.5 rounded-full bg-white hover:bg-[#161511] hover:text-[#F4F1EA] text-[#5D594E] border border-[rgba(22,21,17,0.14)] text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span>{lang === 'uz' ? 'Qayta qo\'ng\'iroq qilish' : 'Позвонить снова'}</span>
-            </button>
-          </div>
+              {/* Existing CRM and Lead Buttons (Stay Unchanged) */}
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={onGoToCRM}
+                    className="px-4 py-2.5 rounded-full bg-[#0E7C86] hover:bg-[#0A5A62] text-white text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer shadow-xs"
+                  >
+                    <FileText className="w-4 h-4" />
+                    <span>{lang === 'uz' ? 'CRM Dosyega O\'tish' : 'В CRM Досье'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={onGoToLead}
+                    className="px-4 py-2.5 rounded-full bg-white hover:bg-[#ECE7DB] text-[#161511] border border-[rgba(22,21,17,0.14)] text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs"
+                  >
+                    <Key className="w-4 h-4 text-[#C98A12]" />
+                    <span>{lang === 'uz' ? 'Lead-kartani ko\'rish' : 'Лид-карта'}</span>
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={onResetCall}
+                  className="px-4 py-2.5 rounded-full bg-white hover:bg-[#161511] hover:text-[#F4F1EA] text-[#5D594E] border border-[rgba(22,21,17,0.14)] text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>{lang === 'uz' ? 'Qayta qo\'ng\'iroq qilish' : 'Позвонить снова'}</span>
+                </button>
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>
