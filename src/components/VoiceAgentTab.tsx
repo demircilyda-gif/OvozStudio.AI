@@ -357,9 +357,16 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
     conversationHistoryRef.current = transcriptLines;
   }, [transcriptLines]);
 
-  // SuperTaxi IVR 30-second Hard Cap SLA Enforcement
+  // SuperTaxi IVR 30-second Hard Cap SLA Enforcement (never cut off while operator is speaking confirmation)
   useEffect(() => {
-    if (selectedPersona === 'supertaxi_ivr' && callStatus === 'connected' && callDuration >= 30) {
+    if (
+      selectedPersona === 'supertaxi_ivr' &&
+      callStatus === 'connected' &&
+      callDuration >= 30 &&
+      !agentSpeakingRef.current &&
+      activeSourcesRef.current.length === 0 &&
+      !taxiOrderConfirmedRef.current
+    ) {
       cleanupCall();
       setCallStatus('ended');
     }
@@ -411,6 +418,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
       clearTimeout(speechSilenceTimerRef.current);
       speechSilenceTimerRef.current = null;
     }
+    isGreetingPlayingRef.current = false;
     if (currentAudioElemRef.current) {
       currentAudioElemRef.current.pause();
       currentAudioElemRef.current = null;
@@ -425,6 +433,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
     if (outputAudioCtxRef.current) {
       nextPlaybackTimeRef.current = outputAudioCtxRef.current.currentTime;
     }
+    agentSpeakingRef.current = false;
     setAgentSpeaking(false);
     setAudioLevel(0);
   }, []);
@@ -465,12 +474,14 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
       nextPlaybackTimeRef.current += audioBuffer.duration;
 
       activeSourcesRef.current.push(source);
+      agentSpeakingRef.current = true;
       setAgentSpeaking(true);
       setAudioLevel(0.65);
 
       source.onended = () => {
         activeSourcesRef.current = activeSourcesRef.current.filter((s) => s !== source);
         if (activeSourcesRef.current.length === 0) {
+          agentSpeakingRef.current = false;
           setAgentSpeaking(false);
           setAudioLevel(0);
         }
@@ -800,9 +811,8 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
       micStreamRef.current.getTracks().forEach((track) => track.stop());
       micStreamRef.current = null;
     }
-    closeLiveAudioContexts().catch(() => {});
     inputAudioCtxRef.current = null;
-    outputAudioCtxRef.current = null;
+    agentSpeakingRef.current = false;
     setAgentSpeaking(false);
     setUserSpeaking(false);
     setAudioLevel(0);
@@ -812,6 +822,12 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
   // Start Call (Route by selected engine: Realtime API or Cloned Voice)
   const handleStartCall = async () => {
     cleanupCall();
+    // Unlock 24kHz Live Output AudioContext synchronously inside user click gesture so confirmation audio never starts suspended
+    try {
+      const liveOutCtx = getLiveOutputAudioContext();
+      outputAudioCtxRef.current = liveOutCtx;
+      nextPlaybackTimeRef.current = liveOutCtx.currentTime;
+    } catch (e) {}
     setMicWarning(null);
     setCallErrorMessage(null);
     setCallStatus('calling');
@@ -1062,9 +1078,21 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                   const processor = inputCtx.createScriptProcessor(4096, 1, 1);
                   micProcessorRef.current = processor;
 
+                  let lastVoiceActivityAt = Date.now();
+                  const silentFrame = new Float32Array(4096);
+
                   processor.onaudioprocess = (e) => {
                     // Do not stream mic audio while muted or while the 0-token WAV greeting is playing (prevents speaker echo)
                     if (isMutedRef.current || isGreetingPlayingRef.current || ws.readyState !== WebSocket.OPEN) return;
+
+                    // Do not forward speaker echo to Gemini while SuperTaxi operator is speaking or after order is confirmed
+                    if (
+                      isSuperTaxiCall &&
+                      (agentSpeakingRef.current || activeSourcesRef.current.length > 0 || taxiOrderConfirmedRef.current)
+                    ) {
+                      return;
+                    }
+
                     const inputData = e.inputBuffer.getChannelData(0);
 
                     let sum = 0;
@@ -1072,7 +1100,8 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                       sum += inputData[i] * inputData[i];
                     }
                     const rms = Math.sqrt(sum / inputData.length);
-                    if (rms > 0.022) {
+                    if (rms > 0.018) {
+                      lastVoiceActivityAt = Date.now();
                       setUserSpeaking(true);
                       setAudioLevel(Math.min(1, rms * 8));
                       // Only trigger client barge-in on non-IVR calls with strong voice signal so speaker echo never cuts off SuperTaxi confirmation
@@ -1084,12 +1113,9 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                       setUserSpeaking(false);
                     }
 
-                    // Do not forward speaker echo to Gemini while SuperTaxi operator is speaking its final confirmation
-                    if (isSuperTaxiCall && agentSpeakingRef.current) {
-                      return;
-                    }
-
-                    const base64Audio = float32ToPcm16Base64(inputData);
+                    const isWithinSpeechHangover = Date.now() - lastVoiceActivityAt <= 650;
+                    const frameToSend = isSuperTaxiCall && !isWithinSpeechHangover ? silentFrame : inputData;
+                    const base64Audio = float32ToPcm16Base64(frameToSend);
                     ws.send(JSON.stringify({ type: 'audio', audio: base64Audio }));
                   };
 
@@ -1163,16 +1189,36 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
               });
             } else if (msg.type === 'turnComplete') {
               if (isSuperTaxiCall && (msg.taxiOrderDispatched || taxiOrderConfirmedRef.current)) {
-                const ctxNow = outputAudioCtxRef.current?.currentTime || 0;
-                const remainingAudioMs = Math.max(0, (nextPlaybackTimeRef.current - ctxNow) * 1000);
+                taxiOrderConfirmedRef.current = true;
                 if (autoDisconnectTimerRef.current) clearTimeout(autoDisconnectTimerRef.current);
-                autoDisconnectTimerRef.current = setTimeout(() => {
-                  cleanupCall();
-                  setCallStatus('ended');
-                }, remainingAudioMs + 1600);
+
+                const waitStart = Date.now();
+                const waitForConfirmationPlayback = () => {
+                  const ctx = outputAudioCtxRef.current;
+                  if (ctx && ctx.state === 'suspended') {
+                    ctx.resume().catch(() => {});
+                  }
+                  const remainingSec = ctx ? Math.max(0, nextPlaybackTimeRef.current - ctx.currentTime) : 0;
+                  const hasActiveBuffers = activeSourcesRef.current.length > 0 || remainingSec > 0.08;
+                  const elapsedMs = Date.now() - waitStart;
+
+                  if (hasActiveBuffers && elapsedMs < 18000) {
+                    autoDisconnectTimerRef.current = setTimeout(waitForConfirmationPlayback, 250);
+                  } else {
+                    autoDisconnectTimerRef.current = setTimeout(() => {
+                      cleanupCall();
+                      setCallStatus('ended');
+                    }, 900);
+                  }
+                };
+
+                // Start polling after 400ms to ensure all audio chunks for the turn are scheduled
+                autoDisconnectTimerRef.current = setTimeout(waitForConfirmationPlayback, 400);
               }
             } else if (msg.type === 'interrupted') {
-              stopAllAudio();
+              if (!isSuperTaxiCall) {
+                stopAllAudio();
+              }
             } else if (msg.type === 'apiKeyExpired') {
               cleanupCall();
               setCallStatus('idle');
@@ -1292,8 +1338,10 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
   // Quick prompt button click
   const handleSendQuickPrompt = (text: string) => {
     if (!text.trim()) return;
-    stopAllAudio();
-    if (callMode === 'live' && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    if (!taxiOrderConfirmedRef.current) {
+      stopAllAudio();
+    }
+    if ((selectedPersona === 'supertaxi_ivr' || callMode === 'live') && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       const userLine: TranscriptLine = {
         id: `u-${Date.now()}`,
         sender: 'user',

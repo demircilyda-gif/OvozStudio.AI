@@ -613,3 +613,178 @@ export async function adminManualGrantCredits(
   }
 }
 
+export interface GenerationRecord {
+  id: string;
+  userId: string;
+  userEmail: string;
+  type: 'podcast' | 'voiceover' | 'tts' | 'dubbing' | 'agent_call' | string;
+  title: string;
+  creditsCost: number;
+  status: 'completed' | 'failed' | string;
+  voiceName?: string;
+  durationSec?: number;
+  details?: string;
+  createdAt: string;
+}
+
+export async function adminFetchAllGenerations(
+  knownUsers?: AppUserProfile[]
+): Promise<GenerationRecord[]> {
+  const genMap = new Map<string, GenerationRecord>();
+
+  // 1. Fetch from Server endpoint (/api/billing/admin/generations)
+  try {
+    const res = await authFetch('/api/billing/admin/generations');
+    if (res.ok) {
+      const data = await res.json();
+      for (const g of data.generations || []) {
+        if (g && g.id) {
+          genMap.set(g.id, {
+            id: g.id,
+            userId: g.userId || '',
+            userEmail: (g.userEmail || '').trim().toLowerCase(),
+            type: g.type || 'tts',
+            title: g.title || 'Ovoz generatsiyasi',
+            creditsCost: typeof g.creditsCost === 'number' ? g.creditsCost : 1,
+            status: g.status || 'completed',
+            voiceName: g.voiceName,
+            durationSec: g.durationSec,
+            details: g.details,
+            createdAt: g.createdAt || new Date().toISOString(),
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Server generations fetch notice:', err);
+  }
+
+  // 2. Fetch directly from Firestore users/{uid}/generations (permitted for isAdmin() by firestore.rules)
+  try {
+    let usersToScan = knownUsers;
+    if (!usersToScan || usersToScan.length === 0) {
+      const usersSnap = await getDocs(collection(db, 'users'));
+      usersToScan = [];
+      usersSnap.forEach((uDoc) => {
+        const d = uDoc.data() as Partial<AppUserProfile>;
+        usersToScan!.push({
+          uid: uDoc.id,
+          email: (d.email || '').trim().toLowerCase(),
+          displayName: d.displayName || 'Foydalanuvchi',
+          role: d.role || 'user',
+          tier: d.tier || 'free',
+          creditsRemaining: typeof d.creditsRemaining === 'number' ? d.creditsRemaining : 5,
+          createdAt: d.createdAt,
+          updatedAt: d.updatedAt,
+        });
+      });
+    }
+
+    const newlyDiscoveredFromFirestore: GenerationRecord[] = [];
+
+    await Promise.all(
+      (usersToScan || []).map(async (u) => {
+        if (!u.uid) return;
+        try {
+          const genCol = collection(db, 'users', u.uid, 'generations');
+          const genSnap = await getDocs(query(genCol, orderBy('createdAt', 'desc'), limit(100)));
+          genSnap.forEach((gDoc) => {
+            const d = gDoc.data() as any;
+            const id = d.id || gDoc.id;
+            const rec: GenerationRecord = {
+              id,
+              userId: d.userId || u.uid,
+              userEmail: (d.userEmail || u.email || '').trim().toLowerCase(),
+              type: d.type || 'tts',
+              title: d.title || 'Ovoz generatsiyasi',
+              creditsCost: typeof d.creditsCost === 'number' ? d.creditsCost : 1,
+              status: d.status || 'completed',
+              voiceName: d.voiceName,
+              durationSec: d.durationSec,
+              details: d.details,
+              createdAt: d.createdAt || new Date().toISOString(),
+            };
+            if (!genMap.has(id)) {
+              newlyDiscoveredFromFirestore.push(rec);
+            }
+            genMap.set(id, rec);
+          });
+        } catch {
+          // Ignore individual user subcollection error
+        }
+      })
+    );
+
+    // Sync any Firestore-only generation records into server localStore
+    if (newlyDiscoveredFromFirestore.length > 0) {
+      authFetch('/api/billing/admin/sync-generations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ generations: newlyDiscoveredFromFirestore }),
+      }).catch(() => {});
+    }
+  } catch (err) {
+    console.warn('Firestore direct generations scan notice:', err);
+  }
+
+  return Array.from(genMap.values()).sort(
+    (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+  );
+}
+
+export async function adminUpdateUserProfile(
+  targetEmail: string,
+  creditsRemaining: number,
+  tier: 'free' | 'pro' | 'unlimited'
+): Promise<{ success: boolean; message: string }> {
+  const cleanEmail = targetEmail.trim().toLowerCase();
+  const numericCredits = Math.max(0, Number(creditsRemaining || 0));
+  let directUpdated = false;
+
+  try {
+    const q = query(collection(db, 'users'), where('email', '==', cleanEmail));
+    const snap = await getDocs(q);
+    if (!snap.empty) {
+      await updateDoc(snap.docs[0].ref, {
+        creditsRemaining: numericCredits,
+        tier,
+        updatedAt: new Date().toISOString(),
+      });
+      directUpdated = true;
+    }
+  } catch (err) {
+    console.warn('Direct Firestore update user notice:', err);
+  }
+
+  try {
+    const res = await authFetch('/api/billing/admin/update-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        targetEmail: cleanEmail,
+        creditsRemaining: numericCredits,
+        tier,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok || directUpdated) {
+      return {
+        success: true,
+        message:
+          data.message ||
+          `${cleanEmail} profili yangilandi (${numericCredits} kredit, ${tier.toUpperCase()})`,
+      };
+    }
+    return { success: false, message: data.error || 'Yangilashda xatolik yuz berdi' };
+  } catch (err: any) {
+    if (directUpdated) {
+      return {
+        success: true,
+        message: `${cleanEmail} profili yangilandi (${numericCredits} kredit, ${tier.toUpperCase()})`,
+      };
+    }
+    return { success: false, message: err.message || 'Xatolik yuz berdi' };
+  }
+}
+
+

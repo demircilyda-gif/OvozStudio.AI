@@ -239,11 +239,39 @@ class LocalStore {
     if (!this.data.generations[uid]) {
       this.data.generations[uid] = [];
     }
-    this.data.generations[uid].unshift(record);
-    if (this.data.generations[uid].length > 50) {
-      this.data.generations[uid] = this.data.generations[uid].slice(0, 50);
+    const existingIdx = this.data.generations[uid].findIndex((g: any) => g.id && g.id === record.id);
+    if (existingIdx >= 0) {
+      this.data.generations[uid][existingIdx] = { ...this.data.generations[uid][existingIdx], ...record };
+    } else {
+      this.data.generations[uid].unshift(record);
+    }
+    if (this.data.generations[uid].length > 250) {
+      this.data.generations[uid] = this.data.generations[uid].slice(0, 250);
     }
     this.save();
+  }
+
+  public getUserGenerations(uid: string): any[] {
+    return this.data.generations[uid] || [];
+  }
+
+  public getAllGenerations(): any[] {
+    const all: any[] = [];
+    for (const [uid, list] of Object.entries(this.data.generations || {})) {
+      if (Array.isArray(list)) {
+        const userObj = this.data.users[uid];
+        for (const item of list) {
+          all.push({
+            ...item,
+            userId: item.userId || uid,
+            userEmail: item.userEmail || userObj?.email || '',
+          });
+        }
+      }
+    }
+    return all.sort(
+      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+    );
   }
 
   // --- Processed Sessions (Stripe Idempotency) ---

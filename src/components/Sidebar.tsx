@@ -21,7 +21,7 @@ import {
   Key,
 } from 'lucide-react';
 
-export type AppTab = 'landing' | 'studio' | 'dialogue' | 'voiceover' | 'agent' | 'exclusive' | 'cms' | 'voices' | 'guide' | 'docs';
+export type AppTab = 'landing' | 'studio' | 'dialogue' | 'voiceover' | 'agent' | 'exclusive' | 'cms' | 'voices' | 'guide' | 'docs' | 'admin';
 
 interface SidebarProps {
   activeTab: AppTab;

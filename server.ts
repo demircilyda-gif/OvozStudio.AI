@@ -2026,20 +2026,23 @@ app.post("/api/user/consume-credit", requireAuth, async (req, res) => {
 // User log generation record server-side endpoint
 app.post("/api/user/log-generation", async (req, res) => {
   try {
-    const uid = (req as any).uid;
-    const userEmail = (req as any).userEmail || "";
+    const uid = (req as any).uid || req.body?.uid;
+    const userEmail = (req as any).userEmail || req.body?.userEmail || "";
     if (!uid) return res.status(401).json({ error: "unauthorized" });
 
-    const { type, title, creditsCost, status } = req.body;
+    const { type, title, creditsCost, status, voiceName, durationSec, details } = req.body;
     const genId = `gen-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const record = {
       id: genId,
       userId: uid,
-      userEmail,
+      userEmail: userEmail.trim().toLowerCase(),
       type: type || "tts",
-      title: (title || "").slice(0, 150),
-      creditsCost: creditsCost || 1,
+      title: (title || "").slice(0, 200),
+      creditsCost: typeof creditsCost === "number" ? creditsCost : 1,
       status: status || "completed",
+      voiceName: voiceName || undefined,
+      durationSec: typeof durationSec === "number" ? durationSec : undefined,
+      details: details ? String(details).slice(0, 240) : undefined,
       createdAt: new Date().toISOString(),
     };
 
@@ -2058,9 +2061,186 @@ app.post("/api/user/log-generation", async (req, res) => {
       }
     }
 
-    res.json({ success: true, id: genId });
+    res.json({ success: true, id: genId, record });
   } catch (err: any) {
     console.error("Error logging generation record:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin endpoint: Fetch all generations across all users + aggregated analytics
+app.get("/api/billing/admin/generations", async (req, res) => {
+  try {
+    const adminEmail = (req as any).userEmail;
+    if (!isEmailAdmin(adminEmail)) {
+      return res.status(403).json({ error: "forbidden: admin privileges required" });
+    }
+
+    const genMap = new Map<string, any>();
+
+    // 1. Load from localStore
+    for (const g of localStore.getAllGenerations()) {
+      if (g.id) {
+        genMap.set(g.id, g);
+      }
+    }
+
+    // 2. Load from Firestore users/{uid}/generations if accessible
+    if (adminDb) {
+      try {
+        const usersSnap = await adminDb.collection("users").get();
+        for (const uDoc of usersSnap.docs) {
+          const uData = uDoc.data() || {};
+          const uEmail = (uData.email || "").trim().toLowerCase();
+          try {
+            const genSnap = await uDoc.ref
+              .collection("generations")
+              .orderBy("createdAt", "desc")
+              .limit(100)
+              .get();
+            genSnap.forEach((gDoc: any) => {
+              const gData = gDoc.data() || {};
+              const id = gData.id || gDoc.id;
+              const rec = {
+                id,
+                userId: gData.userId || uDoc.id,
+                userEmail: (gData.userEmail || uEmail || "").trim().toLowerCase(),
+                type: gData.type || "tts",
+                title: gData.title || "Ovoz generatsiyasi",
+                creditsCost: typeof gData.creditsCost === "number" ? gData.creditsCost : 1,
+                status: gData.status || "completed",
+                voiceName: gData.voiceName,
+                durationSec: gData.durationSec,
+                details: gData.details,
+                createdAt: gData.createdAt || new Date().toISOString(),
+              };
+              genMap.set(id, rec);
+              localStore.logGeneration(rec.userId, rec);
+            });
+          } catch {
+            // Ignore subcollection error
+          }
+        }
+      } catch {
+        // Handled silently if ADC lacks Firestore access
+      }
+    }
+
+    const generations = Array.from(genMap.values()).sort(
+      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+    );
+
+    res.json({ generations });
+  } catch (err: any) {
+    console.error("Admin generations fetch error:", err);
+    res.json({ generations: localStore.getAllGenerations() });
+  }
+});
+
+// Admin endpoint: Sync generations discovered by client Firestore SDK into server localStore
+app.post("/api/billing/admin/sync-generations", async (req, res) => {
+  try {
+    const adminEmail = (req as any).userEmail;
+    if (!isEmailAdmin(adminEmail)) {
+      return res.status(403).json({ error: "forbidden: admin privileges required" });
+    }
+
+    const { generations = [] } = req.body;
+    if (Array.isArray(generations)) {
+      for (const g of generations) {
+        if (g && (g.userId || g.userEmail)) {
+          const uid = g.userId || `user-${String(g.userEmail).replace(/[^a-zA-Z0-9]/g, "_")}`;
+          localStore.logGeneration(uid, {
+            id: g.id || `gen-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            userId: uid,
+            userEmail: String(g.userEmail || "").trim().toLowerCase(),
+            type: g.type || "tts",
+            title: g.title || "Ovoz generatsiyasi",
+            creditsCost: typeof g.creditsCost === "number" ? g.creditsCost : 1,
+            status: g.status || "completed",
+            voiceName: g.voiceName,
+            durationSec: g.durationSec,
+            details: g.details,
+            createdAt: g.createdAt || new Date().toISOString(),
+          });
+        }
+      }
+    }
+
+    res.json({ success: true, total: localStore.getAllGenerations().length });
+  } catch (err: any) {
+    console.error("Admin sync generations error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin endpoint: Directly set user exact credit balance and/or tier
+app.post("/api/billing/admin/update-user", async (req, res) => {
+  try {
+    const adminEmail = (req as any).userEmail;
+    if (!isEmailAdmin(adminEmail)) {
+      return res.status(403).json({ error: "forbidden: admin privileges required" });
+    }
+
+    const { targetEmail, creditsRemaining, tier } = req.body;
+    if (!targetEmail) {
+      return res.status(400).json({ error: "targetEmail is required" });
+    }
+
+    const cleanEmail = String(targetEmail).trim().toLowerCase();
+    const numericCredits = Math.max(0, Number(creditsRemaining ?? 0));
+    const updatedTier = tier || "free";
+
+    let existingUser = localStore.getUserByEmail(cleanEmail);
+    if (existingUser) {
+      localStore.saveUser({
+        uid: existingUser.uid,
+        email: cleanEmail,
+        creditsRemaining: isEmailAdmin(cleanEmail) ? 999999 : numericCredits,
+        tier: isEmailAdmin(cleanEmail) ? "unlimited" : updatedTier,
+      });
+    } else {
+      const syntheticUid = `user-${cleanEmail.replace(/[^a-zA-Z0-9]/g, "_")}`;
+      existingUser = localStore.saveUser({
+        uid: syntheticUid,
+        email: cleanEmail,
+        displayName: cleanEmail.split("@")[0] || "Foydalanuvchi",
+        creditsRemaining: isEmailAdmin(cleanEmail) ? 999999 : numericCredits,
+        tier: isEmailAdmin(cleanEmail) ? "unlimited" : updatedTier,
+        role: isEmailAdmin(cleanEmail) ? "admin" : "user",
+      });
+    }
+
+    if (adminDb) {
+      try {
+        const snap = await adminDb
+          .collection("users")
+          .where("email", "==", cleanEmail)
+          .limit(1)
+          .get();
+        if (!snap.empty) {
+          await snap.docs[0].ref.set(
+            {
+              creditsRemaining: isEmailAdmin(cleanEmail) ? 999999 : numericCredits,
+              tier: isEmailAdmin(cleanEmail) ? "unlimited" : updatedTier,
+              updatedAt: new Date().toISOString(),
+            },
+            { merge: true }
+          );
+        }
+      } catch {
+        // Fallback preserved in localStore
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: `${cleanEmail} profili yangilandi (Balans: ${numericCredits} kredit, Tarif: ${updatedTier.toUpperCase()})`,
+      creditsRemaining: numericCredits,
+      tier: updatedTier,
+    });
+  } catch (err: any) {
+    console.error("Admin update user error:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -6696,6 +6876,11 @@ wss.on("connection", (clientWs: WebSocket) => {
   let currentTopic = "";
   let currentLang = "uz";
   let currentSystemInstruction = "";
+  let isSuperTaxi = false;
+  let isAgentGeneratingTurn = false;
+  let lastUserTranscript = "";
+  let currentTurnAgentText = "";
+  let taxiOrderDispatched = false;
 
   clientWs.on("message", async (rawMessage) => {
     try {
@@ -6714,8 +6899,12 @@ wss.on("connection", (clientWs: WebSocket) => {
         currentTopic = topic;
         currentLang = language;
 
-        const isSuperTaxi = persona === "supertaxi_ivr";
+        isSuperTaxi = persona === "supertaxi_ivr";
         const isRealEstate = persona === "tashkent_real_estate";
+        isAgentGeneratingTurn = false;
+        lastUserTranscript = "";
+        currentTurnAgentText = "";
+        taxiOrderDispatched = false;
 
         let systemInstruction = "";
 
@@ -6732,9 +6921,9 @@ Telefon ko'tarilganda mijozga allaqachon: "Assalomu alaykum, SuperTaksi! Eshitam
      "Va alaykum assalom! Qaysi manzilga mashina yuboraylik?" deb so'rang va manzilni kuting.
 2. MANZIL AYTILGANDA (1 TA TO'LIQ VA UZLUKSIZ JUMALA BILAN TASDIQLASH):
    - Mijoz qayerda turganini (ketish nuqtasi / mo'ljal) yoki qayerga borishini aytishi bilan (masalan: "Skverga mashina kerak", "Chilonzor 9-kvartal Parus oldiga", "Mega Planet oldiga bitta taksi", "Aeroportga"), qo'shimcha savol bermang ("Qayerga borasiz?", "Qanaqa tarif?" DEB SO'RAMANG!).
-   - Faqat "Yaxshi" deb to'xtab qolmang! Bitta uzluksiz, ravon va tabiiy jumlada TO'LIQ mana shu gapni oxirigacha ayting:
+   - Faqat "Yaxshi" deb to'xtab qolmang! Bitta uzluksiz, ravon va tabiiy jumlada TO'LIQ mana shu gapni oxirigacha ovoz chiqarib ayting:
      "Yaxshi, [mijoz aytgan manzil/mo'ljal] ga buyurtma qabul qilindi, hozir haydovchimiz sizga qo'ng'iroq qiladi. Xayr, salomat bo'ling!"
-   - DIQQAT: Hech qachon faqat "Yaxshi" deb jim bo'lib qolmang va hech qachon "Sizga haydovchi taqdim etiladi" kabi sun'iy tarjima gaplarni ishlatmang!
+   - DIQQAT: Mijozga buyurtma qabul qilinganini va haydovchi qo'ng'iroq qilishini AYTMASTIK MUMKIN EMAS — bu jumlani har doim to'liq va aniq ovozda oxirigacha ayting!
 3. TOSHKENT MO'LJALLARI LUG'ATI (TO'G'RI TUSHUNISH VA TALAFFUZ QILISH):
    - Skver -> Amir Temur xiyoboni (Skver)
    - Maksim Gorkiy -> Buyuk Ipak Yo'li (Maksim Gorkiy)
@@ -6839,9 +7028,71 @@ Muloqot tili: ${language === "ru" ? "Rus tili (естественный живо
               ? "Алло, здравствуйте! Я вас внимательно слушаю."
               : "Alo, assalomu alaykum! Tinglayapman sizni.");
 
-        let lastUserTranscript = "";
-        let currentTurnAgentText = "";
-        let taxiOrderDispatched = false;
+        const dispatchTaxiOrderIfMatched = () => {
+          const lowerTurn = currentTurnAgentText.toLowerCase();
+          if (
+            isSuperTaxi &&
+            !taxiOrderDispatched &&
+            (lowerTurn.includes("buyurtma qabul qilindi") ||
+              lowerTurn.includes("haydovchimiz") ||
+              lowerTurn.includes("qo'ng'iroq qiladi") ||
+              lowerTurn.includes("salomat bo'ling"))
+          ) {
+            taxiOrderDispatched = true;
+            const matchAddr = currentTurnAgentText.match(/^(?:yaxshi[,!\s]+)?(.+?)\s*(?:ga\s+)?buyurtma\s+qabul/i);
+            const cleanedUserAddr = lastUserTranscript
+              .replace(/\b(alo|assalomu alaykum|salom|eshityapsizmi|menga|bizga|iltimos|bitta|taksi kerak|mashina kerak|buyurtma|kerak edi|borishim kerak)\b[,!\s]*/gi, " ")
+              .replace(/\s+/g, " ")
+              .trim();
+            const extractedAddr =
+              matchAddr?.[1]?.trim() ||
+              cleanedUserAddr ||
+              lastUserTranscript ||
+              "Toshkent (Mijoz aytgan manzil)";
+
+            clientWs.send(
+              JSON.stringify({
+                type: "taxiOrderConfirmed",
+                order: {
+                  orderId: `ST-${Math.floor(10000 + Math.random() * 90000)}`,
+                  pickupLocation: extractedAddr,
+                  status: "driver_assigned",
+                  timestamp: new Date().toLocaleTimeString("uz-UZ", {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    second: "2-digit",
+                  }),
+                },
+              })
+            );
+          }
+        };
+
+        let turnEndFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+        const finalizeAgentTurn = () => {
+          if (turnEndFallbackTimer) {
+            clearTimeout(turnEndFallbackTimer);
+            turnEndFallbackTimer = null;
+          }
+          if (!currentTurnAgentText.trim() && !taxiOrderDispatched) {
+            isAgentGeneratingTurn = false;
+            return;
+          }
+          dispatchTaxiOrderIfMatched();
+          if (!taxiOrderDispatched) {
+            isAgentGeneratingTurn = false;
+          }
+          currentTurnAgentText = "";
+          if (clientWs.readyState === WebSocket.OPEN) {
+            clientWs.send(
+              JSON.stringify({
+                type: "turnComplete",
+                taxiOrderDispatched,
+              })
+            );
+          }
+        };
 
         // Connect to Gemini 3.8 Live API with verified prebuilt voice
         try {
@@ -6863,6 +7114,7 @@ Muloqot tili: ${language === "ru" ? "Rus tili (естественный живо
                 // 1. Audio stream chunks from Gemini (iterate all parts so no audio chunk is ever skipped)
                 for (const part of msg.serverContent?.modelTurn?.parts ?? []) {
                   if (part.inlineData?.data) {
+                    isAgentGeneratingTurn = true;
                     clientWs.send(JSON.stringify({ type: "audio", audio: part.inlineData.data }));
                   }
                 }
@@ -6882,66 +7134,38 @@ Muloqot tili: ${language === "ru" ? "Rus tili (естественный живо
                 const outTranscript = msg.serverContent?.outputTranscription?.text;
                 const text = outTranscript || partText;
                 if (text) {
+                  isAgentGeneratingTurn = true;
                   currentTurnAgentText = `${currentTurnAgentText} ${text}`.trim();
                   clientWs.send(JSON.stringify({ type: "text", text }));
                 }
 
-                // 3. User interrupted agent mid-speech
+                // Reset fallback turn-end timer whenever Gemini is actively streaming audio or text
+                if (isSuperTaxi && (msg.serverContent?.modelTurn?.parts?.length || text)) {
+                  if (turnEndFallbackTimer) clearTimeout(turnEndFallbackTimer);
+                  turnEndFallbackTimer = setTimeout(() => {
+                    finalizeAgentTurn();
+                  }, 1200);
+                }
+
+                // 3. User interrupted agent mid-speech (ignore on SuperTaxi IVR so mic noise/echo never aborts confirmation speech)
                 if (msg.serverContent?.interrupted) {
-                  currentTurnAgentText = "";
-                  clientWs.send(JSON.stringify({ type: "interrupted" }));
+                  if (!isSuperTaxi) {
+                    isAgentGeneratingTurn = false;
+                    currentTurnAgentText = "";
+                    clientWs.send(JSON.stringify({ type: "interrupted" }));
+                  }
                 }
 
                 // 4. Agent completed its current turn
                 if (msg.serverContent?.turnComplete) {
-                  const lowerTurn = currentTurnAgentText.toLowerCase();
-                  if (
-                    isSuperTaxi &&
-                    !taxiOrderDispatched &&
-                    (lowerTurn.includes("buyurtma qabul qilindi") ||
-                      lowerTurn.includes("haydovchimiz") ||
-                      lowerTurn.includes("qo'ng'iroq qiladi") ||
-                      lowerTurn.includes("salomat bo'ling"))
-                  ) {
-                    taxiOrderDispatched = true;
-                    const matchAddr = currentTurnAgentText.match(/yaxshi[,!\s]+(.+?)\s*(?:ga\s+)?buyurtma/i);
-                    const cleanedUserAddr = lastUserTranscript
-                      .replace(/^(alo|assalomu alaykum|salom|eshityapsizmi|menga|bizga|iltimos)[,!\s]*/i, "")
-                      .replace(/\b(taksi kerak|mashina kerak|buyurtma|kerak edi|borishim kerak)\b/gi, "")
-                      .trim();
-                    const extractedAddr =
-                      matchAddr?.[1]?.trim() ||
-                      cleanedUserAddr ||
-                      lastUserTranscript ||
-                      "Toshkent (Mijoz aytgan manzil)";
-
-                    clientWs.send(
-                      JSON.stringify({
-                        type: "taxiOrderConfirmed",
-                        order: {
-                          orderId: `ST-${Math.floor(10000 + Math.random() * 90000)}`,
-                          pickupLocation: extractedAddr,
-                          status: "driver_assigned",
-                          timestamp: new Date().toLocaleTimeString("uz-UZ", {
-                            hour: "2-digit",
-                            minute: "2-digit",
-                            second: "2-digit",
-                          }),
-                        },
-                      })
-                    );
-                  }
-
-                  currentTurnAgentText = "";
-                  clientWs.send(
-                    JSON.stringify({
-                      type: "turnComplete",
-                      taxiOrderDispatched,
-                    })
-                  );
+                  finalizeAgentTurn();
                 }
               },
               onclose: (closeEvent?: any) => {
+                if (turnEndFallbackTimer) {
+                  clearTimeout(turnEndFallbackTimer);
+                  turnEndFallbackTimer = null;
+                }
                 const closeCode = closeEvent?.code;
                 const closeReason = String(closeEvent?.reason || "");
                 console.warn("Gemini Live session close notice:", closeCode, closeReason);
@@ -7027,18 +7251,25 @@ Muloqot tili: ${language === "ru" ? "Rus tili (естественный живо
           }
         }
       } else if (data.type === "audio" && data.audio && liveSession) {
+        // Half-duplex protection for SuperTaxi IVR: while operator is generating its response or after order is dispatched, ignore mic noise/echo
+        if (isSuperTaxi && (isAgentGeneratingTurn || taxiOrderDispatched)) {
+          return;
+        }
         // Real-time microphone audio chunk from user (16kHz PCM mono base64)
         liveSession.sendRealtimeInput({
           audio: { data: data.audio, mimeType: "audio/pcm;rate=16000" },
         });
       } else if (data.type === "text" && data.text && liveSession) {
+        if (isSuperTaxi) {
+          isAgentGeneratingTurn = true;
+        }
+        lastUserTranscript = `${lastUserTranscript} ${data.text}`.trim();
         liveSession.sendClientContent({
           turns: [{ role: "user", parts: [{ text: data.text }] }],
           turnComplete: true,
         });
       } else if (data.type === "interrupt" && liveSession) {
-        // Stage 2: Instant Barge-In (<80ms) — notify client & halt active generation
-        if (clientWs.readyState === WebSocket.OPEN) {
+        if (!isSuperTaxi && clientWs.readyState === WebSocket.OPEN) {
           clientWs.send(JSON.stringify({ type: "interrupted" }));
         }
       }
@@ -7059,43 +7290,40 @@ Muloqot tili: ${language === "ru" ? "Rus tili (естественный живо
 
 const shutdownCleanly = () => {
   try {
-    server.close();
+    server.close(() => {
+      process.exit(0);
+    });
   } catch {}
-  process.exit(0);
+  setTimeout(() => process.exit(0), 150).unref();
 };
 process.on("SIGTERM", shutdownCleanly);
 process.on("SIGINT", shutdownCleanly);
 
+process.on("uncaughtException", (err) => {
+  console.warn("Uncaught exception (handled):", err?.message || err);
+});
+process.on("unhandledRejection", (reason: any) => {
+  console.warn("Unhandled rejection (handled):", reason?.message || reason);
+});
+
 let listenRetries = 0;
-server.on("error", async (err: any) => {
-  if (err && err.code === "EADDRINUSE" && listenRetries < 5) {
+server.on("error", (err: any) => {
+  if (err && err.code === "EADDRINUSE" && listenRetries < 10) {
     listenRetries++;
-    console.warn(`Port ${PORT} in use, freeing stale process and retrying in 800ms (attempt ${listenRetries}/5)...`);
-    try {
-      const { execSync } = await import("child_process");
-      const out = execSync(`ps -ef | grep "server.ts" | grep -v grep`, { encoding: "utf-8" });
-      for (const line of out.split("\n")) {
-        const parts = line.trim().split(/\s+/);
-        const pid = Number(parts[1]);
-        if (pid && pid !== process.pid && pid !== process.ppid) {
-          try {
-            process.kill(pid, "SIGKILL");
-          } catch {}
-        }
-      }
-    } catch {}
+    console.warn(`Port ${PORT} busy, retrying in 400ms (attempt ${listenRetries}/10)...`);
     setTimeout(() => {
       try {
         server.close();
       } catch {}
-      server.listen(Number(PORT));
-    }, 800);
+      server.listen(Number(PORT), "0.0.0.0");
+    }, 400);
   } else {
     console.error("Server error:", err);
   }
 });
 
-server.listen(Number(PORT), () => {
+server.listen(Number(PORT), "0.0.0.0", () => {
   console.log(`PodkastUz Server running on port ${PORT} (PID ${process.pid})`);
 });
+
 

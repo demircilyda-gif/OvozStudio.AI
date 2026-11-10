@@ -171,6 +171,25 @@ export const SlimIconRail: React.FC<SlimIconRailProps> = ({
         setIsMobileDrawerOpen(false);
       },
     },
+    ...(isAdmin
+      ? [
+          {
+            id: 'admin',
+            labelUz: 'Admin · Analitika',
+            labelRu: 'Админ · Аналитика',
+            icon: (
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path d="M2.5 13.5h11M4.5 11V7.5M8 11V4.5M11.5 11V2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+            ),
+            active: activeTab === 'admin',
+            onClick: () => {
+              setActiveTab('admin');
+              setIsMobileDrawerOpen(false);
+            },
+          },
+        ]
+      : []),
   ];
 
   return (

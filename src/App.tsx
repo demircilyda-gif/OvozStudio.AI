@@ -22,6 +22,7 @@ import { AuthModal } from './components/AuthModal';
 import { PricingModal } from './components/PricingModal';
 import { LandingPage } from './components/LandingPage';
 import { DocsScreen } from './components/DocsScreen';
+import { AdminDashboardTab } from './components/AdminDashboardTab';
 import { useAuth } from './context/AuthContext';
 import { PODCAST_CATEGORIES } from './data/categories';
 import { PREBUILT_VOICE_PROFILES, USER_REPLICATED_VOICE, DEFAULT_USER_VOICE } from './data/voices';
@@ -63,6 +64,7 @@ export default function App() {
       if (h === '#cms') return 'cms';
       if (h === '#voices') return 'voices';
       if (h === '#docs') return 'docs';
+      if (h === '#admin') return 'admin';
     }
     return 'landing';
   });
@@ -99,6 +101,8 @@ export default function App() {
         setActiveTab('voices');
       } else if (h === '#docs') {
         setActiveTab('docs');
+      } else if (h === '#admin') {
+        setActiveTab('admin');
       } else if (h === '#landing') {
         setActiveTab('landing');
       }
@@ -118,6 +122,7 @@ export default function App() {
       else if (activeTab === 'cms') targetHash = '#cms';
       else if (activeTab === 'voices') targetHash = '#voices';
       else if (activeTab === 'docs') targetHash = '#docs';
+      else if (activeTab === 'admin') targetHash = '#admin';
 
       if (window.location.hash !== targetHash && !(activeTab === 'landing' && window.location.hash === '')) {
         window.history.replaceState(null, '', targetHash);
@@ -335,6 +340,7 @@ export default function App() {
     if (activeTab === 'cms') return lang === 'uz' ? 'MENING KUTUBXONAM' : 'МЕДИАТЕКА';
     if (activeTab === 'voices') return lang === 'uz' ? 'OVOZLAR LABORATORIYASI' : 'ЛАБОРАТОРИЯ ГОЛОСОВ';
     if (activeTab === 'docs') return 'API v1.0 STABLE';
+    if (activeTab === 'admin') return lang === 'uz' ? 'ADMIN & ANALITIKA' : 'АДМИН · АНАЛИТИКА';
     return lang === 'uz' ? 'STUDIYA' : 'СТУДИЯ';
   };
 
@@ -526,6 +532,21 @@ export default function App() {
 
               {/* Topbar Right Controls */}
               <div className="flex items-center gap-2.5 sm:gap-3">
+                {/* Direct Quick Access Button to Admin Analytics for Admins */}
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('admin')}
+                    className={`px-3 py-1.5 rounded-full text-xs font-mono font-bold transition-all flex items-center gap-1.5 cursor-pointer border whitespace-nowrap ${
+                      activeTab === 'admin'
+                        ? 'bg-[#0E7C86] text-white border-[#0E7C86] shadow-xs'
+                        : 'bg-[#0E7C86]/12 text-[#0A5A62] border-[#0E7C86]/35 hover:bg-[#0E7C86] hover:text-white'
+                    }`}
+                  >
+                    <span>{lang === 'uz' ? 'Admin · Analitika' : 'Админ · Аналитика'}</span>
+                  </button>
+                )}
+
                 {/* Direct Quick Access Button to SuperTaxi IVR Operator */}
                 <button
                   type="button"
@@ -846,6 +867,11 @@ export default function App() {
                       lang={lang}
                       onOpenPricingModal={openPricingModal}
                     />
+                  )}
+
+                  {/* TAB: ADMIN & ANALYTICS DASHBOARD */}
+                  {activeTab === 'admin' && (
+                    <AdminDashboardTab lang={lang} />
                   )}
                 </motion.div>
               </AnimatePresence>

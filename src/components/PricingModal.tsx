@@ -831,6 +831,32 @@ export const PricingModal: React.FC<PricingModalProps> = ({ lang }) => {
         {/* TAB 2: ADMIN ACTIVATION & MANAGEMENT PANEL (Only for Admin) */}
         {activeTab === 'admin' && isAdmin && (
           <div className="relative z-10 space-y-4">
+            {/* Full-Screen Admin & Analytics Dashboard Launcher */}
+            <div className="bg-[#161511] text-[#F4F1EA] rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="space-y-0.5">
+                <div className="text-xs font-bold text-white">
+                  {lang === 'uz'
+                    ? "To'liq Admin Panel, Generatsiyalar Tarixi va Analitika"
+                    : 'Полная Админ-панель, история генераций и аналитика'}
+                </div>
+                <p className="text-[11px] text-[#D8D3C6]">
+                  {lang === 'uz'
+                    ? 'Kim nima yaratgani, kredit sarfi statistikasi va CSV eksport'
+                    : 'Кто что генерировал, расход кредитов по инструментам и выгрузка CSV'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  closePricingModal();
+                  window.location.hash = '#admin';
+                }}
+                className="px-4 py-2 rounded-xl bg-[#0E7C86] hover:bg-[#0A5A62] text-white text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                {lang === 'uz' ? 'Analitika va Tarixni Ochish →' : 'Открыть аналитику и историю →'}
+              </button>
+            </div>
+
             {/* Quick Refresh & Admin Feedback */}
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-[#161511] flex items-center gap-1.5">
