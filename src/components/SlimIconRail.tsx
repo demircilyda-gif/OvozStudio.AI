@@ -10,7 +10,19 @@ import {
   X,
   Home,
 } from 'lucide-react';
-import { AppTab } from './Sidebar';
+
+export type AppTab =
+  | 'landing'
+  | 'studio'
+  | 'dialogue'
+  | 'voiceover'
+  | 'agent'
+  | 'exclusive'
+  | 'cms'
+  | 'voices'
+  | 'guide'
+  | 'docs'
+  | 'admin';
 
 interface SlimIconRailProps {
   activeTab: AppTab;

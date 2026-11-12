@@ -14,6 +14,7 @@ import {
   ArrowUpRight,
   Filter,
   ShieldCheck,
+  Key,
 } from 'lucide-react';
 import {
   AppUserProfile,
@@ -543,6 +544,15 @@ export const AdminDashboardTab: React.FC<AdminDashboardTabProps> = ({ lang }) =>
               </span>
             </button>
           </div>
+
+          <button
+            type="button"
+            onClick={() => window.dispatchEvent(new CustomEvent('open-api-key-modal'))}
+            className="px-3.5 py-2 rounded-xl bg-[#161511] hover:bg-[#0A5A62] text-[#F4F1EA] text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <Key className="w-3.5 h-3.5 text-[#5CC8CF]" />
+            <span>{lang === 'uz' ? 'Gemini API Kaliti' : 'Ключ Gemini API'}</span>
+          </button>
 
           <button
             type="button"

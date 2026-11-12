@@ -17,6 +17,7 @@ import {
 import { VoiceProfile } from '../types/podcast';
 import { getVoicePreviewUrl } from '../data/voicePreviews';
 import { VoiceGallery3D } from './VoiceGallery3D';
+import { useAuth } from '../context/AuthContext';
 
 interface VoicesManagerTabProps {
   voices: VoiceProfile[];
@@ -35,6 +36,7 @@ export const VoicesManagerTab: React.FC<VoicesManagerTabProps> = ({
   onDeleteVoice,
   lang,
 }) => {
+  const { isAdmin } = useAuth();
   const [testingVoiceId, setTestingVoiceId] = useState<string | null>(null);
   const [audioInstance, setAudioInstance] = useState<HTMLAudioElement | null>(null);
 
@@ -104,13 +106,15 @@ export const VoicesManagerTab: React.FC<VoicesManagerTabProps> = ({
           </p>
         </div>
 
-        <button
-          onClick={() => onAddOrEditVoice()}
-          className="flex items-center gap-2 px-5 py-3 rounded-full bg-[#161511] hover:bg-[#0A5A62] text-[#F4F1EA] font-medium text-sm shadow-[0_10px_20px_-10px_rgba(22,21,17,0.3)] transition-all cursor-pointer self-start sm:self-center"
-        >
-          <Plus className="w-4 h-4 stroke-[2.5]" />
-          <span>{lang === 'uz' ? 'Ovoz Qo\'shish / Import' : 'Добавить Голос'}</span>
-        </button>
+        {isAdmin && (
+          <button
+            onClick={() => onAddOrEditVoice()}
+            className="flex items-center gap-2 px-5 py-3 rounded-full bg-[#161511] hover:bg-[#0A5A62] text-[#F4F1EA] font-medium text-sm shadow-[0_10px_20px_-10px_rgba(22,21,17,0.3)] transition-all cursor-pointer self-start sm:self-center"
+          >
+            <Plus className="w-4 h-4 stroke-[2.5]" />
+            <span>{lang === 'uz' ? 'Ovoz Qo\'shish / Import' : 'Добавить Голос'}</span>
+          </button>
+        )}
       </div>
 
       {/* 3D Voice Gallery (React Three Fiber + Drei) */}
@@ -166,7 +170,7 @@ export const VoicesManagerTab: React.FC<VoicesManagerTabProps> = ({
                     </div>
                   </div>
 
-                  {voice.voiceId && (
+                  {isAdmin && voice.voiceId && (
                     <div className="text-[11px] font-mono text-[#0A5A62] bg-[#ECE7DB]/60 px-2.5 py-1 rounded-lg border border-[rgba(22,21,17,0.08)] flex items-center justify-between">
                       <span>ID:</span>
                       <span className="font-bold">{voice.voiceId}</span>
@@ -202,13 +206,15 @@ export const VoicesManagerTab: React.FC<VoicesManagerTabProps> = ({
                   </button>
 
                   <div className="flex items-center gap-1.5">
-                    <button
-                      onClick={() => onAddOrEditVoice(voice)}
-                      className="p-1.5 rounded-full bg-[#ECE7DB] hover:bg-[#161511] hover:text-[#F4F1EA] text-[#5D594E] transition-colors cursor-pointer"
-                      title="Tahrirlash"
-                    >
-                      <Edit2 className="w-3.5 h-3.5" />
-                    </button>
+                    {isAdmin && (
+                      <button
+                        onClick={() => onAddOrEditVoice(voice)}
+                        className="p-1.5 rounded-full bg-[#ECE7DB] hover:bg-[#161511] hover:text-[#F4F1EA] text-[#5D594E] transition-colors cursor-pointer"
+                        title="Tahrirlash"
+                      >
+                        <Edit2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
 
                     <button
                       onClick={() => onSelectVoice(voice.id)}

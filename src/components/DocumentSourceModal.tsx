@@ -36,7 +36,6 @@ interface DocumentSourceModalProps {
   }) => void;
   defaultFormat?: 'podcast' | 'interview' | 'voiceover';
   lang: 'uz' | 'ru';
-  onOpenNotebookLMGuide?: () => void;
 }
 
 export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
@@ -45,7 +44,6 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
   onApply,
   defaultFormat = 'podcast',
   lang,
-  onOpenNotebookLMGuide,
 }) => {
   const { isAuthenticated, requireAuth } = useAuth();
   const [activeTab, setActiveTab] = useState<'upload' | 'text' | 'link'>('upload');
@@ -258,16 +256,6 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
                   ? '1) NotebookLM’dagi konspektni "Maqola Matni"ga qo\'ying yoki 2) Audio Overview (mp3) faylini yuklang — OvozStudio darhol o\'zbekcha ovozlarda tayyorlab beradi.'
                   : '1) Скопируйте заметки из NotebookLM во вкладку "Текст" или 2) Загрузите MP3 файл — OvozStudio сразу создаст подкаст на чистом узбекском.'}
               </p>
-              {onOpenNotebookLMGuide && (
-                <button
-                  type="button"
-                  onClick={onOpenNotebookLMGuide}
-                  className="mt-1.5 text-[#0E7C86] hover:text-[#0A5A62] font-semibold flex items-center gap-1 cursor-pointer"
-                >
-                  <span>{lang === 'uz' ? "Yo'riqnomani ko'rish" : 'Открыть руководство'}</span>
-                  <ArrowRight className="w-3 h-3" />
-                </button>
-              )}
             </div>
           </div>
         </div>
@@ -349,11 +337,37 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
         {/* Tab 2: Text / Article */}
         {activeTab === 'text' && (
           <div className="space-y-2">
-            <label className="font-mono text-xs text-[#5D594E] uppercase tracking-wider block">
-              {lang === 'uz'
-                ? 'Maqola, qoralama yoki ma\'ruza matnini shu yerga qo\'ying:'
-                : 'Вставьте текст статьи, лекции или черновик:'}
-            </label>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label className="font-mono text-xs text-[#5D594E] uppercase tracking-wider block">
+                {lang === 'uz'
+                  ? 'Maqola, NotebookLM konspekti yoki ma\'ruza matni:'
+                  : 'Вставьте текст статьи, заметки NotebookLM или черновик:'}
+              </label>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSourceText(
+                      "O'zbekistonda sun'iy intellekt texnologiyalari bank, ta'lim, tibbiyot va davlat xizmatlarida keng joriy etilmoqda. 2026-yilga kelib mahalliy o'zbek tilidagi ovozli modellar va raqamli ekotizimlar biznes samaradorligini 40 foizga oshirdi. Asosiy yo'nalishlar: mijozlarga avtomatlashtirilgan ovozli xizmat ko'rsatish, podkast va media sanoatini rivojlantirish hamda yosh dasturchilar uchun yangi startap imkoniyatlari."
+                    )
+                  }
+                  className="text-[10.5px] px-2.5 py-1 rounded-full bg-[#0E7C86]/10 hover:bg-[#0E7C86]/20 text-[#0A5A62] border border-[#0E7C86]/25 transition-colors cursor-pointer font-medium"
+                >
+                  + {lang === 'uz' ? 'AI & Iqtisodiyot konspekti' : 'Шаблон: ИИ и экономика'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSourceText(
+                      "Inson miyasi uyqu davomida kun bo'yi to'plangan toksinlardan tozalanadi va xotirani mustahkamlaydi. Tadqiqotlarga ko'ra, kechki soat 23:00 dan oldin uxlash melatonin gormoni ishlab chiqarilishini 2 barobar yaxshilaydi, diqqatni jamlashni kuchaytiradi va surunkali charchoqni bartaraf etadi."
+                    )
+                  }
+                  className="text-[10.5px] px-2.5 py-1 rounded-full bg-[#161511]/8 hover:bg-[#161511]/15 text-[#161511] border border-[rgba(22,21,17,0.15)] transition-colors cursor-pointer font-medium"
+                >
+                  + {lang === 'uz' ? 'Ilmiy Audio Overview namunasi' : 'Шаблон: Научный обзор'}
+                </button>
+              </div>
+            </div>
             <textarea
               rows={6}
               value={sourceText}

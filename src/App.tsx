@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { SlimIconRail } from './components/SlimIconRail';
-import { AppTab } from './components/Sidebar';
+import { SlimIconRail, AppTab } from './components/SlimIconRail';
 import { ScriptCanvas } from './components/ScriptCanvas';
 import { VoiceConsole } from './components/VoiceConsole';
 import { StickyBottomBar } from './components/StickyBottomBar';
@@ -16,7 +15,6 @@ import { DialogueStudio } from './components/DialogueStudio';
 import { VoiceAgentTab } from './components/VoiceAgentTab';
 import { ExclusiveProductionHub } from './components/ExclusiveProductionHub';
 import { DocumentSourceModal } from './components/DocumentSourceModal';
-import { NotebookLMIntegrationModal } from './components/NotebookLMIntegrationModal';
 import { ApiKeyModal } from './components/ApiKeyModal';
 import { AuthModal } from './components/AuthModal';
 import { PricingModal } from './components/PricingModal';
@@ -238,18 +236,21 @@ export default function App() {
   const [editingVoice, setEditingVoice] = useState<VoiceProfile | null>(null);
   const [isGuideOpen, setIsGuideOpen] = useState(false);
   const [isDocumentModalOpen, setIsDocumentModalOpen] = useState(false);
-  const [isNotebookLMModalOpen, setIsNotebookLMModalOpen] = useState(false);
   const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
   const [documentModalFormat, setDocumentModalFormat] = useState<'podcast' | 'interview' | 'voiceover'>('podcast');
   const [interviewTopic, setInterviewTopic] = useState<string>('');
   const [interviewTurns, setInterviewTurns] = useState<any[] | undefined>(undefined);
 
-  // Global event listener for opening API key modal from anywhere in app
+  // Global event listener for opening API key modal (restricted strictly to admin accounts in production)
   useEffect(() => {
-    const handleOpenKeyModal = () => setIsApiKeyModalOpen(true);
+    const handleOpenKeyModal = () => {
+      if (isAdmin) {
+        setIsApiKeyModalOpen(true);
+      }
+    };
     window.addEventListener('open-api-key-modal', handleOpenKeyModal);
     return () => window.removeEventListener('open-api-key-modal', handleOpenKeyModal);
-  }, []);
+  }, [isAdmin]);
 
   // CMS Podcast Library
   const [podcasts, setPodcasts] = useState<CMSPodcastItem[]>(() => {
@@ -943,28 +944,17 @@ export default function App() {
         }}
         defaultFormat={documentModalFormat}
         lang={lang}
-        onOpenNotebookLMGuide={() => setIsNotebookLMModalOpen(true)}
-      />
-
-      <NotebookLMIntegrationModal
-        isOpen={isNotebookLMModalOpen}
-        onClose={() => setIsNotebookLMModalOpen(false)}
-        lang={lang}
-        onApplySnippet={(snippetText) => {
-          setScriptText(snippetText);
-          setActiveTab('studio');
-          setStudioMode('solo');
-          setIsDocumentModalOpen(true);
-        }}
       />
 
       <AuthModal lang={lang} />
       <PricingModal lang={lang} />
-      <ApiKeyModal
-        isOpen={isApiKeyModalOpen}
-        onClose={() => setIsApiKeyModalOpen(false)}
-        lang={lang}
-      />
+      {isAdmin && (
+        <ApiKeyModal
+          isOpen={isApiKeyModalOpen}
+          onClose={() => setIsApiKeyModalOpen(false)}
+          lang={lang}
+        />
+      )}
     </>
   );
 }

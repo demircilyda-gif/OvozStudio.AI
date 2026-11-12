@@ -15,6 +15,7 @@ export interface StoredUser {
   creditsRemaining: number;
   tier: string;
   role: string;
+  initialBonusGranted?: boolean;
   createdAt?: string;
   updatedAt?: string;
   photoURL?: string;
@@ -160,14 +161,20 @@ class LocalStore {
   }
 
   public saveUser(user: Partial<StoredUser> & { uid: string }): StoredUser {
-    const existing = this.data.users[user.uid] || {};
+    const existing = this.data.users[user.uid] || (user.email ? this.getUserByEmail(user.email) : null) || ({} as Partial<StoredUser>);
+    const hasExistingRecord = Boolean(existing && existing.uid);
+    const initialCredits = hasExistingRecord
+      ? (typeof existing.creditsRemaining === 'number' ? existing.creditsRemaining : 0)
+      : 5;
+
     const updated: StoredUser = {
       uid: user.uid,
       email: (user.email ?? existing.email ?? '').trim().toLowerCase(),
       displayName: user.displayName ?? existing.displayName ?? 'Foydalanuvchi',
-      creditsRemaining: typeof user.creditsRemaining === 'number' ? user.creditsRemaining : (existing.creditsRemaining ?? 5),
+      creditsRemaining: typeof user.creditsRemaining === 'number' ? user.creditsRemaining : initialCredits,
       tier: user.tier ?? existing.tier ?? 'free',
       role: user.role ?? existing.role ?? 'user',
+      initialBonusGranted: true,
       createdAt: user.createdAt ?? existing.createdAt ?? new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       photoURL: user.photoURL ?? existing.photoURL,

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AppTab } from './Sidebar';
+import { AppTab } from './SlimIconRail';
 import { connectAudioElement, getSharedAudioEnergy } from '../utils/audioReactive';
 import {
   Sparkles,

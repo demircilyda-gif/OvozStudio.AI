@@ -20,6 +20,7 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { AgentPersonaType, RealEstateLeadCard, TaxiOrderCard, TranscriptLine } from '../types/podcast';
+import { useAuth } from '../context/AuthContext';
 
 interface LiveCallCardProps {
   callStatus: 'idle' | 'calling' | 'connected' | 'ended';
@@ -76,6 +77,7 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
   callErrorMessage,
   onDismissNotice,
 }) => {
+  const { isAdmin } = useAuth();
   const [activeWordIdx, setActiveWordIdx] = useState(0);
   const [localInput, setLocalInput] = useState('');
   const transcriptScrollRef = useRef<HTMLDivElement>(null);
@@ -285,9 +287,10 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
             <span className="leading-snug">{callErrorMessage}</span>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            {(callErrorMessage.toLowerCase().includes('api key') ||
-              callErrorMessage.toLowerCase().includes('kalit') ||
-              callErrorMessage.toLowerCase().includes('истёк')) && (
+            {isAdmin &&
+              (callErrorMessage.toLowerCase().includes('api key') ||
+                callErrorMessage.toLowerCase().includes('kalit') ||
+                callErrorMessage.toLowerCase().includes('истёк')) && (
               <button
                 type="button"
                 onClick={() => window.dispatchEvent(new CustomEvent('open-api-key-modal'))}

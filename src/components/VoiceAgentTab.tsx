@@ -212,7 +212,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
   userClonedVoiceId,
   lang,
 }) => {
-  const { isAuthenticated, requireAuth, useCredit, syncCredits, logGeneration } = useAuth();
+  const { isAuthenticated, isAdmin, requireAuth, syncCredits, logGeneration } = useAuth();
   const shokhrukhVoiceId = userClonedVoiceId || 'voice_17raj9ewke3g';
 
   // Call Engine Mode: 'live' = Gemini 3.8 Live API WebSocket (~0.3s, 5 official voices), 'cloned' = Custom Cloned Voice via Gemini 3.8 Flash TTS
@@ -821,6 +821,17 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
 
   // Start Call (Route by selected engine: Realtime API or Cloned Voice)
   const handleStartCall = async () => {
+    if (
+      !requireAuth(
+        () => {},
+        lang === 'uz'
+          ? "Jonli AI qo'ng'iroqni boshlash uchun tizimga kiring va hisobingizda kamida 1 kredit bo'lishiga ishonch hosil qiling."
+          : 'Для запуска живого AI-звонка войдите в аккаунт и убедитесь, что на балансе есть минимум 1 кредит.'
+      )
+    ) {
+      return;
+    }
+
     cleanupCall();
     // Unlock 24kHz Live Output AudioContext synchronously inside user click gesture so confirmation audio never starts suspended
     try {
@@ -888,7 +899,9 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
           window.dispatchEvent(new CustomEvent('open-api-key-modal'));
         }
 
-        useCredit(1).catch(() => {});
+        if (typeof data.creditsRemaining === 'number') {
+          syncCredits(data.creditsRemaining);
+        }
         logGeneration('agent_call', 'AI Realtor Call', 1).catch(() => {});
 
         const greeting =
@@ -1006,7 +1019,9 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                 setCallDuration((prev) => prev + 1);
               }, 1000);
 
-              useCredit(1).catch(() => {});
+              if (typeof msg.creditsRemaining === 'number') {
+                syncCredits(msg.creditsRemaining);
+              }
               logGeneration(
                 'agent_call',
                 isSuperTaxiCall ? 'SuperTaksi IVR Live Call (0-Token WAV + gemini-3.8-live)' : 'AI Live Call (gemini-3.8-live)',
@@ -1562,9 +1577,10 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
               <span>{callErrorMessage}</span>
             </span>
             <div className="flex items-center gap-2 shrink-0">
-              {(callErrorMessage.toLowerCase().includes('api key') ||
-                callErrorMessage.toLowerCase().includes('kalit') ||
-                callErrorMessage.toLowerCase().includes('истёк')) && (
+              {isAdmin &&
+                (callErrorMessage.toLowerCase().includes('api key') ||
+                  callErrorMessage.toLowerCase().includes('kalit') ||
+                  callErrorMessage.toLowerCase().includes('истёк')) && (
                 <button
                   type="button"
                   onClick={() => window.dispatchEvent(new CustomEvent('open-api-key-modal'))}

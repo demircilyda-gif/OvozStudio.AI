@@ -1002,6 +1002,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           );
         }
 
+        if (typeof batchData.creditsRemaining === 'number') {
+          syncCredits(batchData.creditsRemaining);
+        }
+
         if (Array.isArray(batchData.turns)) {
           accumulatedTurns.push(...batchData.turns);
           setSynthesizedTurns([...accumulatedTurns]);
@@ -1035,7 +1039,6 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           setSynthesizedTurns(accumulatedTurns);
           setIsPlaying(false);
           setActiveTurnIndex(-1);
-          await useCredit(1);
           await logGeneration('podcast', topic || '2 Ovozli Intervyu', 1);
         } else {
           throw new Error(

@@ -768,39 +768,47 @@ export async function verifyRequestToken(token: string): Promise<{ uid: string; 
 }
 
 const requireAuth = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
-  const isAgentCallRoute = req.path.startsWith("/agent/start-call") || req.path.startsWith("/agent/call-turn");
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    if (isAgentCallRoute) {
-      (req as any).uid = `guest_${Date.now()}`;
-      (req as any).userEmail = "guest@ovozstudio.ai";
-      return next();
-    }
-    return res.status(401).json({ error: "unauthorized" });
+    return res.status(401).json({
+      error: "unauthorized",
+      message: "Ushbu amalni bajarish uchun tizimga kirish talab qilinadi.",
+      message_ru: "Для выполнения операции требуется авторизация.",
+    });
   }
 
   const token = authHeader.split("Bearer ")[1]?.trim();
   if (!token) {
-    if (isAgentCallRoute) {
-      (req as any).uid = `guest_${Date.now()}`;
-      (req as any).userEmail = "guest@ovozstudio.ai";
-      return next();
-    }
-    return res.status(401).json({ error: "unauthorized" });
+    return res.status(401).json({
+      error: "unauthorized",
+      message: "Avtorizatsiya tokeni topilmadi.",
+      message_ru: "Токен авторизации отсутствует.",
+    });
   }
 
   const verified = await verifyRequestToken(token);
   if (!verified || !verified.uid) {
-    if (isAgentCallRoute) {
-      (req as any).uid = `guest_${Date.now()}`;
-      (req as any).userEmail = "guest@ovozstudio.ai";
-      return next();
-    }
-    return res.status(401).json({ error: "unauthorized" });
+    return res.status(401).json({
+      error: "unauthorized",
+      message: "Sessiya muddati tugagan yoki yaroqsiz. Qaytadan kiring.",
+      message_ru: "Сессия истекла или недействительна. Пожалуйста, войдите снова.",
+    });
   }
 
   (req as any).uid = verified.uid;
   (req as any).userEmail = verified.email;
+  next();
+};
+
+const requireAdmin = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const userEmail = (req as any).userEmail;
+  if (!isEmailAdmin(userEmail)) {
+    return res.status(403).json({
+      error: "forbidden",
+      message: "Ushbu amal faqat tizim administratori uchun ruxsat etilgan.",
+      message_ru: "Это действие доступно только администратору системы.",
+    });
+  }
   next();
 };
 
@@ -831,6 +839,7 @@ export async function getUserBalance(uid: string, userEmail?: string): Promise<n
           creditsRemaining: firestoreCredits,
           tier: data?.tier || "free",
           role: data?.role || "user",
+          initialBonusGranted: true,
         });
         return firestoreCredits;
       }
@@ -843,7 +852,16 @@ export async function getUserBalance(uid: string, userEmail?: string): Promise<n
     return user.creditsRemaining;
   }
 
-  return 5;
+  // First-time authenticated user: provision once with 5 initial credits
+  const provisioned = localStore.saveUser({
+    uid,
+    email: userEmail || "",
+    creditsRemaining: 5,
+    tier: "free",
+    role: "user",
+    initialBonusGranted: true,
+  });
+  return provisioned.creditsRemaining;
 }
 
 export async function deductUserCredits(
@@ -855,13 +873,16 @@ export async function deductUserCredits(
     return { success: true, remaining: 999999 };
   }
 
+  // Ensure user record exists before deduction so first-time users start at 5 once
+  await getUserBalance(uid, userEmail);
+
   // Atomic deduction via Firestore transaction when available
   if (adminDb) {
     try {
       const userRef = adminDb.collection("users").doc(uid);
       const res = await adminDb.runTransaction(async (transaction: any) => {
         const userDoc = await transaction.get(userRef);
-        let currentBalance = 5;
+        let currentBalance = localStore.getUser(uid)?.creditsRemaining ?? 5;
         if (userDoc.exists) {
           const data = userDoc.data();
           if (typeof data?.creditsRemaining === "number") {
@@ -876,6 +897,7 @@ export async function deductUserCredits(
           userRef,
           {
             creditsRemaining: newBalance,
+            initialBonusGranted: true,
             updatedAt: new Date().toISOString(),
           },
           { merge: true }
@@ -888,6 +910,7 @@ export async function deductUserCredits(
         uid,
         email: userEmail || "",
         creditsRemaining: res.remaining,
+        initialBonusGranted: true,
       });
 
       return res;
@@ -914,6 +937,7 @@ export async function addCreditsToUserServer(
     email: userEmail,
     creditsRemaining: updatedCredits,
     tier: tier || (isEmailAdmin(userEmail) ? "unlimited" : "pro"),
+    initialBonusGranted: true,
   });
 
   if (adminDb) {
@@ -922,6 +946,7 @@ export async function addCreditsToUserServer(
         {
           creditsRemaining: updatedCredits,
           tier: tier || (isEmailAdmin(userEmail) ? "unlimited" : "pro"),
+          initialBonusGranted: true,
           updatedAt: new Date().toISOString(),
         },
         { merge: true }
@@ -936,7 +961,7 @@ export async function addCreditsToUserServer(
 
 /**
  * Middleware: requireCreditBalance(cost)
- * Verifies that the user has at least `cost` credits available BEFORE touching Google Gemini.
+ * Verifies that the user is authenticated and has at least `cost` credits available BEFORE touching Google Gemini.
  * If balance is insufficient, immediately terminates with HTTP 402 Payment Required.
  */
 export const requireCreditBalance = (
@@ -947,35 +972,21 @@ export const requireCreditBalance = (
     let userEmail = (req as any).userEmail;
 
     if (!uid) {
-      const isAgentCallRoute = req.path.startsWith("/agent/start-call") || req.path.startsWith("/agent/call-turn");
       const authHeader = req.headers.authorization;
       if (!authHeader || !authHeader.startsWith("Bearer ")) {
-        if (isAgentCallRoute) {
-          uid = `guest_${Date.now()}`;
-          userEmail = "guest@ovozstudio.ai";
-          (req as any).uid = uid;
-          (req as any).userEmail = userEmail;
-        } else {
-          return res.status(401).json({
-            error: "unauthorized",
-            message: "Ushbu operatsiyani amalga oshirish uchun tizimga kirish talab qilinadi.",
-            message_ru: "Для выполнения операции требуется авторизация.",
-          });
-        }
-      } else {
-        const token = authHeader.split("Bearer ")[1]?.trim();
-        const verified = token ? await verifyRequestToken(token) : null;
-        if (verified) {
-          uid = verified.uid;
-          userEmail = verified.email;
-          (req as any).uid = uid;
-          (req as any).userEmail = userEmail;
-        } else if (isAgentCallRoute) {
-          uid = `guest_${Date.now()}`;
-          userEmail = "guest@ovozstudio.ai";
-          (req as any).uid = uid;
-          (req as any).userEmail = userEmail;
-        }
+        return res.status(401).json({
+          error: "unauthorized",
+          message: "Ushbu operatsiyani amalga oshirish uchun tizimga kirish talab qilinadi.",
+          message_ru: "Для выполнения операции требуется авторизация.",
+        });
+      }
+      const token = authHeader.split("Bearer ")[1]?.trim();
+      const verified = token ? await verifyRequestToken(token) : null;
+      if (verified && verified.uid) {
+        uid = verified.uid;
+        userEmail = verified.email;
+        (req as any).uid = uid;
+        (req as any).userEmail = userEmail;
       }
     }
 
@@ -1108,7 +1119,7 @@ const geminiConcurrencyLimitMiddleware = (req: express.Request, res: express.Res
 // Apply Global IP Rate Limiter
 app.use("/api", globalLimiter);
 
-// Enforce Server Authentication on ALL /api/* routes EXCEPT public endpoints (health, billing config, stripe webhook, gemini key status/update, and session verify)
+// Enforce Server Authentication on ALL /api/* routes EXCEPT public endpoints (health, billing config, webhooks, gemini status, and session verify)
 app.use("/api", (req, res, next) => {
   const fullPath = req.originalUrl.split("?")[0];
   if (
@@ -1121,8 +1132,7 @@ app.use("/api", (req, res, next) => {
     (req.method === "POST" && (
       fullPath === "/api/billing/webhook" ||
       fullPath === "/api/billing/payme-webhook" ||
-      fullPath === "/api/billing/click-webhook" ||
-      fullPath === "/api/gemini/update-key"
+      fullPath === "/api/billing/click-webhook"
     )) ||
     (req.method === "GET" && fullPath.startsWith("/api/billing/verify-session/"))
   ) {
@@ -1181,7 +1191,7 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
-// Check Gemini API Key Status
+// Check Gemini API Key Status (never exposes secret key or prefix publicly)
 app.get("/api/gemini/status", async (_req, res) => {
   try {
     const currentKey = resolveActiveGeminiKey();
@@ -1205,7 +1215,6 @@ app.get("/api/gemini/status", async (_req, res) => {
         configured: true,
         valid: true,
         isExpired: false,
-        keyPrefix: currentKey.slice(0, 8) + "...",
         message: "Gemini API kaliti faol va muvaffaqiyatli ishlayapti",
       });
     } catch (apiErr: any) {
@@ -1219,7 +1228,6 @@ app.get("/api/gemini/status", async (_req, res) => {
         configured: true,
         valid: false,
         isExpired,
-        keyPrefix: currentKey.slice(0, 8) + "...",
         message: isExpired
           ? "Gemini API kaliti muddati tugagan. Iltimos, yangi kalit kiriting."
           : apiErr?.message || "Gemini API bilan ulanishda xatolik",
@@ -1230,8 +1238,8 @@ app.get("/api/gemini/status", async (_req, res) => {
   }
 });
 
-// Update & Validate Gemini API Key
-app.post("/api/gemini/update-key", async (req, res) => {
+// Update & Validate Gemini API Key (Strictly Admin-Only)
+app.post("/api/gemini/update-key", requireAuth, requireAdmin, async (req, res) => {
   try {
     const { apiKey } = req.body;
     if (!apiKey || typeof apiKey !== "string" || !apiKey.trim()) {
@@ -1299,7 +1307,6 @@ app.post("/api/gemini/update-key", async (req, res) => {
     return res.json({
       success: true,
       valid: true,
-      keyPrefix: cleanKey.slice(0, 8) + "...",
       message: "Gemini API kaliti muvaffaqiyatli saqlandi va faollashtirildi! Barcha ovoz va qo'ng'iroq funksiyalari faol.",
     });
   } catch (err: any) {
@@ -2417,6 +2424,26 @@ app.post("/api/billing/create-uz-checkout", requireAuth, async (req, res) => {
 app.post("/api/billing/payme-webhook", async (req, res) => {
   try {
     const { method, params, id } = req.body || {};
+
+    // Verify Payme Merchant Key via Basic Auth header
+    const paymeMerchantKey = process.env.PAYME_MERCHANT_KEY;
+    if (!paymeMerchantKey) {
+      return res.status(401).json({
+        error: { code: -32504, message: "Payme Merchant Key sozlanmagan (Unauthorized)" },
+        id,
+      });
+    }
+    const authHeader = req.headers.authorization || "";
+    const expectedToken = Buffer.from(`Paycom:${paymeMerchantKey}`).toString("base64");
+    const expectedTokenAlt = Buffer.from(paymeMerchantKey).toString("base64");
+    const rawBearer = authHeader.replace(/^Basic\s+/i, "").trim();
+    if (rawBearer !== expectedToken && rawBearer !== expectedTokenAlt && authHeader !== paymeMerchantKey) {
+      return res.status(401).json({
+        error: { code: -32504, message: "Avtorizatsiya xatosi (Invalid Payme signature)" },
+        id,
+      });
+    }
+
     const account = params?.account || {};
     const orderId = account.order_id || `payme_${Date.now()}`;
     const uid = account.uid || "";
@@ -2466,11 +2493,34 @@ app.post("/api/billing/click-webhook", async (req, res) => {
   try {
     const {
       click_trans_id,
+      service_id,
       merchant_trans_id,
+      merchant_prepare_id,
+      amount,
       action,
+      sign_time,
+      sign_string,
       additional_param3,
       additional_param4,
     } = req.body || {};
+
+    const clickSecretKey = process.env.CLICK_SECRET_KEY;
+    if (!clickSecretKey || !sign_string) {
+      return res.status(401).json({
+        error: -1,
+        error_note: "SIGN CHECK FAILED! Click Secret Key sozlanmagan yoki imzo yo'q.",
+      });
+    }
+
+    const crypto = await import("crypto");
+    const expectedSignSource = `${click_trans_id || ""}${service_id || ""}${clickSecretKey}${merchant_trans_id || ""}${Number(action) === 1 ? merchant_prepare_id || "" : ""}${amount || ""}${action || ""}${sign_time || ""}`;
+    const expectedMd5 = crypto.createHash("md5").update(expectedSignSource).digest("hex");
+    if (sign_string !== expectedMd5 && sign_string !== clickSecretKey) {
+      return res.status(401).json({
+        error: -1,
+        error_note: "SIGN CHECK FAILED!",
+      });
+    }
 
     // Extract uid and planId from merchant_trans_id (`ovoz_${uid}_${planId}_${ts}`) or additional params
     let uid = additional_param3 || "";
@@ -2569,10 +2619,15 @@ app.get("/api/voices/:id", async (req, res) => {
   }
 });
 
-// Delete a custom stored voice
-app.delete("/api/voices/:id", async (req, res) => {
+// Delete a custom stored voice (Admin-only, protects primary system voice)
+app.delete("/api/voices/:id", requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
+    if (id === "voice_17raj9ewke3g") {
+      return res.status(403).json({
+        error: "Asosiy tizim ovozini (Sardor — voice_17raj9ewke3g) o'chirish taqiqlangan.",
+      });
+    }
     const result = await ai.voices.delete(id);
     res.json({ success: true, result });
   } catch (error: any) {
@@ -2583,8 +2638,8 @@ app.delete("/api/voices/:id", async (req, res) => {
   }
 });
 
-// Create Voice Replication (official Gemini 3.8 Voice Replication API)
-app.post("/api/voices/replicate", async (req, res) => {
+// Create Voice Replication (Admin-only official Gemini 3.8 Voice Replication API)
+app.post("/api/voices/replicate", requireAdmin, async (req, res) => {
   try {
     const {
       displayName = "Mening Ovoz Nusxam",
@@ -2659,8 +2714,8 @@ app.post("/api/voices/replicate", async (req, res) => {
   }
 });
 
-// Create Voice Design (natural-language voice description)
-app.post("/api/voices/design", requireCreditBalance(1), async (req, res) => {
+// Create Voice Design (Admin-only natural-language voice description)
+app.post("/api/voices/design", requireAdmin, requireCreditBalance(1), async (req, res) => {
   try {
     const { displayName, personaPrompt, gender = "male" } = req.body;
 
@@ -3416,7 +3471,7 @@ app.post("/api/podcast/synthesize", requireCreditBalance(1), async (req, res) =>
 });
 
 // Analyze user's voice sample with acoustic breakdown
-app.post("/api/voice/analyze-sample", async (req, res) => {
+app.post("/api/voice/analyze-sample", requireCreditBalance(1), async (req, res) => {
   try {
     const {
       audioBase64,
@@ -3657,7 +3712,7 @@ QAT'IY JSON FORMATIDA QAYTARING:
 /**
  * Endpoint to analyze video links (YouTube, Shorts, Instagram Reels, TikTok, Direct MP4)
  */
-app.post("/api/voiceover/fetch-media-url", async (req, res) => {
+app.post("/api/voiceover/fetch-media-url", requireCreditBalance(1), async (req, res) => {
   try {
     const { url } = req.body;
     if (!url || typeof url !== "string") {
@@ -3887,7 +3942,7 @@ Qat'iy JSON formatida qaytaring:
  * Full Media Dubbing Pipeline Endpoint:
  * url -> download -> ffmpeg audio extraction -> ffprobe duration check -> verbatim STT + diarization -> Uzbek translation
  */
-app.post("/api/voiceover/process-pipeline", async (req, res) => {
+app.post("/api/voiceover/process-pipeline", requireCreditBalance(1), async (req, res) => {
   try {
     const { url, mediaBase64, mimeType, videoTitle } = req.body;
     if (!url && !mediaBase64) {
@@ -3922,7 +3977,7 @@ app.get("/api/voiceover/pipeline-logs", (req, res) => {
  * Translate user's provided original speech text into synchronized Uzbek with timecodes.
  * Guarantees NO hallucination: strictly translates the speaker's real words.
  */
-app.post("/api/voiceover/translate-custom-speech", async (req, res) => {
+app.post("/api/voiceover/translate-custom-speech", requireCreditBalance(1), async (req, res) => {
   try {
     const { originalText, videoTitle = "Video Dublyaji", targetDuration = "45s" } = req.body;
     if (!originalText || !originalText.trim()) {
@@ -3971,7 +4026,7 @@ Qat'iy JSON formatida qaytaring:
 /**
  * Explicitly generate or regenerate timecoded dubbing scenes and subtitles for any video / topic.
  */
-app.post("/api/voiceover/generate-video-subtitles", async (req, res) => {
+app.post("/api/voiceover/generate-video-subtitles", requireCreditBalance(1), async (req, res) => {
   try {
     const {
       topic = "Video Dublyaji",
@@ -5879,7 +5934,7 @@ app.get("/api/agent/supertaxi-greeting.wav", async (_req, res) => {
 });
 
 // Start interactive agent call
-app.post("/api/agent/start-call", async (req, res) => {
+app.post("/api/agent/start-call", requireCreditBalance(1), async (req, res) => {
   try {
     const {
       persona = "tashkent_real_estate",
@@ -5960,6 +6015,15 @@ app.post("/api/agent/start-call", async (req, res) => {
       }
     }
 
+    let creditsRemaining = (req as any).userBalance;
+    if (typeof (req as any).deductCredits === "function") {
+      try {
+        creditsRemaining = await (req as any).deductCredits(1);
+      } catch (deductErr) {
+        console.warn("Start call credit deduction notice:", deductErr);
+      }
+    }
+
     res.json({
       sessionId: `call-${Date.now()}`,
       persona,
@@ -5968,6 +6032,7 @@ app.post("/api/agent/start-call", async (req, res) => {
       audioBase64,
       fallbackSpeech,
       errorNotice,
+      creditsRemaining,
     });
   } catch (error: any) {
     console.error("Error starting agent call:", error);
@@ -6289,7 +6354,7 @@ Return strict JSON:
 });
 
 // Comprehensive Post-Call Real Estate CRM Dossier & Matching Properties
-app.post("/api/agent/generate-summary", async (req, res) => {
+app.post("/api/agent/generate-summary", requireCreditBalance(1), async (req, res) => {
   try {
     const { transcriptLines = [], leadCard = {}, language = "uz" } = req.body;
 
@@ -6851,12 +6916,21 @@ server.on("upgrade", async (req, socket, head) => {
         }
       }
 
-      // Guest access allowed for live demonstration / calls without login barrier
-      const effectiveUid = verified?.uid || `guest_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      const effectiveEmail = verified?.email || "guest@ovozstudio.ai";
+      if (!verified || !verified.uid) {
+        socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+        socket.destroy();
+        return;
+      }
 
-      (req as any).uid = effectiveUid;
-      (req as any).userEmail = effectiveEmail;
+      const balance = await getUserBalance(verified.uid, verified.email);
+      if (!isEmailAdmin(verified.email) && balance < 1) {
+        socket.write("HTTP/1.1 402 Payment Required\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+
+      (req as any).uid = verified.uid;
+      (req as any).userEmail = verified.email || "";
       wss.handleUpgrade(req, socket, head, (ws) => {
         wss.emit("connection", ws, req);
       });
@@ -6868,7 +6942,7 @@ server.on("upgrade", async (req, socket, head) => {
   }
 });
 
-wss.on("connection", (clientWs: WebSocket) => {
+wss.on("connection", (clientWs: WebSocket, req: http.IncomingMessage) => {
   console.log("New Gemini Live Call client connected");
   let liveSession: any = null;
   let isFallbackMode = false;
@@ -7200,8 +7274,34 @@ Muloqot tili: ${language === "ru" ? "Rus tili (естественный живо
             },
           });
 
+          // Deduct 1 credit atomically on the server and log generation when Gemini Live session connects
+          let creditsRemaining: number | undefined;
+          try {
+            const wsUid = (req as any)?.uid;
+            const wsEmail = (req as any)?.userEmail;
+            if (wsUid) {
+              const deductRes = await deductUserCredits(wsUid, wsEmail, 1);
+              creditsRemaining = deductRes.remaining;
+              const storedU = localStore.getUser(wsUid);
+              localStore.logGeneration(wsUid, {
+                id: `gen_live_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                userId: wsUid,
+                userEmail: (wsEmail || storedU?.email || "").trim().toLowerCase(),
+                type: "agent_call",
+                title: `Jonli AI Qo'ng'iroq (${persona})`,
+                creditsCost: isEmailAdmin(wsEmail) ? 0 : 1,
+                status: "completed",
+                voiceName: liveVoice,
+                details: (topic || persona).slice(0, 240),
+                createdAt: new Date().toISOString(),
+              });
+            }
+          } catch (deductErr) {
+            console.warn("Live call server credit deduction notice:", deductErr);
+          }
+
           // Confirm connection to client
-          clientWs.send(JSON.stringify({ type: "connected", voiceUsed: liveVoice }));
+          clientWs.send(JSON.stringify({ type: "connected", voiceUsed: liveVoice, creditsRemaining }));
 
           // Only trigger AI greeting if client did NOT play a 0-token pre-recorded WAV greeting
           if (!skipInitialGreeting) {
