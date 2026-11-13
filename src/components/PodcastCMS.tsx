@@ -33,6 +33,8 @@ export interface CMSPodcastItem extends GeneratedPodcast {
   tags: string[];
   status: 'published' | 'draft';
   episodeNumber?: number;
+  ownerUid?: string;
+  ownerEmail?: string;
 }
 
 interface PodcastCMSProps {

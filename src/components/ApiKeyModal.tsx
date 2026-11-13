@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Key, CheckCircle2, AlertTriangle, ShieldCheck, RefreshCw, X, Eye, EyeOff, ExternalLink } from 'lucide-react';
+import { authFetch } from '../utils/authFetch';
 
 interface ApiKeyModalProps {
   isOpen: boolean;
@@ -23,6 +24,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
     valid: boolean;
     isExpired?: boolean;
     keyPrefix?: string;
+    source?: string;
     message?: string;
   } | null>(null);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -59,15 +61,20 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
     setFeedback(null);
 
     try {
-      const res = await fetch('/api/gemini/update-key', {
+      const res = await authFetch('/api/gemini/update-key', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ apiKey: apiKeyInput.trim() }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(data.error || (lang === 'uz' ? "Kalitni saqlashda xatolik" : "Ошибка сохранения ключа"));
+        throw new Error(
+          (lang === 'ru' && data.message_ru) ||
+            data.message ||
+            data.error ||
+            (lang === 'uz' ? "Kalitni saqlashda xatolik" : "Ошибка сохранения ключа")
+        );
       }
 
       setFeedback({
@@ -146,7 +153,13 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                   : (lang === 'uz' ? "Tekshirilmagan / O'rnatilmagan" : "Не настроен")}
               </span>
               <span className="text-[#5D594E] font-mono text-[11px]">
-                {keyStatus?.keyPrefix ? `Prefiks: ${keyStatus.keyPrefix}` : "Kalit topilmadi"}
+                {keyStatus?.keyPrefix
+                  ? `Prefiks: ${keyStatus.keyPrefix}`
+                  : keyStatus?.valid
+                  ? (lang === 'uz' ? "Server muhitida faol sozlangan" : "Активен в конфигурации сервера")
+                  : keyStatus?.configured
+                  ? (keyStatus?.message || (lang === 'uz' ? "Kalit tekshiruvi muvaffaqiyatsiz" : "Ошибка проверки ключа"))
+                  : (lang === 'uz' ? "Kalit topilmadi" : "Ключ не найден")}
               </span>
             </div>
           </div>

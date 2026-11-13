@@ -356,7 +356,8 @@ export const ScriptCanvas: React.FC<ScriptCanvasProps> = ({
   // Enrich Script with Emotions & Living Breathing Speech
   const handleEnrichScriptWithEmotions = async () => {
     if (!scriptText.trim()) {
-      alert(lang === 'uz' ? "Avval matn kiriting yoki yozing!" : "Сначала введите или напишите текст!");
+      setEnrichNotice(lang === 'uz' ? "Avval matn kiriting yoki yozing!" : "Сначала введите или напишите текст!");
+      setTimeout(() => setEnrichNotice(null), 4000);
       return;
     }
 
@@ -444,7 +445,7 @@ export const ScriptCanvas: React.FC<ScriptCanvasProps> = ({
         setTimeout(() => setEnrichNotice(null), 5000);
       }
     } catch (e: any) {
-      alert(`Xatolik: ${e.message}`);
+      setEnrichNotice(`Xatolik: ${e.message}`);
     } finally {
       setIsGeneratingScript(false);
     }

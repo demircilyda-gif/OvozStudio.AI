@@ -5,17 +5,26 @@
       "description": "Registered user profile with role, subscription tier and generation quota",
       "type": "object",
       "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID"
+        },
         "email": {
           "type": "string",
           "format": "email",
+          "maxLength": 254,
           "description": "User email address"
         },
         "displayName": {
           "type": "string",
+          "maxLength": 120,
           "description": "User display name"
         },
         "photoURL": {
           "type": "string",
+          "maxLength": 1024,
           "description": "Avatar URL"
         },
         "role": {
@@ -25,21 +34,27 @@
         },
         "tier": {
           "type": "string",
-          "enum": ["free", "pro", "unlimited"],
+          "enum": ["free", "starter", "pro", "unlimited"],
           "description": "Subscription tier"
         },
         "creditsRemaining": {
           "type": "number",
           "description": "Remaining generation credits"
         },
+        "initialBonusGranted": {
+          "type": "boolean",
+          "description": "Whether the one-time 5-credit signup bonus has been granted"
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
+          "maxLength": 64,
           "description": "Account creation timestamp"
         },
         "updatedAt": {
           "type": "string",
           "format": "date-time",
+          "maxLength": 64,
           "description": "Last update timestamp"
         }
       },
@@ -50,21 +65,30 @@
       "description": "Log of generated audio, podcast, voiceover or dubbing",
       "type": "object",
       "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Generation record ID"
+        },
         "userId": {
           "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
           "description": "UID of owner user"
         },
         "userEmail": {
           "type": "string",
+          "maxLength": 254,
           "description": "Email of owner user"
         },
         "type": {
           "type": "string",
-          "enum": ["podcast", "voiceover", "tts", "dubbing", "agent_call"],
+          "enum": ["podcast", "voiceover", "tts", "dubbing", "agent_call", "cover"],
           "description": "Type of generation"
         },
         "title": {
           "type": "string",
+          "maxLength": 240,
           "description": "Title or topic of generation"
         },
         "creditsCost": {
@@ -76,13 +100,174 @@
           "enum": ["completed", "failed"],
           "description": "Execution status"
         },
+        "voiceName": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Selected voice name"
+        },
+        "durationSec": {
+          "type": "number",
+          "description": "Generated audio duration in seconds"
+        },
+        "details": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "Additional generation metadata"
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
+          "maxLength": 64,
           "description": "Creation timestamp"
         }
       },
       "required": ["userId", "type", "createdAt"]
+    },
+    "PaymentRequest": {
+      "title": "PaymentRequest",
+      "description": "Manual or gateway payment verification request",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "userEmail": {
+          "type": "string",
+          "maxLength": 254
+        },
+        "planId": {
+          "type": "string",
+          "enum": ["starter", "pro", "unlimited"]
+        },
+        "planName": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "price": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "credits": {
+          "type": "number"
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["starter", "pro", "unlimited"]
+        },
+        "paymentMethod": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "receiptInfo": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "approved", "rejected"]
+        },
+        "createdAt": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": ["userId", "planId", "status", "createdAt"]
+    },
+    "PendingCreditGrant": {
+      "title": "PendingCreditGrant",
+      "description": "Admin-assigned credit grant awaiting user login",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "maxLength": 254
+        },
+        "credits": {
+          "type": "number"
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["free", "pro", "unlimited"]
+        },
+        "grantedBy": {
+          "type": "string",
+          "maxLength": 254
+        },
+        "updatedAt": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": ["email", "credits"]
+    },
+    "VipRequest": {
+      "title": "VipRequest",
+      "description": "Custom VIP audio/podcast production order submitted by a user",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "userEmail": {
+          "type": "string",
+          "maxLength": 254
+        },
+        "projectTitle": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "format": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "targetDuration": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "contactPhone": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "brief": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "status": {
+          "type": "string",
+          "enum": ["new", "in_progress", "completed", "cancelled"]
+        },
+        "adminNotes": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "updatedAt": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": ["userId", "projectTitle", "status", "createdAt"]
     }
   },
   "firestore": {
@@ -97,6 +282,24 @@
         "$ref": "#/entities/Generation"
       },
       "description": "Generations history belonging to user"
+    },
+    "/paymentRequests/{requestId}": {
+      "schema": {
+        "$ref": "#/entities/PaymentRequest"
+      },
+      "description": "Payment verification requests"
+    },
+    "/pendingCreditGrants/{email}": {
+      "schema": {
+        "$ref": "#/entities/PendingCreditGrant"
+      },
+      "description": "Pending credit grants assigned by admin"
+    },
+    "/vipRequests/{requestId}": {
+      "schema": {
+        "$ref": "#/entities/VipRequest"
+      },
+      "description": "Custom VIP studio production orders"
     }
   }
 }

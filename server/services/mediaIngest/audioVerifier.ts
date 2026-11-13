@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import { MediaStreamInspection } from "./types.js";
+import type { MediaStreamInspection } from "./types.ts";
 
 /**
  * Sanitizes command output and error logs by masking tokens, cookies, auth headers, and sigs.

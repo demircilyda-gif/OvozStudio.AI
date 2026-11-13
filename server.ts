@@ -6,17 +6,34 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import Stripe from "stripe";
-import { GoogleGenAI, Modality, Type } from "@google/genai";
+import { GoogleGenAI, Modality, Type, ThinkingLevel, EndSensitivity, StartSensitivity } from "@google/genai";
 import { YoutubeTranscript } from "youtube-transcript";
-import { extractMediaAudio } from "./server/services/mediaExtractor.js";
-import { runMediaDubbingPipeline, getPipelineLogs } from "./server/services/mediaPipeline.js";
-import { normalizeUzbekSpeech } from "./src/utils/uzbekNormalizer.js";
+import { extractMediaAudio } from "./server/services/mediaExtractor.ts";
+import { runMediaDubbingPipeline, getPipelineLogs } from "./server/services/mediaPipeline.ts";
+import { normalizeUzbekSpeech } from "./src/utils/uzbekNormalizer.ts";
+import { resolveCanonicalBaseVoice } from "./src/data/voices.ts";
 import { getApps, initializeApp, getApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
 import rateLimit from "express-rate-limit";
-import { localStore } from "./server/localStore.js";
-import { isEmailAdmin, getAdminEmails } from "./server/authUtils.js";
+import multer from "multer";
+import { localStore } from "./server/localStore.ts";
+import { isEmailAdmin, getAdminEmails } from "./server/authUtils.ts";
+import {
+  parseAndTranslateVerbatimStoryboard,
+  applyMildAtempoPcm,
+  assembleStrictTimecodeMasterPcm,
+  generateSrtFromTurns,
+  muxDubbedAudioWithVideoFile,
+  sanitizeDocumentedTtsTags,
+  countSyllables,
+} from "./server/services/verbatimStoryboardService.ts";
+
+const RUNTIME_ENV_KEYS = {
+  API_KEY: (process.env.API_KEY || "").trim(),
+  GEMINI_API_KEY: (process.env.GEMINI_API_KEY || "").trim(),
+  GOOGLE_API_KEY: (process.env.GOOGLE_API_KEY || "").trim(),
+};
 
 dotenv.config();
 
@@ -55,19 +72,37 @@ console.log(
 // Shared Gemini client with telemetry header & dynamic API key reload
 let cachedAi: GoogleGenAI | null = null;
 let lastUsedKey = "";
+const disabledExpiredKeys = new Set<string>();
+
+export function isGeminiKeyErrorMessage(raw: any): boolean {
+  const msg = String(raw?.message || raw || "").toLowerCase();
+  return (
+    msg.includes("api key expired") ||
+    msg.includes("api_key_invalid") ||
+    msg.includes("please renew the api key") ||
+    msg.includes("invalid api key") ||
+    msg.includes("api key not valid") ||
+    msg.includes("unauthenticated") ||
+    (msg.includes("permission_denied") && msg.includes("api key"))
+  );
+}
 
 export function resolveActiveGeminiKey(customKey?: string): string {
   try {
     const envPath = path.resolve(__dirname, ".env");
     if (fs.existsSync(envPath)) {
-      dotenv.config({ path: envPath, override: true });
+      // Do NOT override runtime Secrets injected into process.env
+      dotenv.config({ path: envPath, override: false });
     }
   } catch (e) {}
 
-  const candidates = [
+  const rawCandidates = [
     customKey,
     process.env.CUSTOM_GEMINI_API_KEY,
     localStore.getGeminiApiKey(),
+    RUNTIME_ENV_KEYS.API_KEY,
+    RUNTIME_ENV_KEYS.GEMINI_API_KEY,
+    RUNTIME_ENV_KEYS.GOOGLE_API_KEY,
     process.env.API_KEY,
     process.env.GEMINI_API_KEY,
     process.env.GOOGLE_API_KEY,
@@ -75,11 +110,31 @@ export function resolveActiveGeminiKey(customKey?: string): string {
     .map((k) => (k || "").trim())
     .filter(Boolean);
 
-  // Always prefer a permanent Google AI Studio key (AIza...) over an ephemeral session token (AQ....)
-  const permanentKey = candidates.find((k) => k.startsWith("AIza"));
+  const uniqueCandidates = Array.from(new Set(rawCandidates));
+  const activeCandidates = uniqueCandidates.filter((k) => !disabledExpiredKeys.has(k));
+  const pool = activeCandidates.length > 0 ? activeCandidates : uniqueCandidates;
+
+  // Prefer permanent Google AI Studio key (AIza...) over ephemeral session token (AQ...)
+  const permanentKey = pool.find((k) => k.startsWith("AIza"));
   if (permanentKey) return permanentKey;
 
-  return candidates[0] || "";
+  return pool[0] || "";
+}
+
+export function markGeminiKeyExpiredAndFallback(badKey?: string): string {
+  const cleanBad = (badKey || lastUsedKey || "").trim();
+  if (cleanBad) {
+    disabledExpiredKeys.add(cleanBad);
+    if (process.env.CUSTOM_GEMINI_API_KEY?.trim() === cleanBad) {
+      delete process.env.CUSTOM_GEMINI_API_KEY;
+    }
+    if (localStore.getGeminiApiKey()?.trim() === cleanBad) {
+      localStore.clearGeminiApiKey();
+    }
+  }
+  cachedAi = null;
+  lastUsedKey = "";
+  return resolveActiveGeminiKey();
 }
 
 export function getGeminiClient(customKey?: string): GoogleGenAI {
@@ -89,6 +144,7 @@ export function getGeminiClient(customKey?: string): GoogleGenAI {
     lastUsedKey = currentKey;
     cachedAi = new GoogleGenAI({
       apiKey: currentKey,
+      apiVersion: "v1beta",
       httpOptions: {
         headers: {
           "User-Agent": "aistudio-build",
@@ -102,9 +158,8 @@ export function getGeminiClient(customKey?: string): GoogleGenAI {
 export function resetGeminiClient(newKey?: string) {
   if (newKey) {
     const clean = newKey.trim();
+    disabledExpiredKeys.delete(clean);
     process.env.CUSTOM_GEMINI_API_KEY = clean;
-    process.env.GEMINI_API_KEY = clean;
-    process.env.API_KEY = clean;
     localStore.setGeminiApiKey(clean);
   }
   cachedAi = null;
@@ -447,21 +502,23 @@ function cleanScriptForSpeech(rawText: string): {
     .replace(/\|\s*(?:voy|ana|bilasizmi)\s*\|/gi, "$1, ")
     .replace(/\|[^|]+\|/g, " ");
 
-  // 8. Convert emotion/vocal cues into Gemini TTS native inline tags (<laugh>, <sigh>, <short pause>, <gasp>)
+  // 8. Convert emotion/vocal cues into documented Gemini 3.8 TTS native inline tags (<laugh>, <sigh>, <short pause>, <breath>, <cough>)
   cleaned = cleaned
     .replace(/<\s*(?:kulgi|kulgili|jilmayish|chuckle|giggle)\s*>/gi, " <laugh> ")
-    .replace(/\(\s*(?:kulib|kulimsirab|tabassum bilan|jilmayib|смеется|улыбаясь|смех|chuckle|laughing)\s*\)/gi, " <laugh> ")
-    .replace(/<\s*(?:nafas|chuqur_nafas|breath|deep_breath|xo[ʻ'']rsinish)\s*>/gi, " <sigh> ")
-    .replace(/\(\s*(?:nafas olib|chuqur nafas olib|xo[ʻ'']rsinib|вздыхая|вдохнув|deep breath)\s*\)/gi, " <sigh> ")
-    .replace(/<\s*(?:hansirash|hayrat)\s*>/gi, " <gasp> ")
-    .replace(/\(\s*(?:hansirab|hayratda|ахнув|gasp)\s*\)/gi, " <gasp> ")
+    .replace(/\(\s*(?:kulib|kulimsirab|tabassum bilan|jilmayib|смеется|смеётся|улыбаясь|смех|хе-хе|усмешка|смешок|chuckle|laughing)\s*\)/gi, " <laugh> ")
+    .replace(/<\s*(?:xo[ʻ'']rsinish|sigh)\s*>/gi, " <sigh> ")
+    .replace(/\(\s*(?:xo[ʻ'']rsinib|вздыхая|вздыхает|вздох|sigh)\s*\)/gi, " <sigh> ")
+    .replace(/<\s*(?:nafas|chuqur_nafas|breath|deep_breath|hansirash|hayrat|gasp)\s*>/gi, " <breath> ")
+    .replace(/\(\s*(?:nafas olib|chuqur nafas olib|hansirab|hayratda|вдохнув|вдох|переводит дух|ахнув|deep breath|breath|gasp)\s*\)/gi, " <breath> ")
+    .replace(/<\s*(?:yo['ʻ]tal|cough)\s*>/gi, " <cough> ")
+    .replace(/\(\s*(?:кашляет|покашливает|cough)\s*\)/gi, " <cough> ")
     .replace(/\[\s*(?:pauza|pause|пауза|jimlik|тишина)[^\]]*\]/gi, " <short pause> ")
     .replace(/\(\s*(?:pauza|pause|пауза|jimlik|тишина)[^)]*\)/gi, " <short pause> ")
     .replace(/<\s*(?:pauza|pause|short_pause)\s*>/gi, " <short pause> ");
 
-  // 9. Remove all non-Gemini angle tags while PRESERVING valid native inline tags:
-  // <laugh>, <sigh>, <short pause>, <gasp>
-  cleaned = cleaned.replace(/<(?!(\/?(?:laugh|sigh|short pause|gasp))\b)[^>]+>/gi, " ");
+  // 9. Remove all non-Gemini angle tags while PRESERVING ONLY documented native inline tags:
+  // <laugh>, <sigh>, <short pause>, <breath>, <cough>
+  cleaned = cleaned.replace(/<(?!(\/?(?:laugh|sigh|short pause|breath|cough))\b)[^>]+>/gi, " ");
 
   // 10. Remove remaining stage directions in square brackets and parentheticals
   cleaned = cleaned.replace(/\[[^\]]*\]/g, " ");
@@ -485,11 +542,32 @@ function cleanScriptForSpeech(rawText: string): {
   };
 }
 
+let cachedShohruxSampleBase64: string | null = null;
+function getShohruxReplicatedSampleBase64(): string | null {
+  if (cachedShohruxSampleBase64) return cachedShohruxSampleBase64;
+  try {
+    const candidates = [
+      path.resolve(process.cwd(), "public", "audio", "previews", "voice_17raj9ewke3g.wav"),
+      path.resolve(process.cwd(), "public", "audio", "previews", "shohrux.wav"),
+    ];
+    for (const p of candidates) {
+      if (fs.existsSync(p)) {
+        const buf = fs.readFileSync(p);
+        if (buf.length > 1000) {
+          cachedShohruxSampleBase64 = buf.toString("base64");
+          return cachedShohruxSampleBase64;
+        }
+      }
+    }
+  } catch {}
+  return null;
+}
+
 /**
  * Universal High-Reliability Speech Synthesizer for Gemini TTS
+ * - Supports Cloned Voice (voice_17raj9ewke3g / user-replicated / Shohrux via replicatedVoiceConfig)
  * - Locks stable base prebuilt voice (Charon / Fenrir / Kore / Puck / Aoede / Zephyr) per speaker
  * - Preserves voice identity and timbre consistency across entire dialogue
- * - Never resets or strips speechStyle (No Tier 2 style-wiping fallback)
  * - Automatically retries with exponential backoff (1s - 2s+) on HTTP 429 / rate limit / network errors
  * - Modulates emotions (laughter, whisper, breath, tempo, volume) strictly via speechMetadata.style
  * - Performs linguistic and phonetic normalization for Uzbek text
@@ -497,11 +575,15 @@ function cleanScriptForSpeech(rawText: string): {
 export async function generateGeminiSpeechPcm({
   text,
   voiceName,
+  voiceId,
+  replicatedVoiceConfig,
   speechStyle,
   speakerName,
 }: {
   text: string;
   voiceName: string;
+  voiceId?: string;
+  replicatedVoiceConfig?: any;
   speechStyle?: string;
   speakerName?: string;
 }): Promise<{ pcm: Buffer; rawWav: Buffer }> {
@@ -516,6 +598,18 @@ export async function generateGeminiSpeechPcm({
   };
 
   const rawKey = (voiceName || "").trim().toLowerCase();
+  const rawId = (voiceId || voiceName || "").trim().toLowerCase();
+  const isClonedShohrux =
+    Boolean(replicatedVoiceConfig) ||
+    rawId === "voice_17raj9ewke3g" ||
+    rawId === "user-replicated" ||
+    rawId === "shohrux" ||
+    rawId === "shokhrukh" ||
+    rawKey === "voice_17raj9ewke3g" ||
+    rawKey === "user-replicated" ||
+    rawKey === "shohrux" ||
+    rawKey === "shokhrukh";
+
   let targetVoice = CANONICAL_VOICES[rawKey];
 
   if (!targetVoice) {
@@ -524,7 +618,7 @@ export async function generateGeminiSpeechPcm({
     );
     if (found) {
       targetVoice = found;
-    } else if (/kore|female|ayol|женск/i.test(voiceName || speakerName || "")) {
+    } else if (/kore|female|ayol|женск|девушк/i.test(voiceName || speakerName || "")) {
       targetVoice = "Kore";
     } else if (/fenrir|ayubxon|oybek|mehmon|guest/i.test(voiceName || speakerName || "")) {
       targetVoice = "Fenrir";
@@ -533,7 +627,7 @@ export async function generateGeminiSpeechPcm({
     }
   }
 
-  // 2. Extract and preserve any emotional cues (<kulgi>, <nafas>, (kulib), (pichirlab)) from the script
+  // 2. Extract and preserve any emotional cues (<laugh>, <sigh>, <short pause>, <breath>, <cough>) from the script
   const { speechText: cleanedText, extractedStyles } = cleanScriptForSpeech(text || "");
   const spokenContent = cleanedText || (text || "").trim() || "...";
 
@@ -545,7 +639,6 @@ export async function generateGeminiSpeechPcm({
   const ttsText = (normalized || spokenContent || "...").trim();
 
   // 4. Compose persistent style + dynamic emotion prompts (whisper, laughter, tempo, etc.)
-  // Never wipe or strip style: all acting dynamics are conveyed strictly via speechMetadata.style
   const styleTokens: string[] = [];
   if (speechStyle && speechStyle.trim()) {
     styleTokens.push(speechStyle.trim());
@@ -555,7 +648,9 @@ export async function generateGeminiSpeechPcm({
   }
   const effectiveStyle = styleTokens.join(". ");
 
-  const ttsModels = ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts"];
+  const ttsModels = isClonedShohrux
+    ? ["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"]
+    : ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts"];
   const MAX_RETRIES = 3;
 
   const isApiKeyExpired = (err: any) => {
@@ -593,7 +688,6 @@ export async function generateGeminiSpeechPcm({
 
   let lastError: any = null;
 
-  // Request payload ALWAYS maintains speechMetadata and voice identity intact (NO Tier 2 style-stripping!)
   const payloadContents = [
     {
       role: "user",
@@ -611,52 +705,93 @@ export async function generateGeminiSpeechPcm({
     },
   ];
 
-  for (const model of ttsModels) {
+  // Build candidate voiceConfigs
+  const candidateVoiceConfigs: any[] = [];
+  if (isClonedShohrux) {
+    if (
+      replicatedVoiceConfig &&
+      (replicatedVoiceConfig.consentAudio || replicatedVoiceConfig.voiceConsentSignature)
+    ) {
+      const normalizedSample =
+        typeof replicatedVoiceConfig.voiceSampleAudio === "string"
+          ? replicatedVoiceConfig.voiceSampleAudio
+          : replicatedVoiceConfig.voiceSampleAudio?.data;
+      if (normalizedSample && typeof normalizedSample === "string") {
+        candidateVoiceConfigs.push({
+          replicatedVoiceConfig: {
+            mimeType: "audio/wav",
+            voiceSampleAudio: normalizedSample,
+            ...(replicatedVoiceConfig.consentAudio
+              ? { consentAudio: replicatedVoiceConfig.consentAudio }
+              : {}),
+            ...(replicatedVoiceConfig.voiceConsentSignature
+              ? { voiceConsentSignature: replicatedVoiceConfig.voiceConsentSignature }
+              : {}),
+          },
+        });
+      }
+    }
+    if (!unsupportedCustomVoiceIds.has("voice_17raj9ewke3g")) {
+      candidateVoiceConfigs.push({ voice: "voice_17raj9ewke3g" });
+    }
+  }
+  candidateVoiceConfigs.push({
+    prebuiltVoiceConfig: { voiceName: targetVoice },
+  });
+
+  for (const voiceCfg of candidateVoiceConfigs) {
     if (lastError && isApiKeyExpired(lastError)) {
       break;
     }
-    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: payloadContents,
-          config: {
-            responseModalities: ["AUDIO"],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: { voiceName: targetVoice },
+    const isCustomAttempt = Boolean(voiceCfg.voice || voiceCfg.replicatedVoiceConfig);
+    const modelsForAttempt = isCustomAttempt ? ["gemini-3.8-flash-tts"] : ttsModels;
+
+    for (const model of modelsForAttempt) {
+      if (lastError && isApiKeyExpired(lastError)) {
+        break;
+      }
+      const retriesForAttempt = isCustomAttempt ? 1 : MAX_RETRIES;
+      for (let attempt = 0; attempt < retriesForAttempt; attempt++) {
+        try {
+          const response = await ai.models.generateContent({
+            model,
+            contents: payloadContents,
+            config: {
+              responseModalities: ["AUDIO"],
+              speechConfig: {
+                voiceConfig: voiceCfg,
               },
             },
-          },
-        });
+          });
 
-        const audioData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-        if (audioData) {
-          const rawBuf = Buffer.from(audioData, "base64");
-          const { pcm } = extractPcmData(rawBuf);
-          if (pcm && pcm.length > 0) {
-            return { pcm, rawWav: rawBuf };
+          const audioData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+          if (audioData) {
+            const rawBuf = Buffer.from(audioData, "base64");
+            const { pcm } = extractPcmData(rawBuf);
+            if (pcm && pcm.length > 0) {
+              return { pcm, rawWav: rawBuf };
+            }
           }
+        } catch (err: any) {
+          lastError = err;
+          if (isApiKeyExpired(err)) {
+            break;
+          }
+          if (voiceCfg.voice && /no matching speaker|invalid_argument|not found|400/i.test(err?.message || "")) {
+            unsupportedCustomVoiceIds.add(voiceCfg.voice);
+            break;
+          }
+          if (voiceCfg.replicatedVoiceConfig) {
+            break;
+          }
+          const transient = isTransientError(err);
+          if (transient && attempt < retriesForAttempt - 1) {
+            const delayMs = Math.round(1200 * Math.pow(1.8, attempt) + Math.random() * 300);
+            await new Promise((r) => setTimeout(r, delayMs));
+            continue;
+          }
+          break;
         }
-      } catch (err: any) {
-        lastError = err;
-        if (isApiKeyExpired(err)) {
-          console.warn(`[TTS] Gemini API key expired detected: ${err?.message?.slice(0, 80)}`);
-          break; // Stop immediately, do not loop
-        }
-        const transient = isTransientError(err);
-        if (transient && attempt < MAX_RETRIES - 1) {
-          // Exponential backoff: 1.2s -> 2.4s -> 4.5s (with slight jitter)
-          const delayMs = Math.round(1200 * Math.pow(1.8, attempt) + Math.random() * 300);
-          console.warn(
-            `[TTS Retry ${attempt + 1}/${MAX_RETRIES}] Rate-limit/network error on ${model} for voice ${targetVoice}, retrying in ${delayMs}ms:`,
-            err?.message?.slice(0, 100),
-          );
-          await new Promise((r) => setTimeout(r, delayMs));
-          continue;
-        }
-        console.warn(`[TTS ${model}] Voice ${targetVoice} attempt failed:`, err?.message?.slice(0, 100));
-        break;
       }
     }
   }
@@ -696,20 +831,42 @@ try {
   }
 }
 
-// Restore persisted Gemini API key from Firestore across container restarts
+// Restore persisted Gemini API key from Firestore across container restarts (only if valid, never overwrite a working runtime Secret with an expired key)
 if (adminDb) {
   adminDb
     .collection("system_config")
     .doc("gemini_api")
     .get()
-    .then((snap: any) => {
+    .then(async (snap: any) => {
       if (snap && snap.exists) {
         const data = snap.data();
         if (data?.apiKey && typeof data.apiKey === "string" && data.apiKey.trim()) {
           const restoredKey = data.apiKey.trim();
-          if (!localStore.getGeminiApiKey()) {
-            resetGeminiClient(restoredKey);
-            console.log("[Gemini Key] Restored persistent API key from Firestore system_config");
+          const runtimeKey = (RUNTIME_ENV_KEYS.GEMINI_API_KEY || RUNTIME_ENV_KEYS.API_KEY || "").trim();
+          if (restoredKey === runtimeKey) {
+            return;
+          }
+          try {
+            const probeClient = new GoogleGenAI({
+              apiKey: restoredKey,
+              apiVersion: "v1beta",
+              httpOptions: { headers: { "User-Agent": "aistudio-build" } },
+            });
+            await probeClient.models.generateContent({
+              model: "gemini-3.8-flash",
+              contents: "ping",
+            });
+            if (!localStore.getGeminiApiKey()) {
+              resetGeminiClient(restoredKey);
+              console.log("[Gemini Key] Restored & verified persistent API key from Firestore system_config");
+            }
+          } catch (probeErr: any) {
+            if (isGeminiKeyErrorMessage(probeErr)) {
+              disabledExpiredKeys.add(restoredKey);
+              console.warn("[Gemini Key] Ignored expired key in Firestore system_config; keeping runtime environment key.");
+            } else {
+              console.warn("[Gemini Key] Firestore key probe notice:", probeErr?.message || probeErr);
+            }
           }
         }
       }
@@ -1119,15 +1276,47 @@ const geminiConcurrencyLimitMiddleware = (req: express.Request, res: express.Res
 // Apply Global IP Rate Limiter
 app.use("/api", globalLimiter);
 
-// Enforce Server Authentication on ALL /api/* routes EXCEPT public endpoints (health, billing config, webhooks, gemini status, and session verify)
+const ALLOWED_PUBLIC_VOICE_PREVIEW_IDS = new Set([
+  "voice_17raj9ewke3g",
+  "sardor",
+  "aziza",
+  "madina",
+  "jasur",
+  "otabek",
+  "nilufar",
+  "ulugbek",
+  "shokhrukh",
+  "shohrux",
+  "aziza-ai",
+  "madina-journalist",
+  "jasur-business",
+  "otabek-comedy",
+  "ulugbek-history",
+  "supertaxi-greeting",
+  "aoede",
+  "kore",
+  "puck",
+  "fenrir",
+  "zephyr",
+  "charon",
+]);
+
+// Enforce Server Authentication on ALL /api/* routes EXCEPT public endpoints (health, billing config, webhooks, gemini status, session verify, and whitelisted voice previews)
 app.use("/api", (req, res, next) => {
   const fullPath = req.originalUrl.split("?")[0];
+  const previewMatch = req.method === "GET" && fullPath.startsWith("/api/voices/preview/")
+    ? path.basename(fullPath.slice("/api/voices/preview/".length)).replace(/\.wav$/, "")
+    : "";
   if (
     (req.method === "GET" && (
       fullPath === "/api/health" ||
       fullPath === "/api/billing/config" ||
       fullPath === "/api/gemini/status" ||
-      fullPath === "/api/agent/supertaxi-greeting.wav"
+      fullPath === "/api/agent/supertaxi-greeting.wav" ||
+      fullPath === "/api/agent/realtor-greeting.wav" ||
+      fullPath === "/api/agent/realtor-filler.wav" ||
+      fullPath.startsWith("/api/podcast/download-dubbed-video/") ||
+      (previewMatch && ALLOWED_PUBLIC_VOICE_PREVIEW_IDS.has(previewMatch))
     )) ||
     (req.method === "POST" && (
       fullPath === "/api/billing/webhook" ||
@@ -1145,6 +1334,8 @@ app.use("/api", (req, res, next) => {
 app.use([
   "/api/podcast/synthesize",
   "/api/podcast/synthesize-dialogue",
+  "/api/podcast/synthesize-single-turn",
+  "/api/podcast/parse-verbatim-storyboard",
   "/api/podcast/generate-script",
   "/api/podcast/generate-longform-script",
   "/api/podcast/expand-chapter",
@@ -1168,6 +1359,8 @@ app.use([
 app.use([
   "/api/podcast/synthesize",
   "/api/podcast/synthesize-dialogue",
+  "/api/podcast/synthesize-single-turn",
+  "/api/podcast/parse-verbatim-storyboard",
   "/api/voiceover/synthesize",
   "/api/voiceover/process-pipeline",
   "/api/voiceover/transcribe-and-translate",
@@ -1194,7 +1387,7 @@ app.get("/api/health", (_req, res) => {
 // Check Gemini API Key Status (never exposes secret key or prefix publicly)
 app.get("/api/gemini/status", async (_req, res) => {
   try {
-    const currentKey = resolveActiveGeminiKey();
+    let currentKey = resolveActiveGeminiKey();
 
     if (!currentKey) {
       return res.json({
@@ -1205,12 +1398,20 @@ app.get("/api/gemini/status", async (_req, res) => {
       });
     }
 
-    const testClient = getGeminiClient();
-    try {
-      await testClient.models.generateContent({
+    const pingWithKey = async (keyToTest: string) => {
+      const client = new GoogleGenAI({
+        apiKey: keyToTest,
+        apiVersion: "v1beta",
+        httpOptions: { headers: { "User-Agent": "aistudio-build" } },
+      });
+      await client.models.generateContent({
         model: "gemini-3.8-flash",
         contents: "ping",
       });
+    };
+
+    try {
+      await pingWithKey(currentKey);
       return res.json({
         configured: true,
         valid: true,
@@ -1218,17 +1419,29 @@ app.get("/api/gemini/status", async (_req, res) => {
         message: "Gemini API kaliti faol va muvaffaqiyatli ishlayapti",
       });
     } catch (apiErr: any) {
-      const msg = (apiErr?.message || "").toLowerCase();
-      const isExpired =
-        msg.includes("api key expired") ||
-        msg.includes("api_key_invalid") ||
-        msg.includes("please renew the api key") ||
-        msg.includes("invalid api key");
+      const isExpired = isGeminiKeyErrorMessage(apiErr);
+      if (isExpired) {
+        const fallbackKey = markGeminiKeyExpiredAndFallback(currentKey);
+        if (fallbackKey && fallbackKey !== currentKey) {
+          try {
+            await pingWithKey(fallbackKey);
+            return res.json({
+              configured: true,
+              valid: true,
+              isExpired: false,
+              autoRecovered: true,
+              message: "Gemini API kaliti tizim muhitidan avtomatik tiklandi va faol ishlayapti",
+            });
+          } catch (fallbackErr: any) {
+            apiErr = fallbackErr;
+          }
+        }
+      }
       return res.json({
         configured: true,
         valid: false,
-        isExpired,
-        message: isExpired
+        isExpired: isGeminiKeyErrorMessage(apiErr),
+        message: isGeminiKeyErrorMessage(apiErr)
           ? "Gemini API kaliti muddati tugagan. Iltimos, yangi kalit kiriting."
           : apiErr?.message || "Gemini API bilan ulanishda xatolik",
       });
@@ -1250,6 +1463,7 @@ app.post("/api/gemini/update-key", requireAuth, requireAdmin, async (req, res) =
     // Verify key with Gemini 3.8 Flash before persisting
     const testGenAi = new GoogleGenAI({
       apiKey: cleanKey,
+      apiVersion: "v1beta",
       httpOptions: { headers: { "User-Agent": "aistudio-build" } },
     });
     try {
@@ -1401,6 +1615,9 @@ app.get("/api/voices/preview/:id", async (req, res) => {
   try {
     const { id } = req.params;
     const cleanId = path.basename(id).replace(/\.wav$/, "");
+    if (!ALLOWED_PUBLIC_VOICE_PREVIEW_IDS.has(cleanId)) {
+      return res.status(404).json({ error: "Ruxsat etilmagan ovoz ID" });
+    }
     const previewDir = path.join(process.cwd(), "public", "audio", "previews");
     const previewFile = path.join(previewDir, `${cleanId}.wav`);
 
@@ -1411,17 +1628,16 @@ app.get("/api/voices/preview/:id", async (req, res) => {
       return fs.createReadStream(previewFile).pipe(res);
     }
 
-    // 2. If not yet on disk, synthesize once, save, and stream
+    // 2. If not yet on disk, synthesize once with canonical voice mapping, save, and stream
     if (!fs.existsSync(previewDir)) {
       fs.mkdirSync(previewDir, { recursive: true });
     }
 
     const previewGreeting = "Assalomu alaykum! OvozStudio'ga xush kelibsiz, o'zbekcha professional podkast yaratamiz.";
+    const canonicalBase = resolveCanonicalBaseVoice(cleanId);
     const targetVoiceConfig = cleanId === "voice_17raj9ewke3g"
       ? { voice: "voice_17raj9ewke3g" }
-      : cleanId === "farrux-tech"
-      ? { prebuiltVoiceConfig: { voiceName: "Fenrir" } }
-      : { prebuiltVoiceConfig: { voiceName: "Charon" } };
+      : { prebuiltVoiceConfig: { voiceName: canonicalBase } };
 
     const response = await ai.models.generateContent({
       model: "gemini-3.8-flash-tts",
@@ -1915,10 +2131,13 @@ app.post("/api/user/sync", requireAuth, async (req, res) => {
     const cleanEmail = userEmail.trim().toLowerCase();
     const isAdm = isEmailAdmin(cleanEmail);
 
+    // Always resolve authoritative server/Firestore balance FIRST so container restarts never reset to 5
+    const authoritativeBalance = await getUserBalance(uid, cleanEmail);
+
     // Check if there are any pending credit grants waiting for this email
     const pendingGrant = cleanEmail ? localStore.getPendingGrant(cleanEmail) : null;
-    let pendingBonus = pendingGrant?.credits || 0;
-    let pendingTier = pendingGrant?.tier || null;
+    const pendingBonus = pendingGrant?.credits || 0;
+    const pendingTier = pendingGrant?.tier || null;
 
     if (cleanEmail && pendingGrant) {
       localStore.deletePendingGrant(cleanEmail);
@@ -1929,13 +2148,14 @@ app.post("/api/user/sync", requireAuth, async (req, res) => {
       existingUser = localStore.getUserByEmail(cleanEmail);
     }
 
-    // Security fix (C3): NEVER trust creditsRemaining, tier, or role from req.body
-    let updatedCredits = isAdm
-      ? 999999
-      : (existingUser ? existingUser.creditsRemaining + pendingBonus : (5 + pendingBonus));
-    let updatedTier = isAdm ? "unlimited" : (pendingTier || existingUser?.tier || "free");
-    let updatedRole = isAdm ? "admin" : (existingUser?.role === "admin" ? "user" : (existingUser?.role || "user"));
-    let displayName = req.body?.displayName || existingUser?.displayName || (cleanEmail ? cleanEmail.split("@")[0] : "Foydalanuvchi");
+    // Security fix: NEVER trust creditsRemaining, tier, or role from req.body
+    const updatedCredits = isAdm ? 999999 : authoritativeBalance + pendingBonus;
+    const updatedTier = isAdm ? "unlimited" : (pendingTier || existingUser?.tier || "free");
+    const updatedRole = isAdm ? "admin" : "user";
+    const displayName =
+      (typeof req.body?.displayName === "string" && req.body.displayName.trim().slice(0, 120)) ||
+      existingUser?.displayName ||
+      (cleanEmail ? cleanEmail.split("@")[0] : "Foydalanuvchi");
 
     const savedProfile = localStore.saveUser({
       uid,
@@ -1944,6 +2164,7 @@ app.post("/api/user/sync", requireAuth, async (req, res) => {
       creditsRemaining: updatedCredits,
       tier: updatedTier,
       role: updatedRole,
+      initialBonusGranted: true,
     });
 
     if (adminDb) {
@@ -1951,7 +2172,7 @@ app.post("/api/user/sync", requireAuth, async (req, res) => {
         const userRef = adminDb.collection("users").doc(uid);
         await userRef.set(savedProfile, { merge: true });
 
-        if (cleanEmail) {
+        if (cleanEmail && pendingGrant) {
           const pendingRef = adminDb.collection("pendingCreditGrants").doc(cleanEmail);
           await pendingRef.delete().catch(() => {});
         }
@@ -1971,26 +2192,30 @@ app.post("/api/user/sync", requireAuth, async (req, res) => {
 });
 
 // Admin: Bulk sync discovered users from Firestore to server storage
-app.post("/api/billing/admin/sync-users", async (req, res) => {
+app.post("/api/billing/admin/sync-users", requireAdmin, async (req, res) => {
   try {
-    const adminEmail = (req as any).userEmail;
-    if (!isEmailAdmin(adminEmail)) {
-      return res.status(403).json({ error: "forbidden: admin privileges required" });
-    }
-
     const { users = [] } = req.body;
     if (Array.isArray(users)) {
       for (const u of users) {
         if (u.email || u.uid) {
           const cleanEmail = (u.email || "").trim().toLowerCase();
+          const targetUid = u.uid || `user-${cleanEmail.replace(/[^a-zA-Z0-9]/g, "_")}`;
+          const existingLocal = localStore.getUser(targetUid);
           localStore.saveUser({
-            uid: u.uid || `user-${cleanEmail.replace(/[^a-zA-Z0-9]/g, "_")}`,
+            uid: targetUid,
             email: cleanEmail,
-            displayName: u.displayName || (cleanEmail ? cleanEmail.split("@")[0] : "Foydalanuvchi"),
-            creditsRemaining: isEmailAdmin(cleanEmail) ? 999999 : (typeof u.creditsRemaining === "number" ? u.creditsRemaining : 5),
-            tier: isEmailAdmin(cleanEmail) ? "unlimited" : (u.tier || "free"),
-            role: isEmailAdmin(cleanEmail) ? "admin" : (u.role || "user"),
-            createdAt: u.createdAt || new Date().toISOString(),
+            displayName: u.displayName || existingLocal?.displayName || (cleanEmail ? cleanEmail.split("@")[0] : "Foydalanuvchi"),
+            creditsRemaining: isEmailAdmin(cleanEmail)
+              ? 999999
+              : existingLocal
+                ? existingLocal.creditsRemaining
+                : typeof u.creditsRemaining === "number"
+                  ? u.creditsRemaining
+                  : 5,
+            tier: isEmailAdmin(cleanEmail) ? "unlimited" : (existingLocal?.tier || u.tier || "free"),
+            role: isEmailAdmin(cleanEmail) ? "admin" : "user",
+            initialBonusGranted: true,
+            createdAt: existingLocal?.createdAt || u.createdAt || new Date().toISOString(),
           });
         }
       }
@@ -2030,11 +2255,11 @@ app.post("/api/user/consume-credit", requireAuth, async (req, res) => {
   }
 });
 
-// User log generation record server-side endpoint
-app.post("/api/user/log-generation", async (req, res) => {
+// User log generation record server-side endpoint (strictly bound to verified token uid)
+app.post("/api/user/log-generation", requireAuth, async (req, res) => {
   try {
-    const uid = (req as any).uid || req.body?.uid;
-    const userEmail = (req as any).userEmail || req.body?.userEmail || "";
+    const uid = (req as any).uid;
+    const userEmail = (req as any).userEmail || "";
     if (!uid) return res.status(401).json({ error: "unauthorized" });
 
     const { type, title, creditsCost, status, voiceName, durationSec, details } = req.body;
@@ -2044,10 +2269,10 @@ app.post("/api/user/log-generation", async (req, res) => {
       userId: uid,
       userEmail: userEmail.trim().toLowerCase(),
       type: type || "tts",
-      title: (title || "").slice(0, 200),
-      creditsCost: typeof creditsCost === "number" ? creditsCost : 1,
-      status: status || "completed",
-      voiceName: voiceName || undefined,
+      title: String(title || "").slice(0, 200),
+      creditsCost: typeof creditsCost === "number" ? Math.max(0, Math.min(50, creditsCost)) : 1,
+      status: status === "failed" ? "failed" : "completed",
+      voiceName: voiceName ? String(voiceName).slice(0, 120) : undefined,
       durationSec: typeof durationSec === "number" ? durationSec : undefined,
       details: details ? String(details).slice(0, 240) : undefined,
       createdAt: new Date().toISOString(),
@@ -2071,6 +2296,123 @@ app.post("/api/user/log-generation", async (req, res) => {
     res.json({ success: true, id: genId, record });
   } catch (err: any) {
     console.error("Error logging generation record:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// VIP Custom Production Requests (User create + list own; Admin list all + update status)
+app.post("/api/vip/requests", requireAuth, async (req, res) => {
+  try {
+    const uid = (req as any).uid;
+    const userEmail = ((req as any).userEmail || "").trim().toLowerCase();
+    if (!uid) return res.status(401).json({ error: "unauthorized" });
+
+    const {
+      projectTitle = "",
+      format = "VIP Masterclass",
+      targetDuration = "30 daqiqa",
+      contactPhone = "",
+      brief = "",
+    } = req.body || {};
+
+    if (!String(projectTitle).trim()) {
+      return res.status(400).json({ error: "Loyiha nomi kiritilishi shart" });
+    }
+
+    const reqId = `vip_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const vipDoc = localStore.createVipRequest({
+      id: reqId,
+      userId: uid,
+      userEmail,
+      projectTitle: String(projectTitle).trim().slice(0, 200),
+      format: String(format).trim().slice(0, 80),
+      targetDuration: String(targetDuration).trim().slice(0, 60),
+      contactPhone: String(contactPhone).trim().slice(0, 64),
+      brief: String(brief).trim().slice(0, 2000),
+      status: "new",
+      createdAt: new Date().toISOString(),
+    });
+
+    if (adminDb) {
+      try {
+        await adminDb.collection("vipRequests").doc(reqId).set(vipDoc);
+      } catch {
+        // Preserved in localStore
+      }
+    }
+
+    res.json({ success: true, request: vipDoc });
+  } catch (err: any) {
+    console.error("VIP request create error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/vip/my-requests", requireAuth, async (req, res) => {
+  try {
+    const uid = (req as any).uid;
+    if (!uid) return res.status(401).json({ error: "unauthorized" });
+    res.json({ requests: localStore.getUserVipRequests(uid) });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/billing/admin/vip-requests", requireAdmin, async (req, res) => {
+  try {
+    const statusFilter = String(req.query.status || "all");
+    const map = new Map<string, any>();
+    for (const r of localStore.getVipRequests("all")) {
+      map.set(r.id, r);
+    }
+    if (adminDb) {
+      try {
+        const snap = await adminDb.collection("vipRequests").get();
+        snap.forEach((docSnap: any) => {
+          const d = docSnap.data() || {};
+          const id = d.id || docSnap.id;
+          const merged = { id, ...d };
+          map.set(id, merged);
+          localStore.createVipRequest(merged);
+        });
+      } catch {}
+    }
+    let all = Array.from(map.values()).sort(
+      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+    );
+    if (statusFilter !== "all") {
+      all = all.filter((r) => r.status === statusFilter);
+    }
+    res.json({ requests: all });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/billing/admin/vip-requests/update", requireAdmin, async (req, res) => {
+  try {
+    const { requestId, status, adminNotes } = req.body || {};
+    if (!requestId || !["new", "in_progress", "completed", "cancelled"].includes(status)) {
+      return res.status(400).json({ error: "Noto'g'ri requestId yoki status" });
+    }
+    const updated = localStore.updateVipRequest(requestId, {
+      status,
+      adminNotes: typeof adminNotes === "string" ? adminNotes.slice(0, 500) : undefined,
+    });
+    if (adminDb) {
+      try {
+        await adminDb.collection("vipRequests").doc(requestId).set(
+          {
+            status,
+            adminNotes: typeof adminNotes === "string" ? adminNotes.slice(0, 500) : "",
+            updatedAt: new Date().toISOString(),
+          },
+          { merge: true }
+        );
+      } catch {}
+    }
+    res.json({ success: true, request: updated });
+  } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
@@ -3233,11 +3575,12 @@ ${text}`;
 // Synthesize speech using Gemini 3.8 Flash TTS with user's replicated voice or custom voice
 app.post("/api/podcast/synthesize", requireCreditBalance(1), async (req, res) => {
   try {
+    const rawInputText = typeof req.body?.text === "string" ? req.body.text : req.body?.script;
     const {
-      text,
       voiceProfile = {},
       speechStyle = "Jiddiy hikoyanavis",
     } = req.body;
+    const text = rawInputText;
 
     if (!text || typeof text !== "string") {
       return res.status(400).json({ error: "Matn (text) kiritilishi shart" });
@@ -3967,9 +4310,9 @@ app.post("/api/voiceover/process-pipeline", requireCreditBalance(1), async (req,
 });
 
 /**
- * Endpoint to retrieve recent pipeline attempt logs
+ * Endpoint to retrieve recent pipeline attempt logs (Admin-only)
  */
-app.get("/api/voiceover/pipeline-logs", (req, res) => {
+app.get("/api/voiceover/pipeline-logs", requireAdmin, (_req, res) => {
   res.json({ logs: getPipelineLogs() });
 });
 
@@ -5024,558 +5367,1093 @@ async function mapConcurrent<T, R>(
   return results;
 }
 
-// Synthesize 2-speaker dialogue with independent voices and master track stitching
+// Helper: Resolve voice configuration for any speaker (supports N speakers: HOST_1, HOST_2, HOST_3, etc. + cloned voice)
+function resolveSpeakerVoiceProfile(
+  speakerId: string,
+  turn: any,
+  host1Voice: any = {},
+  host2Voice: any = {},
+  speakerVoicesMap: Record<string, any> = {}
+): {
+  voiceId: string;
+  baseVoice: string;
+  speakerName: string;
+  baseSpeechStyle: string;
+} {
+  const customEntry =
+    speakerVoicesMap[speakerId] ||
+    (speakerId === "HOST_1" ? host1Voice : speakerId === "HOST_2" ? host2Voice : null) ||
+    {};
+
+  const explicitGender =
+    customEntry.gender ||
+    turn?.speakerGender ||
+    (/female|ayol|qiz|жен|девушк|\(\s*ж\s*\)/i.test(
+      `${customEntry.voiceId || ""} ${customEntry.name || ""} ${turn?.speakerName || ""}`
+    )
+      ? "female"
+      : "male");
+
+  const isFemale = explicitGender === "female";
+
+  const rawVoiceId = String(
+    turn?.voiceId ||
+      customEntry.voiceId ||
+      customEntry.id ||
+      (speakerId === "HOST_1"
+        ? isFemale
+          ? "Kore"
+          : "voice_17raj9ewke3g"
+        : isFemale
+          ? "Kore"
+          : "Fenrir")
+  ).trim();
+
+  const rawBase = String(
+    turn?.baseVoice || customEntry.baseVoice || resolveCanonicalBaseVoice(rawVoiceId)
+  ).trim();
+
+  let baseVoice = "Charon";
+  if (isFemale) {
+    if (["Kore", "Aoede", "Zephyr"].includes(rawBase)) {
+      baseVoice = rawBase;
+    } else if (/aoede/i.test(rawVoiceId)) {
+      baseVoice = "Aoede";
+    } else if (/zephyr/i.test(rawVoiceId)) {
+      baseVoice = "Zephyr";
+    } else {
+      baseVoice = "Kore";
+    }
+  } else {
+    if (["Charon", "Fenrir", "Puck"].includes(rawBase)) {
+      baseVoice = rawBase;
+    } else if (/fenrir/i.test(rawVoiceId)) {
+      baseVoice = "Fenrir";
+    } else if (/puck/i.test(rawVoiceId)) {
+      baseVoice = "Puck";
+    } else {
+      baseVoice = speakerId === "HOST_2" ? "Fenrir" : "Charon";
+    }
+  }
+
+  const speakerName =
+    turn?.speakerName ||
+    customEntry.name ||
+    (isFemale ? "Malika" : speakerId === "HOST_1" ? "Shohrux" : "Ekspert");
+
+  const baseSpeechStyle = isFemale
+    ? `Natural female Uzbek speaker (${speakerName}). Melodious, expressive, clear feminine voice, 100% authentic Uzbek pronunciation.`
+    : `Natural male Uzbek speaker (${speakerName}). Clear, confident, warm baritone voice, 100% authentic Uzbek pronunciation.`;
+
+  return {
+    voiceId: rawVoiceId,
+    baseVoice,
+    speakerName,
+    baseSpeechStyle,
+  };
+}
+
+/**
+ * 4-Step Duration & Tempo Fitting Cascade for a single turn:
+ * 1. Mild ffmpeg atempo <= 1.15 if turn exceeds window by <= 15%
+ * 2. Re-synthesize with fast pace in speechMetadata.style if > 15% over window
+ * 3. Shorten Uzbek text via gemini-4-hydrogen (ThinkingLevel.LOW) by 25-30% syllables and re-synthesize
+ * 4. Allow remaining tail to spill into any silent gap before nextTurnStartSec
+ */
+async function synthesizeTurnWithDurationCascade({
+  turn,
+  voiceId,
+  baseVoice,
+  speakerName,
+  combinedTurnStyle,
+  strictTimeWindow,
+}: {
+  turn: any;
+  voiceId: string;
+  baseVoice: string;
+  speakerName: string;
+  combinedTurnStyle: string;
+  strictTimeWindow: boolean;
+}): Promise<{
+  pcm: Buffer;
+  rawWav: Buffer;
+  finalText: string;
+  fitStepApplied: string;
+  failed: boolean;
+}> {
+  let activeText = String(turn.text || "").trim() || "...";
+  const hasValidWindow =
+    strictTimeWindow &&
+    typeof turn.startSec === "number" &&
+    typeof turn.endSec === "number" &&
+    turn.endSec > turn.startSec;
+
+  const windowSec = hasValidWindow
+    ? Math.max(0.8, turn.endSec - turn.startSec)
+    : 0;
+
+  try {
+    // Initial synthesis
+    let synthRes = await generateGeminiSpeechPcm({
+      text: activeText,
+      voiceName: baseVoice,
+      voiceId,
+      speechStyle: combinedTurnStyle,
+      speakerName,
+    });
+    let pcm = synthRes.pcm;
+    let actualSec = pcm.length / 48000;
+    let fitStepApplied = "original";
+
+    if (hasValidWindow && actualSec > windowSec + 0.08) {
+      const initialRatio = actualSec / windowSec;
+
+      // STEP 1: Mild atempo <= 1.15
+      if (initialRatio <= 1.15) {
+        pcm = await applyMildAtempoPcm(pcm, initialRatio, 24000);
+        fitStepApplied = `atempo_${initialRatio.toFixed(2)}x`;
+      } else {
+        // STEP 2: Fast-pace TTS re-synthesis
+        try {
+          const fastRes = await generateGeminiSpeechPcm({
+            text: activeText,
+            voiceName: baseVoice,
+            voiceId,
+            speechStyle: `${combinedTurnStyle}. Delivery speed: brisk, fast conversational pace, compact energetic articulation.`,
+            speakerName,
+          });
+          if (fastRes.pcm && fastRes.pcm.length > 0 && fastRes.pcm.length < pcm.length) {
+            pcm = fastRes.pcm;
+            actualSec = pcm.length / 48000;
+            fitStepApplied = "fast_tts";
+          }
+        } catch {}
+
+        const ratioAfterFast = actualSec / windowSec;
+        if (ratioAfterFast <= 1.15) {
+          if (ratioAfterFast > 1.01) {
+            pcm = await applyMildAtempoPcm(pcm, ratioAfterFast, 24000);
+            fitStepApplied = `fast_tts+atempo_${ratioAfterFast.toFixed(2)}x`;
+          }
+        } else {
+          // STEP 3: Shorten Uzbek translation via gemini-4-hydrogen (ThinkingLevel.LOW, temp 0.1)
+          const targetSyllables = Math.max(3, Math.floor(windowSec * 4.2));
+          try {
+            const shortenRes = await ai.models.generateContent({
+              model: "gemini-4-hydrogen",
+              contents: `Сократи эту узбекскую реплику дубляжа до максимум ${targetSyllables} слогов (чтобы она свободно прозвучала за ${windowSec} сек), сохранив точный смысл и теги (<laugh>, <sigh>, <short pause>, <breath>, <cough>). Верни только сокращённый узбекский текст без кавычек:\n${activeText}`,
+              config: {
+                temperature: 0.1,
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              },
+            });
+            const candidateShort = sanitizeDocumentedTtsTags(shortenRes.text || "");
+            if (
+              candidateShort &&
+              countSyllables(candidateShort) > 0 &&
+              countSyllables(candidateShort) < countSyllables(activeText)
+            ) {
+              activeText = candidateShort;
+              const shortTts = await generateGeminiSpeechPcm({
+                text: activeText,
+                voiceName: baseVoice,
+                voiceId,
+                speechStyle: `${combinedTurnStyle}. Brisk, natural conversational pace.`,
+                speakerName,
+              });
+              if (shortTts.pcm && shortTts.pcm.length > 0) {
+                pcm = shortTts.pcm;
+                actualSec = pcm.length / 48000;
+                fitStepApplied = "shortened_text";
+              }
+            }
+          } catch {}
+
+          // Apply final mild atempo (strictly capped at <= 1.15) if still slightly over window
+          const finalRatio = actualSec / windowSec;
+          if (finalRatio > 1.01) {
+            pcm = await applyMildAtempoPcm(pcm, Math.min(1.15, finalRatio), 24000);
+            fitStepApplied = `${fitStepApplied}+atempo_${Math.min(1.15, finalRatio).toFixed(2)}x`;
+          }
+        }
+      }
+    }
+
+    const finalWav = buildWavBuffer(pcm, 24000, 1, 16);
+    return {
+      pcm,
+      rawWav: finalWav,
+      finalText: activeText,
+      fitStepApplied,
+      failed: false,
+    };
+  } catch (err: any) {
+    console.error(`[Turn Cascade Synthesis] Failed for ${speakerName}:`, err?.message);
+    const fallbackPcm = Buffer.alloc(24000); // 0.5s silence
+    return {
+      pcm: fallbackPcm,
+      rawWav: buildWavBuffer(fallbackPcm, 24000, 1, 16),
+      finalText: activeText,
+      fitStepApplied: "failed",
+      failed: true,
+    };
+  }
+}
+
+// Synthesize N-speaker dialogue / dubbing with independent voices, cloned voice support, and 4-step duration cascade
 app.post(
   "/api/podcast/synthesize-dialogue",
   requireCreditBalance((req) => Math.max(1, Math.ceil((req.body?.turns?.length || 2) / 3))),
   async (req, res) => {
-  req.setTimeout(300000);
-  res.setTimeout(300000);
-  try {
-    const { turns = [], host1Voice = {}, host2Voice = {} } = req.body;
+    req.setTimeout(300000);
+    res.setTimeout(300000);
+    try {
+      const {
+        turns = [],
+        host1Voice = {},
+        host2Voice = {},
+        speakerVoices = {},
+        masterAudioMode = "continuous",
+        totalTimelineSec,
+      } = req.body;
 
-    if (!Array.isArray(turns) || turns.length === 0) {
-      return res
-        .status(400)
-        .json({ error: "Replika ro'yxati (turns) bo'sh bo'lmasligi kerak" });
-    }
-
-    const host1Id = host1Voice.voiceId || host1Voice.id || "voice_17raj9ewke3g";
-    const host2ExplicitGender = host2Voice.gender === "male" ? "male" : host2Voice.gender === "female" ? "female" : null;
-    const isHost2Female =
-      host2ExplicitGender === "female" ||
-      (host2ExplicitGender !== "male" && (
-        host2Voice.baseVoice === "Kore" ||
-        host2Voice.baseVoice === "Aoede" ||
-        host2Voice.baseVoice === "Zephyr" ||
-        /aziza|madina|dilnoza|zarina|nodira|malika|sevara|shahnoza|rayhon|gulzoda|umida|nigora|feruza|ayol|qiz|жен/i.test(
-          host2Voice.voiceId || host2Voice.name || "",
-        )
-      ));
-
-    // Host 1 voice (Artur Yugay): Charon (energetic, clear male baritone)
-    const host1BaseVoice = ["Charon", "Puck", "Fenrir"].includes(host1Voice.baseVoice)
-      ? host1Voice.baseVoice
-      : "Charon";
-
-    // Host 2 voice (Ayubxon Burxonov / Guest):
-    // Choose appropriate base prebuilt voice distinct from Host 1:
-    // 'Kore', 'Aoede', or 'Zephyr' for female; 'Fenrir' or 'Puck' for male
-    let host2BaseVoice = "Fenrir";
-    if (isHost2Female) {
-      if (host2Voice.baseVoice === "Aoede") host2BaseVoice = "Aoede";
-      else if (host2Voice.baseVoice === "Zephyr") host2BaseVoice = "Zephyr";
-      else host2BaseVoice = "Kore";
-    } else {
-      if (host2Voice.baseVoice === "Puck" && host1BaseVoice !== "Puck") {
-        host2BaseVoice = "Puck";
-      } else if (host2Voice.baseVoice === "Fenrir" && host1BaseVoice !== "Fenrir") {
-        host2BaseVoice = "Fenrir";
-      } else if (host2Voice.baseVoice === "Charon" && host1BaseVoice !== "Charon") {
-        host2BaseVoice = "Charon";
-      } else {
-        host2BaseVoice = host1BaseVoice === "Charon" ? "Fenrir" : "Charon";
+      if (!Array.isArray(turns) || turns.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "Replika ro'yxati (turns) bo'sh bo'lmasligi kerak" });
       }
-    }
 
-    // Both Host 1 and Host 2 strictly use proven Gemini TTS prebuilt voices
-    // This eliminates random voice generation and ensures 100% stable, identical acoustic timbre
-    const host1Config = { prebuiltVoiceConfig: { voiceName: host1BaseVoice } };
-    const host2Config = { prebuiltVoiceConfig: { voiceName: host2BaseVoice } };
+      const isTimeAlignedMode = masterAudioMode === "time_aligned";
 
-    // Constant, stable voice styling for Host 1 and Host 2 across ALL turns:
-    const host1SpeechStyle = `Natural male Uzbek podcast host named Artur Yugay. Clear, resonant, warm baritone voice, confident studio conversational cadence, articulate native Uzbek speech.`;
-    const host2SpeechStyle = isHost2Female
-      ? `Natural female Uzbek podcast guest and specialist. Melodious, articulate, warm feminine voice, polite and intelligent conversational cadence.`
-      : `Natural male Uzbek finance and business expert guest named Ayubxon Burxonov. Deep, calm, thoughtful baritone voice, articulate conversational Uzbek speech with authoritative delivery.`;
-
-    // Setup 2 distinct speaker identities for Gemini native multiSpeakerVoiceConfig:
-    const host1SpeakerTag = "Artur";
-    const host2SpeakerTag = isHost2Female ? "Kore" : "Ayubxon";
-
-    const speakerVoiceConfigs = [
-      {
-        speaker: host1SpeakerTag,
-        voiceConfig: { prebuiltVoiceConfig: { voiceName: host1BaseVoice } },
-      },
-      {
-        speaker: host2SpeakerTag,
-        voiceConfig: { prebuiltVoiceConfig: { voiceName: host2BaseVoice } },
-      },
-    ];
-
-    let nativeMasterWav: Buffer | null = null;
-    let nativeMasterPcm: Buffer | null = null;
-    const nativePerPartAudios: Buffer[] = [];
-    let nativeSuccess = false;
-
-    // Check if we can perform a single native multi-speaker request:
-    // Supported if turns <= 16 and not explicitly forced sequential
-    const canAttemptNativeMultiSpeaker =
-      turns.length > 0 &&
-      turns.length <= 16 &&
-      !req.body?.forceSequential;
-
-    if (canAttemptNativeMultiSpeaker) {
-      console.log(
-        `[Synthesize Dialogue] Attempting native multiSpeakerVoiceConfig with gemini-3.8-flash-tts (${turns.length} turns, Host 1: ${host1BaseVoice}, Host 2: ${host2BaseVoice})...`,
-      );
-
-      const multiSpeakerParts = turns.map((turn: any) => {
-        const isHost1 = turn.speakerId === "HOST_1";
-        const speaker = isHost1 ? host1SpeakerTag : host2SpeakerTag;
-        const activeBaseStyle = isHost1 ? host1SpeechStyle : host2SpeechStyle;
-
-        const { speechText: cleanedTurnText, extractedStyles: turnExtractedStyles } = cleanScriptForSpeech(turn.text || "");
-        let spokenText = cleanedTurnText;
-        try {
-          spokenText = normalizeUzbekSpeech(spokenText);
-        } catch {}
-        const textToSynthesize = spokenText || cleanedTurnText || (turn.text || "").trim() || "...";
-
-        const styleTokens = [activeBaseStyle];
-        if (turn.speechStyle) styleTokens.push(turn.speechStyle);
-        if (turnExtractedStyles && turnExtractedStyles.length > 0) {
-          styleTokens.push(`Acting & emotion cues: ${turnExtractedStyles.join(", ")}`);
-        }
-
-        return {
-          text: textToSynthesize,
-          speechMetadata: {
-            speaker,
-            style: styleTokens.filter(Boolean).join(". "),
-          },
-        };
+      // Check if any turn uses a cloned voice or N>2 speakers or time_aligned dubbing mode
+      const uniqueSpeakerIds = new Set(turns.map((t: any) => t.speakerId || "HOST_1"));
+      const usesClonedVoice = [
+        host1Voice?.voiceId,
+        host1Voice?.id,
+        host2Voice?.voiceId,
+        host2Voice?.id,
+        ...Object.values(speakerVoices || {}).map((v: any) => v?.voiceId || v?.id),
+        ...turns.map((t: any) => t?.voiceId),
+      ].some((id) => {
+        const l = String(id || "").toLowerCase();
+        return l === "voice_17raj9ewke3g" || l === "user-replicated" || l === "shohrux" || l === "shokhrukh";
       });
 
-      const multiSpeakerCandidateModels = [
-        "gemini-3.8-flash-tts",
-        "gemini-2.5-flash",
-        "gemini-3.8-flash-lite-tts",
-      ];
+      // For time_aligned video dubbing, cloned voice, or >2 speakers, ALWAYS use per-turn synthesis with duration cascade!
+      const canAttemptNativeMultiSpeaker =
+        !isTimeAlignedMode &&
+        !usesClonedVoice &&
+        uniqueSpeakerIds.size <= 2 &&
+        turns.length > 0 &&
+        turns.length <= 16 &&
+        !req.body?.forceSequential;
 
-      for (const modelCandidate of multiSpeakerCandidateModels) {
-        try {
-          const multiResponse = await ai.models.generateContent({
-            model: modelCandidate,
-            contents: [
-              {
-                role: "user",
-                parts: multiSpeakerParts,
-              },
-            ],
-            config: {
-              responseModalities: ["AUDIO"],
-              speechConfig: {
-                multiSpeakerVoiceConfig: {
-                  speakerVoiceConfigs,
+      if (canAttemptNativeMultiSpeaker) {
+        const host1Resolved = resolveSpeakerVoiceProfile("HOST_1", {}, host1Voice, host2Voice, speakerVoices);
+        const host2Resolved = resolveSpeakerVoiceProfile("HOST_2", {}, host1Voice, host2Voice, speakerVoices);
+
+        const host1SpeakerTag = "Artur";
+        const host2SpeakerTag = host2Resolved.baseVoice === "Kore" ? "Kore" : "Ayubxon";
+
+        const speakerVoiceConfigs = [
+          {
+            speaker: host1SpeakerTag,
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: host1Resolved.baseVoice } },
+          },
+          {
+            speaker: host2SpeakerTag,
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: host2Resolved.baseVoice } },
+          },
+        ];
+
+        let nativeMasterWav: Buffer | null = null;
+        let nativeMasterPcm: Buffer | null = null;
+        const nativePerPartAudios: Buffer[] = [];
+        let nativeSuccess = false;
+
+        const multiSpeakerParts = turns.map((turn: any) => {
+          const isHost1 = turn.speakerId === "HOST_1";
+          const speaker = isHost1 ? host1SpeakerTag : host2SpeakerTag;
+          const activeBaseStyle = isHost1 ? host1Resolved.baseSpeechStyle : host2Resolved.baseSpeechStyle;
+
+          const { speechText: cleanedTurnText, extractedStyles: turnExtractedStyles } = cleanScriptForSpeech(turn.text || "");
+          let spokenText = cleanedTurnText;
+          try {
+            spokenText = normalizeUzbekSpeech(spokenText);
+          } catch {}
+          const textToSynthesize = spokenText || cleanedTurnText || (turn.text || "").trim() || "...";
+
+          const styleTokens = [activeBaseStyle];
+          if (turn.speechStyle) styleTokens.push(turn.speechStyle);
+          if (turnExtractedStyles && turnExtractedStyles.length > 0) {
+            styleTokens.push(`Acting & emotion cues: ${turnExtractedStyles.join(", ")}`);
+          }
+
+          return {
+            text: textToSynthesize,
+            speechMetadata: {
+              speaker,
+              style: styleTokens.filter(Boolean).join(". "),
+            },
+          };
+        });
+
+        for (const modelCandidate of ["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"]) {
+          try {
+            const multiResponse = await ai.models.generateContent({
+              model: modelCandidate,
+              contents: [{ role: "user", parts: multiSpeakerParts }],
+              config: {
+                responseModalities: ["AUDIO"],
+                speechConfig: {
+                  multiSpeakerVoiceConfig: { speakerVoiceConfigs },
                 },
               },
-            },
-          });
+            });
 
-          const resParts = multiResponse.candidates?.[0]?.content?.parts || [];
-          const audioParts = resParts.filter((p: any) => typeof p?.inlineData?.data === "string");
+            const resParts = multiResponse.candidates?.[0]?.content?.parts || [];
+            const audioParts = resParts.filter((p: any) => typeof p?.inlineData?.data === "string");
 
-          if (audioParts.length > 0) {
-            if (audioParts.length === 1) {
-              const audioBase64Str: string = audioParts[0].inlineData!.data!;
-              const rawAudio = Buffer.from(audioBase64Str, "base64");
-              const { pcm } = extractPcmData(rawAudio);
-              if (pcm && pcm.length > 0) {
-                nativeMasterPcm = pcm;
-                nativeMasterWav = buildWavBuffer(pcm, 24000, 1, 16);
-                nativeSuccess = true;
-                console.log(
-                  `[Synthesize Dialogue] Native multi-speaker generation succeeded on ${modelCandidate} (${pcm.length} PCM bytes)`,
-                );
-                break;
-              }
-            } else {
-              // Multiple audio parts returned (one per turn)
-              const pcmParts: Buffer[] = [];
-              for (const ap of audioParts) {
-                const audioBase64Str: string = ap.inlineData?.data || "";
-                if (!audioBase64Str) continue;
-                const rawAudio = Buffer.from(audioBase64Str, "base64");
+            if (audioParts.length > 0) {
+              if (audioParts.length === 1) {
+                const rawAudio = Buffer.from(audioParts[0].inlineData!.data!, "base64");
                 const { pcm } = extractPcmData(rawAudio);
-                pcmParts.push(pcm);
-                nativePerPartAudios.push(rawAudio);
-              }
-              if (pcmParts.length > 0) {
-                nativeMasterPcm = Buffer.concat(pcmParts);
-                nativeMasterWav = buildWavBuffer(nativeMasterPcm, 24000, 1, 16);
-                nativeSuccess = true;
-                console.log(
-                  `[Synthesize Dialogue] Native multi-speaker generation succeeded with ${audioParts.length} audio parts on ${modelCandidate}`,
-                );
-                break;
+                if (pcm && pcm.length > 0) {
+                  nativeMasterPcm = pcm;
+                  nativeMasterWav = buildWavBuffer(pcm, 24000, 1, 16);
+                  nativeSuccess = true;
+                  break;
+                }
+              } else {
+                const pcmParts: Buffer[] = [];
+                for (const ap of audioParts) {
+                  const audioBase64Str: string = ap.inlineData?.data || "";
+                  if (!audioBase64Str) continue;
+                  const rawAudio = Buffer.from(audioBase64Str, "base64");
+                  const { pcm } = extractPcmData(rawAudio);
+                  pcmParts.push(pcm);
+                  nativePerPartAudios.push(rawAudio);
+                }
+                if (pcmParts.length > 0) {
+                  nativeMasterPcm = Buffer.concat(pcmParts);
+                  nativeMasterWav = buildWavBuffer(nativeMasterPcm, 24000, 1, 16);
+                  nativeSuccess = true;
+                  break;
+                }
               }
             }
+          } catch (multiErr: any) {
+            console.warn(`[Synthesize Dialogue] Multi-speaker request on ${modelCandidate} failed:`, multiErr?.message?.slice(0, 120));
           }
-        } catch (multiErr: any) {
-          console.warn(
-            `[Synthesize Dialogue] Multi-speaker request on ${modelCandidate} failed:`,
-            multiErr?.message?.slice(0, 120),
-          );
+        }
+
+        if (nativeSuccess && nativeMasterWav && nativeMasterPcm) {
+          const totalDuration = Math.round((nativeMasterPcm.length / 48000) * 10) / 10;
+          const totalTextLen = Math.max(1, turns.reduce((acc: number, t: any) => acc + (t.text || "").length, 0));
+          let currentTurnStart = 0;
+
+          const synthesizedTurns = turns.map((turn: any, i: number) => {
+            const isHost1 = turn.speakerId === "HOST_1";
+            const speakerName = isHost1 ? host1Resolved.speakerName : host2Resolved.speakerName;
+            let turnWavBase64 = "";
+            let turnDuration = 0;
+
+            if (nativePerPartAudios.length === turns.length) {
+              turnWavBase64 = nativePerPartAudios[i].toString("base64");
+              const { pcm } = extractPcmData(nativePerPartAudios[i]);
+              turnDuration = Math.max(0.5, Math.round((pcm.length / 48000) * 10) / 10);
+            } else {
+              const proportion = Math.max(0.05, (turn.text || "").length / totalTextLen);
+              turnDuration = Math.max(0.5, Math.round(totalDuration * proportion * 10) / 10);
+              const pcmByteStart = Math.min(nativeMasterPcm!.length, Math.floor(currentTurnStart * 48000));
+              const pcmByteEnd = Math.min(nativeMasterPcm!.length, Math.floor((currentTurnStart + turnDuration) * 48000));
+              if (pcmByteEnd > pcmByteStart) {
+                const turnSlice = nativeMasterPcm!.subarray(pcmByteStart, pcmByteEnd);
+                turnWavBase64 = buildWavBuffer(turnSlice, 24000, 1, 16).toString("base64");
+              }
+            }
+
+            const startTime = currentTurnStart;
+            const endTime = currentTurnStart + turnDuration;
+            currentTurnStart = endTime;
+
+            return {
+              ...turn,
+              id: turn.id || `turn-${i}`,
+              speakerName: turn.speakerName || speakerName,
+              audioBase64: turnWavBase64 || nativeMasterWav!.toString("base64"),
+              durationSeconds: turnDuration,
+              startTime,
+              endTime,
+              synthesisFailed: false,
+            };
+          });
+
+          let creditsRemaining = (req as any).userBalance;
+          if (!req.body?.skipMasterStitch && typeof (req as any).deductCredits === "function") {
+            try {
+              creditsRemaining = await (req as any).deductCredits();
+            } catch {}
+          }
+
+          return res.json({
+            masterAudioBase64: nativeMasterWav.toString("base64"),
+            totalDurationSeconds: totalDuration,
+            turns: synthesizedTurns,
+            srtSubtitles: generateSrtFromTurns(synthesizedTurns),
+            creditsRemaining,
+          });
         }
       }
-    }
 
-    if (nativeSuccess && nativeMasterWav && nativeMasterPcm) {
-      // Build synthesizedTurns from native multi-speaker master audio
-      const totalDuration = Math.round((nativeMasterPcm.length / 48000) * 10) / 10;
-      const totalTextLen = Math.max(1, turns.reduce((acc: number, t: any) => acc + (t.text || "").length, 0));
-      let currentTurnStart = 0;
-
-      const synthesizedTurns = turns.map((turn: any, i: number) => {
-        const isHost1 = turn.speakerId === "HOST_1";
-        const speakerName = isHost1
-          ? (host1Voice.name || turn.speakerName || "Artur Yugay")
-          : (host2Voice.name || turn.speakerName || "Ayubxon Burxonov");
-
-        let turnWavBase64 = "";
-        let turnDuration = 0;
-
-        if (nativePerPartAudios.length === turns.length) {
-          turnWavBase64 = nativePerPartAudios[i].toString("base64");
-          const { pcm } = extractPcmData(nativePerPartAudios[i]);
-          turnDuration = Math.max(0.5, Math.round((pcm.length / 48000) * 10) / 10);
-        } else {
-          // Proportional duration from master track based on turn text length
-          const proportion = Math.max(0.05, (turn.text || "").length / totalTextLen);
-          turnDuration = Math.max(0.5, Math.round(totalDuration * proportion * 10) / 10);
-          const pcmByteStart = Math.min(nativeMasterPcm!.length, Math.floor(currentTurnStart * 48000));
-          const pcmByteEnd = Math.min(nativeMasterPcm!.length, Math.floor((currentTurnStart + turnDuration) * 48000));
-          if (pcmByteEnd > pcmByteStart) {
-            const turnSlice = nativeMasterPcm!.subarray(pcmByteStart, pcmByteEnd);
-            turnWavBase64 = buildWavBuffer(turnSlice, 24000, 1, 16).toString("base64");
-          }
+      // Per-Turn Synthesis with N-speaker support, Cloned Voice support, and 4-Step Duration Cascade
+      const processedTurnResults = await mapConcurrent(turns, 2, async (turn: any, i: number) => {
+        if (i > 0) {
+          await new Promise((r) => setTimeout(r, 180));
         }
 
-        const startTime = currentTurnStart;
-        const endTime = currentTurnStart + turnDuration;
-        currentTurnStart = endTime;
+        const resolved = resolveSpeakerVoiceProfile(
+          turn.speakerId || "HOST_1",
+          turn,
+          host1Voice,
+          host2Voice,
+          speakerVoices
+        );
+
+        const { extractedStyles: turnExtractedStyles } = cleanScriptForSpeech(turn.text || "");
+        const combinedTurnStyle = [
+          resolved.baseSpeechStyle,
+          turn.speechStyle,
+          turnExtractedStyles && turnExtractedStyles.length > 0
+            ? `Acting & emotional cues: ${turnExtractedStyles.join(", ")}`
+            : "",
+        ]
+          .filter(Boolean)
+          .join(". ");
+
+        const cascadeResult = await synthesizeTurnWithDurationCascade({
+          turn,
+          voiceId: resolved.voiceId,
+          baseVoice: resolved.baseVoice,
+          speakerName: resolved.speakerName,
+          combinedTurnStyle,
+          strictTimeWindow: isTimeAlignedMode,
+        });
 
         return {
-          id: turn.id || `turn-${i}`,
-          speakerId: turn.speakerId,
-          speakerName: turn.speakerName || speakerName,
-          text: turn.text,
-          originalText: turn.originalText,
-          timecode: turn.timecode,
-          startSec: turn.startSec,
-          endSec: turn.endSec,
-          durationSec: turn.durationSec,
-          chapter: turn.chapter,
-          emotion: turn.emotion,
-          audioBase64: turnWavBase64 || nativeMasterWav!.toString("base64"),
-          durationSeconds: turnDuration,
-          startTime,
-          endTime,
-          synthesisFailed: false,
+          turn: {
+            ...turn,
+            text: cascadeResult.finalText,
+          },
+          speakerName: resolved.speakerName,
+          turnPcm: cascadeResult.pcm,
+          turnWavRaw: cascadeResult.rawWav,
+          turnFailed: cascadeResult.failed,
+          fitStepApplied: cascadeResult.fitStepApplied,
         };
       });
 
+      const failedTurns: number[] = [];
+      processedTurnResults.forEach((r, idx) => {
+        if (r.turnFailed) failedTurns.push(idx + 1);
+      });
+
+      if (failedTurns.length === processedTurnResults.length && processedTurnResults.length > 0) {
+        return res.status(502).json({
+          error: "Ovoz sintezi amalga oshmadi. Barcha replikalarda xatolik yuz berdi.",
+          message_ru: "Синтез диалога не удался: модель не смогла сгенерировать аудио. Проверьте квоты и статус API ключа.",
+          failedTurns,
+        });
+      }
+
+      let masterAudioBase64 = "";
+      let totalDuration = 0;
+      const synthesizedTurns: any[] = [];
+
+      if (isTimeAlignedMode) {
+        // Strict Timecode Assembly: places every turn at its exact startSec without clamping "Без слов" musical intervals
+        const assembled = assembleStrictTimecodeMasterPcm(
+          processedTurnResults.map((r, idx) => ({
+            startSec: typeof r.turn.startSec === "number" ? r.turn.startSec : idx * 3,
+            endSec:
+              typeof r.turn.endSec === "number"
+                ? r.turn.endSec
+                : (typeof r.turn.startSec === "number" ? r.turn.startSec : idx * 3) +
+                  r.turnPcm.length / 48000,
+            pcm: r.turnPcm,
+          })),
+          typeof totalTimelineSec === "number" ? totalTimelineSec : undefined,
+          24000
+        );
+
+        if (!req.body?.skipMasterStitch) {
+          const masterWavBuffer = buildWavBuffer(assembled.masterPcm, 24000, 1, 16);
+          masterAudioBase64 = masterWavBuffer.toString("base64");
+          totalDuration = assembled.totalDurationSec;
+        }
+
+        processedTurnResults.forEach((r, idx) => {
+          const placement = assembled.actualPlacements[idx];
+          const finalTurnWav = r.turnWavRaw || buildWavBuffer(r.turnPcm, 24000, 1, 16);
+          synthesizedTurns.push({
+            ...r.turn,
+            id: r.turn.id || `turn-${idx}`,
+            speakerName: r.turn.speakerName || r.speakerName,
+            audioBase64: finalTurnWav.toString("base64"),
+            durationSeconds: placement.durationSec,
+            startTime: placement.startSec,
+            endTime: placement.endSec,
+            fitStepApplied: r.fitStepApplied,
+            synthesisFailed: r.turnFailed,
+          });
+        });
+      } else {
+        // Continuous Podcast Stitching (350ms natural pause between turns)
+        const DIALOGUE_PAUSE_SECONDS = 0.35;
+        const pauseBuffer = Buffer.alloc(Math.round(24000 * 2 * DIALOGUE_PAUSE_SECONDS));
+        const pcmChunks: Buffer[] = [];
+        let currentMasterTime = 0;
+
+        for (let i = 0; i < processedTurnResults.length; i++) {
+          const { turn, speakerName, turnPcm, turnWavRaw, turnFailed, fitStepApplied } =
+            processedTurnResults[i];
+          const turnDuration = Math.max(0.5, Math.round((turnPcm.length / 48000) * 10) / 10);
+          const turnStartTime = currentMasterTime;
+          const turnEndTime = currentMasterTime + turnDuration;
+          currentMasterTime = turnEndTime + DIALOGUE_PAUSE_SECONDS;
+
+          pcmChunks.push(turnPcm);
+          pcmChunks.push(pauseBuffer);
+
+          const finalTurnWav = turnWavRaw || buildWavBuffer(turnPcm, 24000, 1, 16);
+          synthesizedTurns.push({
+            ...turn,
+            id: turn.id || `turn-${i}`,
+            speakerName: turn.speakerName || speakerName,
+            audioBase64: finalTurnWav.toString("base64"),
+            durationSeconds: turnDuration,
+            startTime: turnStartTime,
+            endTime: turnEndTime,
+            fitStepApplied,
+            synthesisFailed: turnFailed,
+          });
+        }
+
+        if (!req.body?.skipMasterStitch) {
+          const totalPcm = Buffer.concat(pcmChunks);
+          const masterWavBuffer = buildWavBuffer(totalPcm, 24000, 1, 16);
+          masterAudioBase64 = masterWavBuffer.toString("base64");
+          totalDuration = Math.round((totalPcm.length / 48000) * 10) / 10;
+        }
+      }
+
       let creditsRemaining = (req as any).userBalance;
-      if (typeof (req as any).deductCredits === "function") {
+      if (
+        !req.body?.skipMasterStitch &&
+        failedTurns.length < processedTurnResults.length &&
+        typeof (req as any).deductCredits === "function"
+      ) {
         try {
           creditsRemaining = await (req as any).deductCredits();
-        } catch (deductErr) {
-          console.warn("Credit deduction notice:", deductErr);
-        }
+        } catch {}
       }
 
-      return res.json({
-        masterAudioBase64: nativeMasterWav.toString("base64"),
-        totalDurationSeconds: totalDuration,
+      res.json({
+        masterAudioBase64: masterAudioBase64 || undefined,
+        totalDurationSeconds: totalDuration || undefined,
         turns: synthesizedTurns,
+        srtSubtitles: generateSrtFromTurns(synthesizedTurns),
+        failedTurns: failedTurns.length > 0 ? failedTurns : undefined,
         creditsRemaining,
       });
+    } catch (error: any) {
+      console.error("Error synthesizing dialogue:", error);
+      res
+        .status(500)
+        .json({ error: error.message || "Muloqot sintezida xatolik" });
     }
-
-    // SAFE FALLBACK: Sequential synthesis with 2-concurrent worker loop if native multi-speaker was skipped or failed
-    console.log(
-      `[Synthesize Dialogue] Running sequential fallback for ${turns.length} turns (Host 1: ${host1BaseVoice}, Host 2: ${host2BaseVoice})...`,
-    );
-
-    // Single unified dialogue pause constant (350ms):
-    // 24000 samples/sec * 1 channel * 2 bytes/sample * 0.35s = exactly 16800 bytes of silence!
-    const DIALOGUE_PAUSE_SECONDS = 0.35;
-    const pauseBuffer = Buffer.alloc(Math.round(24000 * 2 * DIALOGUE_PAUSE_SECONDS));
-
-    // Controlled worker pool: synthesize 2 turns concurrently with delay spacing
-    const processedTurnResults = await mapConcurrent(turns, 2, async (turn: any, i: number) => {
-      // Slight delay between turns to avoid hitting rate limits
-      if (i > 0) {
-        await new Promise((r) => setTimeout(r, 200));
-      }
-
-      const isHost1 = turn.speakerId === "HOST_1";
-      const activeVoiceConfig = isHost1 ? host1Config : host2Config;
-      const activeVoiceName = isHost1 ? host1BaseVoice : host2BaseVoice;
-      const activeSpeechStyle = isHost1 ? host1SpeechStyle : host2SpeechStyle;
-      const speakerName = isHost1
-        ? (host1Voice.name || turn.speakerName || "Artur Yugay")
-        : (host2Voice.name || turn.speakerName || "Ayubxon Burxonov");
-
-      const { speechText: cleanedTurnText, extractedStyles: turnExtractedStyles } = cleanScriptForSpeech(turn.text || "");
-      const textToSynthesize = cleanedTurnText || (turn.text || "").trim() || "...";
-      const combinedTurnStyle = [
-        activeSpeechStyle,
-        turn.speechStyle,
-        turnExtractedStyles && turnExtractedStyles.length > 0
-          ? `Acting & emotional cues: ${turnExtractedStyles.join(", ")}`
-          : "",
-      ]
-        .filter(Boolean)
-        .join(". ");
-
-      let turnPcm: Buffer | null = null;
-      let turnWavRaw: Buffer | null = null;
-      let turnFailed = false;
-
-      try {
-        const result = await generateGeminiSpeechPcm({
-          text: textToSynthesize,
-          voiceName: activeVoiceName,
-          speechStyle: combinedTurnStyle,
-          speakerName,
-        });
-        turnPcm = result.pcm;
-        turnWavRaw = result.rawWav;
-      } catch (synthErr: any) {
-        console.error(
-          `[Turn ${i + 1}/${turns.length}] Synthesis failed for ${activeVoiceName}:`,
-          synthErr?.message,
-        );
-        turnFailed = true;
-        turnPcm = Buffer.alloc(24000); // 0.5s clean silence placeholder
-        turnWavRaw = buildWavBuffer(turnPcm, 24000, 1, 16);
-      }
-
-      // If synthesis completely failed for this turn, ensure non-empty fallback
-      if (!turnPcm || turnPcm.length === 0) {
-        turnFailed = true;
-        turnPcm = Buffer.alloc(24000); // 0.5s clean silence placeholder
-        turnWavRaw = buildWavBuffer(turnPcm, 24000, 1, 16);
-      } else if (!turnWavRaw) {
-        turnWavRaw = buildWavBuffer(turnPcm, 24000, 1, 16);
-      }
-
-      return {
-        turn,
-        speakerName,
-        turnPcm,
-        turnWavRaw,
-        turnFailed,
-      };
-    });
-
-    const synthesizedTurns: any[] = [];
-    const pcmChunks: Buffer[] = [];
-    const failedTurns: number[] = [];
-    let currentMasterTime = 0;
-    const isContinuousMode = req.body?.masterAudioMode !== "time_aligned";
-
-    // Stitch processed turns in strict sequential order
-    for (let i = 0; i < processedTurnResults.length; i++) {
-      const { turn, speakerName, turnPcm, turnWavRaw, turnFailed } = processedTurnResults[i];
-
-      if (turnFailed) {
-        failedTurns.push(i + 1);
-      }
-
-      // If in time_aligned mode and turn has timecode, align silence padding with a STRICT 2.0s CLAMP
-      // This eliminates the bug where chapter jumps insert minutes of dead air or noisy emptiness!
-      if (!isContinuousMode && typeof turn.startSec === "number" && turn.startSec > currentMasterTime) {
-        const rawGapSec = turn.startSec - currentMasterTime;
-        const gapSec = Math.min(2.0, Math.max(0, rawGapSec));
-        if (gapSec > 0.05) {
-          const gapBuf = Buffer.alloc(Math.round(24000 * 2 * gapSec));
-          pcmChunks.push(gapBuf);
-          currentMasterTime += gapSec;
-        }
-      }
-
-      const turnDuration = Math.max(
-        0.5,
-        Math.round((turnPcm.length / 48000) * 10) / 10,
-      );
-      const turnStartTime = currentMasterTime;
-      const turnEndTime = currentMasterTime + turnDuration;
-      currentMasterTime = turnEndTime + DIALOGUE_PAUSE_SECONDS;
-
-      pcmChunks.push(turnPcm);
-      pcmChunks.push(pauseBuffer);
-
-      const finalTurnWav = turnWavRaw || buildWavBuffer(turnPcm, 24000, 1, 16);
-      synthesizedTurns.push({
-        id: turn.id || `turn-${i}`,
-        speakerId: turn.speakerId,
-        speakerName: turn.speakerName || speakerName,
-        text: turn.text,
-        originalText: turn.originalText,
-        timecode: turn.timecode,
-        startSec: turn.startSec,
-        endSec: turn.endSec,
-        durationSec: turn.durationSec,
-        chapter: turn.chapter,
-        emotion: turn.emotion,
-        audioBase64: finalTurnWav.toString("base64"),
-        durationSeconds: turnDuration,
-        startTime: turnStartTime,
-        endTime: turnEndTime,
-        synthesisFailed: turnFailed,
-      });
-    }
-
-    // If 100% of turns failed to synthesize, return an explicit error instead of silent mock audio
-    if (failedTurns.length === processedTurnResults.length && processedTurnResults.length > 0) {
-      console.error(`[Synthesize Dialogue] All ${turns.length} turns failed to synthesize audio.`);
-      return res.status(502).json({
-        error: "Ovoz sintezi amalga oshmadi. Barcha replikalarda xatolik yuz berdi.",
-        message_ru: "Синтез диалога не удался: модель не смогла сгенерировать аудио. Проверьте квоты и статус API ключа.",
-        failedTurns,
-      });
-    }
-
-    // Combine all pure PCM chunks into ONE unified master track with a single valid 44-byte WAV header
-    let masterAudioBase64 = "";
-    let totalDuration = 0;
-    if (!req.body?.skipMasterStitch) {
-      const totalPcm = Buffer.concat(pcmChunks);
-      const masterWavBuffer = buildWavBuffer(totalPcm, 24000, 1, 16);
-      masterAudioBase64 = masterWavBuffer.toString("base64");
-      totalDuration = Math.round((totalPcm.length / 48000) * 10) / 10;
-    }
-
-    let creditsRemaining = (req as any).userBalance;
-    if (failedTurns.length < processedTurnResults.length && typeof (req as any).deductCredits === "function") {
-      try {
-        creditsRemaining = await (req as any).deductCredits();
-      } catch (deductErr) {
-        console.warn("Credit deduction notice:", deductErr);
-      }
-    }
-
-    res.json({
-      masterAudioBase64: masterAudioBase64 || undefined,
-      totalDurationSeconds: totalDuration || undefined,
-      turns: synthesizedTurns,
-      failedTurns: failedTurns.length > 0 ? failedTurns : undefined,
-      creditsRemaining,
-    });
-  } catch (error: any) {
-    console.error("Error synthesizing dialogue:", error);
-    res
-      .status(500)
-      .json({ error: error.message || "Muloqot sintezida xatolik" });
   }
-});
+);
 
-// Stitch multiple dialogue turn audio chunks into a unified master podcast track (up to 1.5 hours)
-app.post("/api/podcast/stitch-dialogue-turns", async (req, res) => {
+// Stitch multiple dialogue turn audio chunks into a unified master track (supports strict time_aligned and continuous modes)
+app.post("/api/podcast/stitch-dialogue-turns", requireCreditBalance(1), async (req, res) => {
   try {
-    const { turns = [], masterAudioMode = "continuous" } = req.body;
+    const { turns = [], masterAudioMode = "continuous", totalTimelineSec } = req.body;
 
     if (!Array.isArray(turns) || turns.length === 0) {
       return res.status(400).json({ error: "Birlashtirish uchun replikalar (turns) kiritilmadi" });
     }
 
-    const DIALOGUE_PAUSE_SECONDS = 0.35;
-    const pauseBuffer = Buffer.alloc(Math.round(24000 * 2 * DIALOGUE_PAUSE_SECONDS));
+    const isTimeAligned = masterAudioMode === "time_aligned";
+    let totalPcm: Buffer;
+    let totalDurationSeconds = 0;
 
-    const pcmChunks: Buffer[] = [];
-    let currentMasterTime = 0;
-    const srtLines: string[] = [];
-    const vttLines: string[] = ["WEBVTT", ""];
-    const isContinuousMode = masterAudioMode !== "time_aligned";
-
-    for (let i = 0; i < turns.length; i++) {
-      const turn = turns[i];
+    const extractedTurns = turns.map((turn: any, idx: number) => {
       let turnPcm: Buffer | null = null;
-
       if (turn.audioBase64) {
         try {
           const raw = Buffer.from(turn.audioBase64, "base64");
-          const { pcm } = extractPcmData(raw);
-          turnPcm = pcm;
+          turnPcm = extractPcmData(raw).pcm;
         } catch {}
       }
-
       if (!turnPcm || turnPcm.length === 0) {
-        turnPcm = Buffer.alloc(24000); // 0.5s fallback clean silence
+        turnPcm = Buffer.alloc(24000);
       }
+      return {
+        turn,
+        pcm: turnPcm,
+        startSec: typeof turn.startSec === "number" ? turn.startSec : idx * 3,
+        endSec:
+          typeof turn.endSec === "number"
+            ? turn.endSec
+            : (typeof turn.startSec === "number" ? turn.startSec : idx * 3) +
+              turnPcm.length / 48000,
+      };
+    });
 
-      // If in time_aligned mode, clamp silence gap to maximum 2.0s to eliminate empty noise/dead air!
-      if (!isContinuousMode && typeof turn.startSec === "number" && turn.startSec > currentMasterTime) {
-        const rawGapSec = turn.startSec - currentMasterTime;
-        const gapSec = Math.min(2.0, Math.max(0, rawGapSec));
-        if (gapSec > 0.05) {
-          const gapBuf = Buffer.alloc(Math.round(24000 * 2 * gapSec));
-          pcmChunks.push(gapBuf);
-          currentMasterTime += gapSec;
-        }
+    if (isTimeAligned) {
+      const assembled = assembleStrictTimecodeMasterPcm(
+        extractedTurns.map((et) => ({
+          startSec: et.startSec,
+          endSec: et.endSec,
+          pcm: et.pcm,
+        })),
+        typeof totalTimelineSec === "number" ? totalTimelineSec : undefined,
+        24000
+      );
+      totalPcm = assembled.masterPcm;
+      totalDurationSeconds = assembled.totalDurationSec;
+    } else {
+      const DIALOGUE_PAUSE_SECONDS = 0.35;
+      const pauseBuffer = Buffer.alloc(Math.round(24000 * 2 * DIALOGUE_PAUSE_SECONDS));
+      const pcmChunks: Buffer[] = [];
+      for (const et of extractedTurns) {
+        pcmChunks.push(et.pcm);
+        pcmChunks.push(pauseBuffer);
       }
-
-      const turnDuration = Math.max(0.5, Math.round((turnPcm.length / 48000) * 10) / 10);
-      const turnStartTime = currentMasterTime;
-      const turnEndTime = currentMasterTime + turnDuration;
-      currentMasterTime = turnEndTime + DIALOGUE_PAUSE_SECONDS;
-
-      pcmChunks.push(turnPcm);
-      pcmChunks.push(pauseBuffer);
-
-      // Format SRT & VTT subtitles
-      const formatTimeSRT = (sec: number) => {
-        const h = Math.floor(sec / 3600).toString().padStart(2, "0");
-        const m = Math.floor((sec % 3600) / 60).toString().padStart(2, "0");
-        const s = Math.floor(sec % 60).toString().padStart(2, "0");
-        const ms = Math.floor((sec % 1) * 1000).toString().padStart(3, "0");
-        return `${h}:${m}:${s},${ms}`;
-      };
-      const formatTimeVTT = (sec: number) => {
-        const h = Math.floor(sec / 3600).toString().padStart(2, "0");
-        const m = Math.floor((sec % 3600) / 60).toString().padStart(2, "0");
-        const s = Math.floor(sec % 60).toString().padStart(2, "0");
-        const ms = Math.floor((sec % 1) * 1000).toString().padStart(3, "0");
-        return `${h}:${m}:${s}.${ms}`;
-      };
-
-      const speakerLabel = turn.speakerName ? `${turn.speakerName}: ` : "";
-      const cleanSubtitleText = (turn.text || "")
-        .replace(/<[^>]+>/g, "")
-        .replace(/\|[^|]+\|/g, "")
-        .replace(/\[[^\]]+\]/g, "")
-        .replace(/\s+/g, " ")
-        .trim();
-
-      srtLines.push(`${i + 1}`);
-      srtLines.push(`${formatTimeSRT(turnStartTime)} --> ${formatTimeSRT(turnEndTime)}`);
-      srtLines.push(`${speakerLabel}${cleanSubtitleText}`);
-      srtLines.push("");
-
-      vttLines.push(`${formatTimeVTT(turnStartTime)} --> ${formatTimeVTT(turnEndTime)}`);
-      vttLines.push(`${speakerLabel}${cleanSubtitleText}`);
-      vttLines.push("");
+      totalPcm = Buffer.concat(pcmChunks);
+      totalDurationSeconds = Math.round((totalPcm.length / 48000) * 10) / 10;
     }
 
-    const totalPcm = Buffer.concat(pcmChunks);
     const masterWavBuffer = buildWavBuffer(totalPcm, 24000, 1, 16);
-    const totalDurationSeconds = Math.round((totalPcm.length / 48000) * 10) / 10;
+    const srtSubtitles = generateSrtFromTurns(turns);
+
+    let creditsRemaining = (req as any).userBalance;
+    if (typeof (req as any).deductCredits === "function") {
+      try {
+        creditsRemaining = await (req as any).deductCredits(1);
+      } catch {}
+    }
 
     res.json({
       status: "success",
       masterAudioBase64: masterWavBuffer.toString("base64"),
       totalDurationSeconds,
-      srtSubtitles: srtLines.join("\n"),
-      vttSubtitles: vttLines.join("\n"),
+      srtSubtitles,
       totalTurnsStitched: turns.length,
+      creditsRemaining,
     });
   } catch (error: any) {
     console.error("Error stitching dialogue turns:", error);
-    res.status(500).json({ error: error.message || "Audioni birlashtirishda xatolik" });
+    res.status(500).json({ error: error.message || "Audio birlashtirishda xatolik" });
+  }
+});
+
+// =========================================================================
+// VERBATIM 1:1 STORYBOARD DUBBING & 15-MINUTE VIDEO MUXING ENDPOINTS
+// =========================================================================
+
+// 1. Parse Russian Storyboard (Видеоряд / Интонация / Текст / Без слов) & Translate 1:1 into Uzbek with Post-Validator
+app.post("/api/podcast/parse-verbatim-storyboard", requireCreditBalance(1), async (req, res) => {
+  try {
+    const { storyboardText = "" } = req.body;
+    if (!storyboardText || typeof storyboardText !== "string" || storyboardText.trim().length < 5) {
+      return res.status(400).json({
+        error: "Раскадровка или текст для дубляжа не могут быть пустыми.",
+      });
+    }
+
+    const result = await parseAndTranslateVerbatimStoryboard(ai, storyboardText);
+    const numericCost =
+      typeof result.estimatedCostUsd === "number"
+        ? result.estimatedCostUsd
+        : Number(result.estimatedCostUsd?.totalUsd ?? 0.03);
+
+    let creditsRemaining = (req as any).userBalance;
+    if (typeof (req as any).deductCredits === "function") {
+      try {
+        creditsRemaining = await (req as any).deductCredits(1);
+      } catch {}
+    }
+
+    res.json({
+      ...result,
+      totalVideoDurationSec: result.totalDurationSec,
+      estimatedCostUsd: numericCost,
+      estimatedCostBreakdown: result.estimatedCostUsd,
+      srtSubtitles: generateSrtFromTurns(result.turns),
+      creditsRemaining,
+    });
+  } catch (err: any) {
+    console.error("[parse-verbatim-storyboard] Error:", err);
+    res.status(500).json({
+      error: err?.message || "Ошибка при разборе и переводе раскадровки 1:1.",
+    });
+  }
+});
+
+// 2. Re-synthesize a single turn from the storyboard table (with 4-step duration cascade) and optionally re-stitch master track
+app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (req, res) => {
+  try {
+    const {
+      turn,
+      allTurns = [],
+      host1Voice = {},
+      host2Voice = {},
+      speakerVoices = {},
+      masterAudioMode = "time_aligned",
+      totalTimelineSec,
+    } = req.body;
+
+    if (!turn || !turn.text) {
+      return res.status(400).json({ error: "Текст реплики обязателен для переозвучки." });
+    }
+
+    const resolved = resolveSpeakerVoiceProfile(
+      turn.speakerId || "HOST_1",
+      turn,
+      host1Voice,
+      host2Voice,
+      speakerVoices
+    );
+
+    const { extractedStyles } = cleanScriptForSpeech(turn.text || "");
+    const combinedTurnStyle = [
+      resolved.baseSpeechStyle,
+      turn.speechStyle,
+      extractedStyles.length > 0 ? `Acting & emotional cues: ${extractedStyles.join(", ")}` : "",
+    ]
+      .filter(Boolean)
+      .join(". ");
+
+    const cascadeResult = await synthesizeTurnWithDurationCascade({
+      turn,
+      voiceId: resolved.voiceId,
+      baseVoice: resolved.baseVoice,
+      speakerName: resolved.speakerName,
+      combinedTurnStyle,
+      strictTimeWindow: masterAudioMode === "time_aligned",
+    });
+
+    if (cascadeResult.failed) {
+      return res.status(502).json({ error: "Не удалось переозвучить выбранную реплику." });
+    }
+
+    const updatedTurnDuration = Math.max(
+      0.4,
+      Math.round((cascadeResult.pcm.length / 48000) * 100) / 100
+    );
+    const updatedTurn = {
+      ...turn,
+      text: cascadeResult.finalText,
+      speakerName: turn.speakerName || resolved.speakerName,
+      audioBase64: cascadeResult.rawWav.toString("base64"),
+      durationSeconds: updatedTurnDuration,
+      fitStepApplied: cascadeResult.fitStepApplied,
+      synthesisFailed: false,
+    };
+
+    // If allTurns was passed, re-assemble the master track immediately so preview & video sync update in 1 click
+    let masterAudioBase64: string | undefined;
+    let totalDurationSeconds: number | undefined;
+    let srtSubtitles: string | undefined;
+
+    if (Array.isArray(allTurns) && allTurns.length > 0) {
+      const mergedTurns = allTurns.map((t: any) =>
+        t.id === updatedTurn.id ? updatedTurn : t
+      );
+      if (masterAudioMode === "time_aligned") {
+        const turnsWithPcm = mergedTurns.map((t: any, idx: number) => {
+          let pcmBuf: Buffer = Buffer.alloc(24000);
+          if (t.audioBase64) {
+            try {
+              pcmBuf = Buffer.from(extractPcmData(Buffer.from(t.audioBase64, "base64")).pcm);
+            } catch {}
+          }
+          return {
+            startSec: typeof t.startSec === "number" ? t.startSec : idx * 3,
+            endSec:
+              typeof t.endSec === "number"
+                ? t.endSec
+                : (typeof t.startSec === "number" ? t.startSec : idx * 3) +
+                  pcmBuf.length / 48000,
+            pcm: pcmBuf,
+          };
+        });
+        const assembled = assembleStrictTimecodeMasterPcm(
+          turnsWithPcm,
+          typeof totalTimelineSec === "number" ? totalTimelineSec : undefined,
+          24000
+        );
+        masterAudioBase64 = buildWavBuffer(assembled.masterPcm, 24000, 1, 16).toString("base64");
+        totalDurationSeconds = assembled.totalDurationSec;
+      }
+      srtSubtitles = generateSrtFromTurns(mergedTurns);
+    }
+
+    res.json({
+      turn: updatedTurn,
+      masterAudioBase64,
+      totalDurationSeconds,
+      srtSubtitles,
+    });
+  } catch (err: any) {
+    console.error("[synthesize-single-turn] Error:", err);
+    res.status(500).json({ error: err?.message || "Ошибка переозвучки фразы." });
+  }
+});
+
+// 3. Streaming Multipart Video Upload (up to 600 MB / 15 minutes) to /tmp + Optional Gemini Files API Storyboard Extraction
+const dubbingVideoStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    cb(null, "/tmp");
+  },
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || ".mp4") || ".mp4";
+    const safeExt = /^\.[a-zA-Z0-9]{2,5}$/.test(ext) ? ext : ".mp4";
+    cb(null, `dubvideo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${safeExt}`);
+  },
+});
+
+const uploadDubbingVideoMiddleware = multer({
+  storage: dubbingVideoStorage,
+  limits: {
+    fileSize: 600 * 1024 * 1024, // 600 MB max for 15-minute HD videos
+  },
+});
+
+const uploadedVideoSessions = new Map<
+  string,
+  { filePath: string; originalName: string; mimeType: string; createdAt: number }
+>();
+
+app.post(
+  "/api/podcast/upload-dubbing-video",
+  uploadDubbingVideoMiddleware.single("video"),
+  async (req: any, res) => {
+    req.setTimeout(600000);
+    res.setTimeout(600000);
+    try {
+      const file = req.file;
+      if (!file || !file.path) {
+        return res.status(400).json({ error: "Видеофайл не получен сервером." });
+      }
+
+      const videoSessionId = path.basename(file.path);
+      uploadedVideoSessions.set(videoSessionId, {
+        filePath: file.path,
+        originalName: file.originalname || "video.mp4",
+        mimeType: file.mimetype || "video/mp4",
+        createdAt: Date.now(),
+      });
+
+      // Optionally auto-generate storyboard from the video using Gemini Files API (ai.files.upload)
+      const autoAnalyze =
+        req.body?.autoAnalyzeWithGemini === "true" ||
+        req.body?.generateStoryboardViaGemini === "true";
+      let storyboardResult: any = null;
+      let generatedRawStoryboard = "";
+
+      if (autoAnalyze) {
+        let uploadedGeminiFile: any = null;
+        try {
+          uploadedGeminiFile = await ai.files.upload({
+            file: file.path,
+            config: {
+              mimeType: file.mimetype || "video/mp4",
+            },
+          });
+
+          // Poll until file state is ACTIVE
+          let currentFile = uploadedGeminiFile;
+          for (let poll = 0; poll < 40; poll++) {
+            const state = String(currentFile?.state || "").toUpperCase();
+            if (state === "ACTIVE" || !state) break;
+            if (state === "FAILED") {
+              throw new Error("Gemini Files API не смог обработать видеофайл.");
+            }
+            await new Promise((r) => setTimeout(r, 2500));
+            currentFile = await ai.files.get({ name: currentFile.name });
+          }
+
+          const storyboardGenRes = await ai.models.generateContent({
+            model: "gemini-3.8-flash",
+            contents: [
+              {
+                role: "user",
+                parts: [
+                  {
+                    fileData: {
+                      fileUri: currentFile.uri,
+                      mimeType: currentFile.mimeType || file.mimetype || "video/mp4",
+                    },
+                  },
+                  {
+                    text: `Сделай посекундную раскадровку этого видео на русском языке для точного дубляжа 1:1.
+Формат строго такой:
+Спикер 1 (Ж/М) — Имя/роль: краткое описание голоса.
+Спикер 2 (Ж/М) — Имя/роль: краткое описание голоса.
+
+MM:SS – MM:SS | Имя (Ж/М):
+Видеоряд: что происходит в кадре.
+Интонация: каким тоном, с какой эмоцией произносится фраза.
+Текст: «Точная дословная прямая речь из видео (с пометками (смеется), (хе-хе), (вздыхает) если они есть)».
+
+А для музыкальных вставок без речи:
+MM:SS – MM:SS | Музыка и графика (Без слов):
+Видеоряд: описание кадра.`,
+                  },
+                ],
+              },
+            ],
+          });
+
+          generatedRawStoryboard = (storyboardGenRes.text || "").trim();
+          if (generatedRawStoryboard) {
+            const rawParsed = await parseAndTranslateVerbatimStoryboard(
+              ai,
+              generatedRawStoryboard
+            );
+            const numericCost =
+              typeof rawParsed.estimatedCostUsd === "number"
+                ? rawParsed.estimatedCostUsd
+                : Number(rawParsed.estimatedCostUsd?.totalUsd ?? 0.05);
+            storyboardResult = {
+              ...rawParsed,
+              totalVideoDurationSec: rawParsed.totalDurationSec,
+              estimatedCostUsd: numericCost,
+              estimatedCostBreakdown: rawParsed.estimatedCostUsd,
+            };
+          }
+        } finally {
+          if (uploadedGeminiFile?.name) {
+            ai.files.delete({ name: uploadedGeminiFile.name }).catch(() => {});
+          }
+        }
+      }
+
+      res.json({
+        fileId: videoSessionId,
+        videoSessionId,
+        fileName: file.originalname,
+        sizeBytes: file.size,
+        generatedStoryboardText: generatedRawStoryboard || undefined,
+        generatedRawStoryboard: generatedRawStoryboard || undefined,
+        parsedStoryboard: storyboardResult || undefined,
+        storyboardResult: storyboardResult || undefined,
+      });
+    } catch (err: any) {
+      console.error("[upload-dubbing-video] Error:", err);
+      res.status(500).json({
+        error: err?.message || "Ошибка загрузки или анализа видеофайла.",
+      });
+    }
+  }
+);
+
+// 4. Mux Dubbed Uzbek WAV Track with Uploaded Video (up to 15 min) via /usr/bin/ffmpeg
+const generatedDubbedVideos = new Map<string, string>();
+
+app.post("/api/podcast/mux-dubbed-video", async (req, res) => {
+  req.setTimeout(300000);
+  res.setTimeout(300000);
+  try {
+    const {
+      fileId,
+      videoSessionId,
+      masterAudioBase64,
+      turns = [],
+      speechIntervals = [],
+      duckingMode,
+      backgroundMode = "smart_ducking",
+    } = req.body;
+
+    const resolvedSessionId = videoSessionId || fileId;
+    if (!resolvedSessionId || !uploadedVideoSessions.has(resolvedSessionId)) {
+      return res.status(400).json({
+        error: "Видеофайл сессии не найден на сервере. Пожалуйста, выберите видео заново.",
+      });
+    }
+    if (!masterAudioBase64) {
+      return res.status(400).json({
+        error: "Сначала сгенерируйте узбекскую аудиодорожку дубляжа.",
+      });
+    }
+
+    const session = uploadedVideoSessions.get(resolvedSessionId)!;
+    if (!fs.existsSync(session.filePath)) {
+      return res.status(404).json({
+        error: "Временный видеофайл истёк. Загрузите видео повторно.",
+      });
+    }
+
+    const dubbedWavBuffer = Buffer.from(masterAudioBase64, "base64");
+    const rawIntervals =
+      Array.isArray(speechIntervals) && speechIntervals.length > 0
+        ? speechIntervals
+        : Array.isArray(turns)
+        ? turns
+        : [];
+    const spokenIntervals = rawIntervals
+      .map((t: any) => ({
+        startSec: typeof t.startTime === "number" ? t.startTime : Number(t.startSec || 0),
+        endSec: typeof t.endTime === "number" ? t.endTime : Number(t.endSec || 0),
+      }))
+      .filter((iv) => iv.endSec > iv.startSec);
+
+    const effectiveMode = duckingMode || backgroundMode || "smart_ducking";
+    const outMp4Path = await muxDubbedAudioWithVideoFile({
+      videoFilePath: session.filePath,
+      dubbedWavBuffer,
+      spokenIntervals,
+      backgroundMode:
+        effectiveMode === "mute_speech_keep_music" || effectiveMode === "voice_only"
+          ? effectiveMode
+          : "smart_ducking",
+    });
+
+    const downloadId = path.basename(outMp4Path);
+    generatedDubbedVideos.set(downloadId, outMp4Path);
+
+    res.json({
+      downloadUrl: `/api/podcast/download-dubbed-video/${encodeURIComponent(downloadId)}`,
+      downloadId,
+    });
+  } catch (err: any) {
+    console.error("[mux-dubbed-video] Error:", err);
+    res.status(500).json({
+      error: err?.message || "Ошибка при сведении узбекского дубляжа с видео через ffmpeg.",
+    });
+  }
+});
+
+// 5. Stream Final Dubbed MP4 Video to Browser
+app.get("/api/podcast/download-dubbed-video/:fileId", (req, res) => {
+  try {
+    const cleanId = path.basename(req.params.fileId || "");
+    const targetPath =
+      generatedDubbedVideos.get(cleanId) || path.join("/tmp", cleanId);
+    if (!cleanId.startsWith("dubmux_") || !fs.existsSync(targetPath)) {
+      return res.status(404).json({ error: "Готовый видеофайл не найден." });
+    }
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="uzbek-dubbing-${Date.now()}.mp4"`
+    );
+    return fs.createReadStream(targetPath).pipe(res);
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Ошибка скачивания видео." });
   }
 });
 
@@ -5777,6 +6655,187 @@ Javobni FAQAT valid JSON formatida quyidagi strukturada qaytaring:
  * Intelligent local conversational fallback for real estate queries
  * Used when Gemini API key is expired or Google Cloud quota is temporarily unavailable.
  */
+function isFemaleVoiceName(voiceName?: string): boolean {
+  const lower = (voiceName || "").toLowerCase();
+  return (
+    lower === "aoede" ||
+    lower === "kore" ||
+    lower === "zephyr" ||
+    lower.includes("malika") ||
+    lower.includes("madina") ||
+    lower.includes("aziza") ||
+    lower.includes("ayol") ||
+    lower.includes("female")
+  );
+}
+
+function buildRealtorSystemPrompt(
+  language: string,
+  isFemale: boolean,
+  skipOpeningAck = false
+): string {
+  const isRu = language === "ru";
+  if (isRu) {
+    const agentNameRu = isFemale ? "Малика" : "Шохрух";
+    const genderDescRu = isFemale
+      ? "Женщина, 28 лет, говорит спокойно, живо и по-деловому."
+      : "Мужчина, 30 лет, говорит спокойно, живо и по-деловому.";
+    const ackRuleRu = skipOpeningAck
+      ? "- Короткое подтверждение («Хорошо», «Понял») уже прозвучало в начале реплики, поэтому НЕ начинай ответ со слов «Понял», «Хорошо», «Так» — сразу переходи к сути или следующему вопросу."
+      : "- Чередуй короткие естественные связки в начале («Хорошо, Чиланзар.», «Да, до семидесяти тысяч.», «Записал.») или сразу задавай вопрос без вводного слова. Не повторяй одно и то же слово «Понял» в каждом ответе.";
+    return `Ты ${agentNameRu} — живой менеджер агентства недвижимости в Ташкенте. ${genderDescRu} Говори на чистом разговорном русском языке, как реальный человек по телефону. Если клиент говорит по-узбекски, отвечай по-узбекски.
+
+Как ты говоришь:
+- Короткие живые телефонные реплики: иногда 3–5 слов, иногда одно предложение (до 10 слов).
+- Никогда не хвали клиента и не оценивай его выбор: запрещено говорить "отличный выбор", "прекрасный район", "шикарный вариант", "да, конечно", "смотрите", "спасибо за вопрос".
+${ackRuleRu}
+- Если клиент явно не договорил или задумался — не допрашивай, коротко скажи: "Да, слушаю вас."
+- Не перечисляй списки, числительные произноси словами ("пятьдесят тысяч").
+- Приветствие уже прозвучало при поднятии трубки. Повторно не здоровайся.
+
+Твоя задача: быстро узнать параметры запроса и передать живому агенту. Спрашивай по одному пункту за шаг:
+1) покупка, аренда или продажа;
+2) район Ташкента (и новостройка или вторичка);
+3) сколько комнат;
+4) бюджет;
+5) оплата: наличные, ипотека или рассрочка;
+6) имя клиента и удобное время звонка агента (или отправка вариантов в Телеграм).
+То, что клиент уже назвал, повторно не спрашивай.
+Когда основные данные собраны, вызови save_lead и коротко попрощайся:
+"Спасибо, [имя]. Наш агент сегодня свяжется с вами с вариантами. Всего доброго."
+
+Ограничения:
+- Не выдумывай цены, конкретные ЖК или застройщиков. Если спрашивают цену: "Цена зависит от конкретного дома, агент пришлёт точные варианты."
+- На темы вне недвижимости не общайся: "Я помогаю только по вопросам недвижимости Ташкента."
+- Если речь неразборчива: "Алло, вас плохо слышно, повторите, пожалуйста."
+
+Примеры:
+Клиент: Мне нужна двухкомнатная квартира на Чиланзаре.
+Хорошо: Хорошо, Чиланзар, две комнаты. Новостройка или вторичка?
+
+Клиент: Вторичка, наличными, до семидесяти тысяч.
+Хорошо: До семидесяти тысяч, наличные. Как к вам обращаться?`;
+  }
+
+  const agentNameUz = isFemale ? "Malika" : "Shohrux";
+  const genderDescUz = isFemale
+    ? "Ayol, 28 yoshlarda, xotirjam va tabiiy gapirasan."
+    : "Erkak, 30 yoshlarda, xotirjam va tabiiy gapirasan.";
+  const ackRuleUz = skipOpeningAck
+    ? "- Qisqa tasdiq («Xo'p», «Ha») allaqachon aytildi, shuning uchun javobni «Xo'p», «Ha», «Tushunarli» so'zlari bilan BOSHLAMA — darhol asosiy gap yoki savolni ayt."
+    : "- Har safar bir xil «Tushunarli» so'zini takrorlama. Jonli Toshkent so'zlashuv tilida turlicha qisqa bog'lovchilar ishlat («Xo'p, Chilonzor.», «Ha, yetmish ming.», «Bo'ldi, yozib oldim.») yoki to'g'ridan-to'g'ri savolga o't.";
+
+  return `Sen ${agentNameUz}san — Toshkentdagi ko'chmas mulk agentligining menejeri. ${genderDescUz} Faqat o'zbek tilida, oddiy va tabiiy Toshkent so'zlashuv tilida gapir (huddi tirik odam telefonda gaplashgandek). Mijoz ruscha gapirsa, ruscha javob ber.
+
+Qanday gapirasan:
+- Gaplaringning uzunligi tabiiy bo'lsin: ba'zan 3–4 so'z, ba'zan bitta qisqa gap (maksimal 8–10 so'z).
+- Faqat ishga oid gapir. Hech qachon maqtama: "ajoyib", "zo'r", "a'lo tanlov", "xush ko'rdik", "to'g'risini aytsam", "savolingiz uchun rahmat" dema.
+${ackRuleUz}
+- Agar mijoz gapini tugatmagan bo'lsa, darhol savolga tutma: "Ha, eshityapman" yoki "Ayting" deb kut.
+- Ro'yxat sanama, raqamlarni so'z bilan ayt ("yetmish ming").
+- Salomlashuv allaqachon aytildi. Qayta salom berma.
+
+Vazifang: mijoz so'rovini aniqlab, agentga uzatish. Ketma-ket, bittadan so'ra:
+1) sotib olish, ijara yoki sotish;
+2) tuman (novostroyka yoki ikkilamchi bozor);
+3) necha xona;
+4) byudjet;
+5) to'lov: naqd, ipoteka yoki bo'lib to'lash;
+6) ismi va variantlarni Telegramdan tashlash yoki qo'ng'iroq vaqti.
+Mijoz aytgan narsani qayta so'rama.
+Ma'lumotlar yig'ilgach, save_lead funksiyasini chaqir va ayt:
+"Rahmat, [ism]. Agentimiz bugun shu raqamga variantlar bilan qo'ng'iroq qiladi. Xayr."
+
+Cheklovlar:
+- Aniq narx yoki quruvchi to'qima. Narx so'rasa: "Narx uyga qarab o'zgaradi, agentimiz aniq variantlarni tashlab beradi."
+- Ko'chmas mulkdan boshqa mavzuga o'tma: "Men faqat uy-joy bo'yicha yordam beraman."
+- Eshitilmasa: "Alo, ovozingiz uzilib qoldi, qaytarib yuboring."
+
+Misollar:
+Mijoz: Chilonzordan ikki xonali uy kerak edi.
+Yaxshi: Xo'p, Chilonzor, ikki xona. Yangi uymi yoki ikkilamchi?
+
+Mijoz: Naqd pulga olaman, yetmish ming atrofida.
+Yaxshi: Ha, yetmish ming, naqd. Ismingiz nima?`;
+}
+
+function extractProgressiveRealtorLead(text: string): Record<string, string> {
+  const lower = (text || "").toLowerCase();
+  const update: Record<string, string> = {};
+
+  if (lower.includes("ijara") || lower.includes("arenda") || lower.includes("аренд") || lower.includes("снять")) {
+    update.clientIntent = "rent";
+  } else if (lower.includes("sotish") || lower.includes("sotmoqchi") || lower.includes("продать") || lower.includes("продаж")) {
+    update.clientIntent = "sell";
+  } else if (lower.includes("sotib") || lower.includes("olmoqchi") || lower.includes("olaman") || lower.includes("купить") || lower.includes("покуп")) {
+    update.clientIntent = "buy";
+  }
+
+  const districtMap: Array<[string[], string]> = [
+    [["chilonzor", "чиланзар", "novza", "qatortol"], "Chilonzor"],
+    [["mirobod", "мирабад", "oybek", "айбек"], "Mirobod"],
+    [["yunusobod", "юнусабад", "shahriston", "bodomzor", "mega planet"], "Yunusobod"],
+    [["yakkasaroy", "яккасарай", "rustaveli", "rakat"], "Yakkasaroy"],
+    [["mirzo ulug", "мирзо-улугбек", "ulug'bek", "buyuk ipak", "ttz", "qorasuv"], "Mirzo Ulug'bek"],
+    [["yashnobod", "яшнабад", "parkent", "tuzel"], "Yashnobod"],
+    [["sergeli", "сергели", "yangihayot", "янгихаёт"], "Sergeli"],
+    [["shayxontohur", "шайхантахур", "chorsu", "tashkent city"], "Shayxontohur"],
+  ];
+  for (const [keywords, canonical] of districtMap) {
+    if (keywords.some((k) => lower.includes(k))) {
+      update.district = canonical;
+      break;
+    }
+  }
+
+  if (lower.includes("novostroyka") || lower.includes("yangi uy") || lower.includes("новострой")) {
+    update.propertyType = "novostroyka";
+  } else if (lower.includes("ikkilamchi") || lower.includes("vtorichka") || lower.includes("вторич")) {
+    update.propertyType = "vtorichka";
+  }
+
+  if (/\b(1|bir|одно|однушк)\b/.test(lower) && (lower.includes("xona") || lower.includes("комн") || lower.includes("однушк"))) {
+    update.roomsCount = "1 xonali";
+  } else if (/\b(2|ikki|двух|двушк)\b/.test(lower) && (lower.includes("xona") || lower.includes("комн") || lower.includes("двушк"))) {
+    update.roomsCount = "2 xonali";
+  } else if (/\b(3|uch|трех|трёх|трешк)\b/.test(lower) && (lower.includes("xona") || lower.includes("комн") || lower.includes("трешк"))) {
+    update.roomsCount = "3 xonali";
+  } else if (/\b(4|to'rt|tort|четыр)\b/.test(lower) && (lower.includes("xona") || lower.includes("комн"))) {
+    update.roomsCount = "4+ xonali";
+  }
+
+  if (lower.includes("ipoteka") || lower.includes("ипотек")) {
+    update.paymentMethod = "mortgage";
+  } else if (lower.includes("rassrochka") || lower.includes("bo'lib") || lower.includes("muddatli") || lower.includes("рассроч")) {
+    update.paymentMethod = "installments";
+  } else if (lower.includes("naqd") || lower.includes("налич")) {
+    update.paymentMethod = "cash";
+  }
+
+  const numMatch = lower.match(/\b(\d{2,3})\s*(ming|тысяч|тыс|\$|dollar)/i);
+  if (numMatch) {
+    update.budgetRange = `$${numMatch[1]},000`;
+  } else {
+    const wordBudgets: Array<[string[], string]> = [
+      [["qirq ming", "сорок тысяч"], "$40,000"],
+      [["ellik ming", "пятьдесят тысяч"], "$50,000"],
+      [["oltmish ming", "шестьдесят тысяч"], "$60,000"],
+      [["yetmish ming", "семьдесят тысяч"], "$70,000"],
+      [["sakson ming", "восемьдесят тысяч"], "$80,000"],
+      [["to'qson ming", "девяносто тысяч"], "$90,000"],
+      [["yuz ming", "сто тысяч"], "$100,000"],
+    ];
+    for (const [words, amount] of wordBudgets) {
+      if (words.some((w) => lower.includes(w))) {
+        update.budgetRange = amount;
+        break;
+      }
+    }
+  }
+
+  return update;
+}
+
 function generateOfflineRealEstateReply(
   userText: string,
   language: string,
@@ -5786,39 +6845,31 @@ function generateOfflineRealEstateReply(
   const isRu = language === "ru";
 
   if (persona === "tashkent_real_estate") {
-    // 1. Price, budget, cost inquiries
     if (
       lower.includes("narx") ||
       lower.includes("qancha") ||
-      lower.includes("narh") ||
-      lower.includes("qimmat") ||
-      lower.includes("arzon") ||
       lower.includes("цена") ||
       lower.includes("стоимость") ||
-      lower.includes("бюджет") ||
       lower.includes("сколько")
     ) {
       return isRu
-        ? "В Ташкенте средняя цена в Мирабаде $1600-2400/м², а на Чиланзаре и Юнусабаде $900-1300/м². Какой бюджет и район вы рассматриваете?"
-        : "Toshkentda hozirgi narxlar Mirobodda kvadrat metriga $1600-2400, Chilonzor va Yunusobodda $900-1300 atrofida. Siz qanday byudjetni rejalashtiryapsiz?";
+        ? "Цена зависит от конкретного дома, агент пришлёт точные варианты. Какой у вас бюджет?"
+        : "Narx uyga qarab o'zgaradi, agentimiz aniq variantlarni yuboradi. Byudjetingiz qancha?";
     }
 
-    // 2. Installments and mortgage
     if (
       lower.includes("ipoteka") ||
-      lower.includes("muddat") ||
       lower.includes("rassrochka") ||
-      lower.includes("kredit") ||
+      lower.includes("naqd") ||
       lower.includes("ипотек") ||
       lower.includes("рассрочк") ||
-      lower.includes("первоначальн")
+      lower.includes("налич")
     ) {
       return isRu
-        ? "У застройщиков есть отличная рассрочка 0% до 24-36 месяцев, а также банковская ипотека от 17%. Какой первоначальный взнос вам удобен?"
-        : "Yangi majmualarda 24-36 oygacha 0% foizli muddatli to'lov hamda 17% dan ipoteka variantlari bor. Sizga boshlang'ich to'lov qancha ma'qul?";
+        ? "Записал способ оплаты. Как к вам обращаться?"
+        : "Tushunarli, to'lov turini belgilab oldim. Ismingiz nima?";
     }
 
-    // 3. Districts
     if (
       lower.includes("mirobod") ||
       lower.includes("chilonzor") ||
@@ -5832,35 +6883,34 @@ function generateOfflineRealEstateReply(
       lower.includes("яккасарай")
     ) {
       return isRu
-        ? "Это очень востребованный район с отличной транспортной доступностью. Вы ищете квартиру для проживания семьи или под сдачу в аренду?"
-        : "Bu joylashuvi juda qulay va talab yuqori bo'lgan tuman. O'zingiz yashash uchun qidiryapsizmi yoki investitsiya va ijara maqsadidami?";
+        ? "Понял район. Сколько комнат нужно?"
+        : "Tushunarli. Necha xonali uy kerak?";
     }
 
-    // 4. Rooms count
     if (
       lower.includes("1 xona") ||
       lower.includes("2 xona") ||
       lower.includes("3 xona") ||
+      lower.includes("ikki xona") ||
+      lower.includes("uch xona") ||
       lower.includes("1-комн") ||
       lower.includes("2-комн") ||
       lower.includes("3-комн") ||
-      lower.includes("студия")
+      lower.includes("двухкомн")
     ) {
       return isRu
-        ? "Отличный формат, есть как готовые квартиры с ремонтом, так и коробки по выгодной цене. В каком районе вам ближе к работе или семье?"
-        : "Juda qulay reja, tayyor ta'mirlangan yoki karobka holatidagi qulay variantlar bor. Qaysi tuman sizga qulayroq?";
+        ? "Понял по комнатам. Какой бюджет рассматриваете?"
+        : "Tushunarli. Qancha byudjet mo'ljallayapsiz?";
     }
 
-    // Default conversational continuation
     return isRu
-      ? "Понял вас. Скажите, пожалуйста, какой район Ташкента или формат жилья вас больше всего интересует?"
-      : "Tushunarli, albatta. Aytingchi, sizga ko'proq Toshkentning qaysi tumani yoki qanday toifadagi xonadon qulay?";
+      ? "Понял вас. Подскажите, рассматриваете покупку или аренду?"
+      : "Tushunarli. Sotib olish kerakmi yoki ijara?";
   }
 
-  // Other personas default
   return isRu
-    ? "Очень интересный вопрос! Расскажите подробнее, с чего именно вам хотелось бы начать?"
-    : "Bu juda qiziq savol! Batafsilroq aytsangiz, aynan qaysi jihatiga ko'proq e'tibor qaratamiz?";
+    ? "Понял вас. Расскажите, пожалуйста, подробнее."
+    : "Tushunarli. Batafsilroq aytsangiz.";
 }
 
 // Pre-recorded 0-token WAV greeting for SuperTaxi IVR ("Assalomu alaykum, SuperTaksi! Eshitaman sizni.")
@@ -5933,21 +6983,252 @@ app.get("/api/agent/supertaxi-greeting.wav", async (_req, res) => {
   }
 });
 
+// Pre-recorded 0-token WAV greeting for Realtor ("Assalomu alaykum, ko'chmas mulk agentligi, Shohrux/Malika. Eshitaman.")
+app.get("/api/agent/realtor-greeting.wav", async (req, res) => {
+  try {
+    const rawVoice = String(req.query.voice || "Charon").trim();
+    const lang = String(req.query.lang || "uz").trim() === "ru" ? "ru" : "uz";
+    const isFemale = isFemaleVoiceName(rawVoice);
+    const canonicalVoice = isFemale
+      ? rawVoice.toLowerCase() === "kore"
+        ? "Kore"
+        : "Aoede"
+      : rawVoice.toLowerCase() === "puck"
+      ? "Puck"
+      : rawVoice.toLowerCase() === "fenrir"
+      ? "Fenrir"
+      : "Charon";
+
+    const previewsDir = path.resolve(process.cwd(), "public", "audio", "previews");
+    const cacheFileName = `realtor-greeting-${canonicalVoice.toLowerCase()}-${lang}.wav`;
+    const cachedGreetingPath = path.join(previewsDir, cacheFileName);
+
+    if (fs.existsSync(cachedGreetingPath)) {
+      const stat = fs.statSync(cachedGreetingPath);
+      if (stat.size > 1000) {
+        res.setHeader("Content-Type", "audio/wav");
+        res.setHeader("Cache-Control", "public, max-age=86400");
+        return res.sendFile(cachedGreetingPath);
+      }
+    }
+
+    const agentName = isFemale
+      ? lang === "ru"
+        ? "Малика"
+        : "Malika"
+      : lang === "ru"
+      ? "Шохрух"
+      : "Shohrux";
+    const greetingText =
+      lang === "ru"
+        ? `Здравствуйте, агентство недвижимости, ${agentName}. Слушаю вас.`
+        : `Assalomu alaykum, ko'chmas mulk agentligi, ${agentName}. Eshitaman.`;
+
+    try {
+      const ttsResponse = await ai.models.generateContent({
+        model: "gemini-3.8-flash-tts",
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: greetingText,
+                speechMetadata: {
+                  speaker: agentName,
+                  style:
+                    lang === "ru"
+                      ? "Спокойный, чёткий и деловой менеджер агентства недвижимости в Ташкенте, естественный телефонный ответ без лишних эмоций."
+                      : "Toshkentlik xotirjam, aniq va ishbilarmon ko'chmas mulk menejeri, 0% chet el aksentsiz sof o'zbek tili.",
+                },
+              },
+            ],
+          },
+        ],
+        config: {
+          responseModalities: ["AUDIO"],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: canonicalVoice } },
+          },
+        },
+      });
+
+      const part = ttsResponse.candidates?.[0]?.content?.parts?.[0];
+      if (part?.inlineData?.data) {
+        const rawBuf = Buffer.from(part.inlineData.data, "base64");
+        const { buffer: wav } = ensureWav(rawBuf, 24000, 1, 16);
+        fs.mkdirSync(previewsDir, { recursive: true });
+        fs.writeFileSync(cachedGreetingPath, wav);
+        res.setHeader("Content-Type", "audio/wav");
+        res.setHeader("Cache-Control", "public, max-age=86400");
+        return res.send(wav);
+      }
+    } catch (ttsErr: any) {
+      console.warn("Realtor greeting synthesis fallback to cached preview:", ttsErr?.message);
+    }
+
+    const fallbackWavPath = path.join(previewsDir, `${canonicalVoice.toLowerCase()}.wav`);
+    if (fs.existsSync(fallbackWavPath)) {
+      res.setHeader("Content-Type", "audio/wav");
+      return res.sendFile(fallbackWavPath);
+    }
+
+    return res.status(404).end();
+  } catch (err: any) {
+    console.error("Realtor greeting wav error:", err);
+    return res.status(500).end();
+  }
+});
+
+const unsupportedCustomVoiceIds = new Set<string>();
+
+// Normalize any voice ID ("user-replicated", "voice_...", "aziza", "Charon", etc.) into a valid Gemini TTS voiceConfig
+function resolveAgentTtsVoiceConfig(rawVoice?: string): {
+  primaryVoiceConfig: any;
+  fallbackVoiceConfig: any;
+  customIdToTrack?: string;
+  cacheKey: string;
+} {
+  const clean = String(rawVoice || "Charon").trim();
+  const lower = clean.toLowerCase();
+  const isCustom =
+    lower === "user-replicated" ||
+    lower === "shohrux" ||
+    clean.startsWith("voice_") ||
+    clean.startsWith("voicekey_");
+
+  const actualCustomId =
+    lower === "user-replicated" || lower === "shohrux"
+      ? "voice_17raj9ewke3g"
+      : clean;
+  const canonicalBase = resolveCanonicalBaseVoice(clean);
+  const fallbackVoiceConfig = {
+    prebuiltVoiceConfig: { voiceName: canonicalBase },
+  };
+  const useCustom = isCustom && !unsupportedCustomVoiceIds.has(actualCustomId);
+  const primaryVoiceConfig = useCustom
+    ? { voice: actualCustomId }
+    : fallbackVoiceConfig;
+  const cacheKey = (isCustom ? actualCustomId : canonicalBase)
+    .replace(/[^a-zA-Z0-9_-]/g, "")
+    .slice(0, 32);
+
+  return {
+    primaryVoiceConfig,
+    fallbackVoiceConfig,
+    customIdToTrack: useCustom ? actualCustomId : undefined,
+    cacheKey,
+  };
+}
+
+// Pre-cached 0.3s backchannel fillers ("Xo'p...", "Ha...", "Bo'ldi...") in Cloned or Prebuilt Voice
+app.get("/api/agent/realtor-filler.wav", async (req, res) => {
+  try {
+    const rawVoice = String(req.query.voice || "voice_17raj9ewke3g").trim();
+    const lang = String(req.query.lang || "uz").trim() === "ru" ? "ru" : "uz";
+    const idx = Math.max(0, Math.min(2, Number(req.query.idx || 0) || 0));
+    const { primaryVoiceConfig, fallbackVoiceConfig, customIdToTrack, cacheKey } =
+      resolveAgentTtsVoiceConfig(rawVoice);
+
+    const fillersUz = ["Xo'p.", "Ha, tushunarli.", "Bo'ldi."];
+    const fillersRu = ["Хорошо.", "Понял вас.", "Так, записал."];
+    const fillerText = lang === "ru" ? fillersRu[idx] : fillersUz[idx];
+
+    const previewsDir = path.resolve(process.cwd(), "public", "audio", "previews");
+    const cachedFillerPath = path.join(previewsDir, `realtor-filler-${cacheKey}-${lang}-${idx}.wav`);
+
+    if (fs.existsSync(cachedFillerPath)) {
+      const stat = fs.statSync(cachedFillerPath);
+      if (stat.size > 800) {
+        res.setHeader("Content-Type", "audio/wav");
+        res.setHeader("Cache-Control", "public, max-age=86400");
+        return res.sendFile(cachedFillerPath);
+      }
+    }
+
+    const isFemale = isFemaleVoiceName(rawVoice);
+    const speakerName = isFemale ? (lang === "ru" ? "Малика" : "Malika") : (lang === "ru" ? "Шохрух" : "Shohrux");
+
+    const synthesizeFillerWithConfig = async (vConfig: any, modelName = "gemini-3.8-flash-lite-tts") => {
+      return ai.models.generateContent({
+        model: modelName,
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: fillerText,
+                speechMetadata: {
+                  speaker: speakerName,
+                  style:
+                    lang === "ru"
+                      ? "Короткое спокойное телефонное подтверждение менеджера."
+                      : "Telefon orqali juda qisqa va tabiiy tasdiqlash, 0% aksentsiz sof o'zbek tili.",
+                },
+              },
+            ],
+          },
+        ],
+        config: {
+          responseModalities: ["AUDIO"],
+          speechConfig: { voiceConfig: vConfig },
+        },
+      });
+    };
+
+    try {
+      let ttsResponse;
+      try {
+        ttsResponse = await synthesizeFillerWithConfig(primaryVoiceConfig);
+      } catch {
+        if (customIdToTrack) unsupportedCustomVoiceIds.add(customIdToTrack);
+        ttsResponse = await synthesizeFillerWithConfig(fallbackVoiceConfig);
+      }
+
+      const part = ttsResponse.candidates?.[0]?.content?.parts?.[0];
+      if (part?.inlineData?.data) {
+        const rawBuf = Buffer.from(part.inlineData.data, "base64");
+        const { buffer: wav } = ensureWav(rawBuf, 24000, 1, 16);
+        fs.mkdirSync(previewsDir, { recursive: true });
+        fs.writeFileSync(cachedFillerPath, wav);
+        res.setHeader("Content-Type", "audio/wav");
+        res.setHeader("Cache-Control", "public, max-age=86400");
+        return res.send(wav);
+      }
+    } catch (ttsErr: any) {
+      console.warn("Realtor filler synthesis warning:", ttsErr?.message);
+    }
+
+    return res.status(204).end();
+  } catch (err: any) {
+    return res.status(500).end();
+  }
+});
+
 // Start interactive agent call
 app.post("/api/agent/start-call", requireCreditBalance(1), async (req, res) => {
   try {
     const {
       persona = "tashkent_real_estate",
       topic = "Toshkentda novostroyka, ijara va narxlar",
-      agentVoiceId = "voice_17raj9ewke3g",
+      agentVoiceId = "Charon",
       language = "uz",
     } = req.body;
 
+    const isFemale = isFemaleVoiceName(agentVoiceId);
+    const realtorName = isFemale
+      ? language === "ru"
+        ? "Малика"
+        : "Malika"
+      : language === "ru"
+      ? "Шохрух"
+      : "Shohrux";
+
     const personaGreetings: Record<string, string> = {
       supertaxi_ivr: `Assalomu alaykum, SuperTaksi! Eshitaman sizni.`,
-      tashkent_real_estate: language === "ru"
-        ? `Алло, здравствуйте! Слушаю вас.`
-        : `Alo, assalomu alaykum! Xush ko'rdik, eshitaman sizni?`,
+      tashkent_real_estate:
+        language === "ru"
+          ? `Здравствуйте, агентство недвижимости, ${realtorName}. Слушаю вас.`
+          : `Assalomu alaykum, ko'chmas mulk agentligi, ${realtorName}. Eshitaman.`,
       live_cohost: `Assalomu alaykum! Jonli efirimiz boshlandi. Mavzuyimiz — "${topic}". Eshitaman sizni?`,
       caller_in_air: `Alo, assalomu alaykum! Men to'g'ridan-to'g'ri Toshkentdan qo'ng'iroq qilyapman, eshityapsizmi?`,
       exclusive_mentor: `Salom! Xush kelibsiz. Eshitaman sizni?`,
@@ -5961,57 +7242,82 @@ app.post("/api/agent/start-call", requireCreditBalance(1), async (req, res) => {
     let fallbackSpeech = false;
     let errorNotice = "";
 
-    try {
-      // Synthesize greeting with natural phone cadence and authentic phonetics
-      const isCustomVoice =
-        agentVoiceId &&
-        (agentVoiceId.startsWith("voice_") ||
-          agentVoiceId.startsWith("voicekey_"));
-      const voiceConfig = isCustomVoice
-        ? { voice: agentVoiceId }
-        : { prebuiltVoiceConfig: { voiceName: agentVoiceId || "Charon" } };
+    const { primaryVoiceConfig, fallbackVoiceConfig, customIdToTrack, cacheKey } =
+      resolveAgentTtsVoiceConfig(agentVoiceId);
+    const previewsDir = path.resolve(process.cwd(), "public", "audio", "previews");
+    const cachedGreetingFile =
+      persona === "tashkent_real_estate" || persona === "supertaxi_ivr"
+        ? path.join(previewsDir, `start-greeting-${persona}-${cacheKey}-${language}.wav`)
+        : "";
 
-      const greetingSpeechStyle =
-        language === "ru"
-          ? "Живой разговор по телефону, опытный и доброжелательный риелтор Ташкента. Тёплое, естественное и уверенное приветствие живого человека."
-          : "Toshkentlik samimiy, tajribali va xushchaqchaq rieltor Shohrux. Telefon orqali samimiy salomlashish, sof o'zbek tili, hech qanday robotik chet elcha aksentsiz, jarangdor harflar Q, G', H, X va tabiiy nafas.";
+    if (cachedGreetingFile && fs.existsSync(cachedGreetingFile)) {
+      try {
+        const buf = fs.readFileSync(cachedGreetingFile);
+        if (buf.length > 1000) {
+          audioBase64 = buf.toString("base64");
+        }
+      } catch (e) {}
+    }
 
-      const ttsResponse = await ai.models.generateContent({
-        model: "gemini-3.8-flash-tts",
-        contents: [
-          {
-            role: "user",
-            parts: [
+    if (!audioBase64) {
+      try {
+        const greetingSpeechStyle =
+          language === "ru"
+            ? "Спокойный, чёткий и деловой телефонный ответ менеджера агентства недвижимости Ташкента."
+            : `Toshkentlik xotirjam va aniq ko'chmas mulk menejeri ${realtorName}. Telefon orqali qisqa, rasmiy va tabiiy salomlashish, 0% chet el aksentsiz sof o'zbek tili.`;
+
+        const synthesizeGreeting = (vConfig: any, modelName = "gemini-3.8-flash-lite-tts") =>
+          ai.models.generateContent({
+            model: modelName,
+            contents: [
               {
-                text: greetingText,
-                speechMetadata: {
-                  speaker: language === "ru" ? "Шохрух" : "Shohrux",
-                  style: greetingSpeechStyle,
-                },
+                role: "user",
+                parts: [
+                  {
+                    text: greetingText,
+                    speechMetadata: {
+                      speaker: realtorName,
+                      style: greetingSpeechStyle,
+                    },
+                  },
+                ],
               },
             ],
-          },
-        ],
-        config: {
-          responseModalities: ["AUDIO"],
-          speechConfig: { voiceConfig },
-        },
-      });
+            config: {
+              responseModalities: ["AUDIO"],
+              speechConfig: { voiceConfig: vConfig },
+            },
+          });
 
-      const part = ttsResponse.candidates?.[0]?.content?.parts?.[0];
-      if (part?.inlineData?.data) {
-        const rawBuf = Buffer.from(part.inlineData.data, "base64");
-        const { buffer: wav } = ensureWav(rawBuf, 24000, 1, 16);
-        audioBase64 = wav.toString("base64");
-      }
-    } catch (ttsErr: any) {
-      console.warn("Agent greeting TTS fallback triggered:", ttsErr?.message || ttsErr);
-      fallbackSpeech = true;
-      if (
-        ttsErr?.message?.includes("API key expired") ||
-        ttsErr?.message?.includes("API_KEY_INVALID")
-      ) {
-        errorNotice = "gemini_api_key_expired";
+        let ttsResponse;
+        try {
+          ttsResponse = await synthesizeGreeting(primaryVoiceConfig);
+        } catch {
+          if (customIdToTrack) unsupportedCustomVoiceIds.add(customIdToTrack);
+          ttsResponse = await synthesizeGreeting(fallbackVoiceConfig);
+        }
+
+        const part = ttsResponse.candidates?.[0]?.content?.parts?.[0];
+        if (part?.inlineData?.data) {
+          const rawBuf = Buffer.from(part.inlineData.data, "base64");
+          const { buffer: wav } = ensureWav(rawBuf, 24000, 1, 16);
+          audioBase64 = wav.toString("base64");
+          if (cachedGreetingFile) {
+            try {
+              fs.mkdirSync(previewsDir, { recursive: true });
+              fs.writeFileSync(cachedGreetingFile, wav);
+            } catch (e) {}
+          }
+        }
+      } catch (ttsErr: any) {
+        console.warn("Agent greeting TTS fallback triggered:", ttsErr?.message || ttsErr);
+        fallbackSpeech = true;
+        if (
+          ttsErr?.message?.includes("API key expired") ||
+          ttsErr?.message?.includes("API_KEY_INVALID")
+        ) {
+          errorNotice = "gemini_api_key_expired";
+        }
       }
     }
 
@@ -6024,8 +7330,27 @@ app.post("/api/agent/start-call", requireCreditBalance(1), async (req, res) => {
       }
     }
 
+    const sessionId = `call-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    activeAgentCallSessions.set(sessionId, {
+      uid: (req as any).uid,
+      turnsUsed: 0,
+      createdAt: Date.now(),
+    });
+    if ((req as any).uid) {
+      localStore.logGeneration((req as any).uid, {
+        id: sessionId,
+        userId: (req as any).uid,
+        userEmail: ((req as any).userEmail || "").trim().toLowerCase(),
+        type: "agent_call",
+        title: `AI Qo'ng'iroq: ${persona}`,
+        creditsCost: 1,
+        status: "completed",
+        createdAt: new Date().toISOString(),
+      });
+    }
+
     res.json({
-      sessionId: `call-${Date.now()}`,
+      sessionId,
       persona,
       topic,
       greetingText,
@@ -6042,23 +7367,31 @@ app.post("/api/agent/start-call", requireCreditBalance(1), async (req, res) => {
   }
 });
 
-// Interactive dialogue turn during call with real-time speech understanding
+const activeAgentCallSessions = new Map<string, { uid: string; turnsUsed: number; createdAt: number }>();
+
+// Interactive dialogue turn during call with real-time speech understanding & streaming PCM TTS
 app.post("/api/agent/call-turn", requireCreditBalance(1), async (req, res) => {
+  const turnStartAt = Date.now();
   try {
     const {
+      sessionId = "",
       userText = "",
       userAudioBase64 = "",
       conversationHistory = [],
       persona = "live_cohost",
       topic = "Podkast mavzusi",
-      agentVoiceId = "Puck",
+      agentVoiceId = "Charon",
       language = "uz",
+      stream = false,
+      playedFillerAck = false,
     } = req.body;
 
     let recognizedUserText = userText ? userText.trim() : "";
+    let transcribeMs = 0;
 
-    // 1. If audio is sent, transcribe speech accurately so conversation history has real words
+    // 1. If audio is sent without text, transcribe speech accurately
     if ((!recognizedUserText || recognizedUserText === "🎤 Ovozli savol" || recognizedUserText === "🎤 Голосовое сообщение") && userAudioBase64) {
+      const tTranscribe0 = Date.now();
       try {
         const transcribeRes = await ai.models.generateContent({
           model: "gemini-3.5-transcribe",
@@ -6113,53 +7446,50 @@ app.post("/api/agent/call-turn", requireCreditBalance(1), async (req, res) => {
           console.error("Audio transcription failed:", e?.message);
         }
       }
+      transcribeMs = Date.now() - tTranscribe0;
     }
 
     if (!recognizedUserText) {
       recognizedUserText = language === "ru" ? "Я слушаю вас, продолжайте." : "Men sizni tinglayapman, davom eting.";
     }
 
+    const isFemale = isFemaleVoiceName(agentVoiceId);
+    const realtorName = isFemale
+      ? language === "ru"
+        ? "Малика"
+        : "Malika"
+      : language === "ru"
+      ? "Шохрух"
+      : "Shohrux";
+
     // 2. Prepare system instructions
     let systemPrompt = "";
     if (persona === "tashkent_real_estate") {
-      systemPrompt = language === "ru"
-        ? `Вы — топ-риелтор и эксперт по недвижимости Ташкента по имени Шохрух (или Малика).
-Вы ведёте живой телефонный разговор с клиентом.
-
-ЖЁСТКИЕ ОГРАНИЧЕНИЯ И ПРАВИЛА (GUARDRAILS):
-1. СТРОГО ТОЛЬКО НЕДВИЖИМОСТЬ: Вы говорите ИСКЛЮЧИТЕЛЬНО о недвижимости Ташкента (покупка, продажа, аренда, новостройки, вторичка, ипотека, рассрочка, кадастр, районы). Если клиент спрашивает о погоде, кулинарии, политике, программировании, личной жизни или любых других отвлечённых темах — КАТЕГОРИЧЕСКИ НЕ ПОДДЕРЖИВАЙТЕ оффтоп! В одном вежливом живом предложении верните диалог в русло: "Я узко консультирую только по недвижимости Ташкента. Давайте вернёмся к подбору жилья — какой район или бюджет вас интересует?".
-2. ПРАВИЛО ЧЕСТНОГО НЕПОНИМАНИЯ (АНТИГАЛЛЮЦИНАЦИЯ): Если реплика клиента неразборчива, оборвана, состоит из случайных звуков или вы точно не поняли суть вопроса — НИКОГДА НЕ ПРИДУМЫВАЙТЕ ответ от себя! Сразу честно и вежливо переспросите: "Вас немного плохо слышно, связь прерывается. Повторите, пожалуйста, какой район или бюджет вы имели в виду?".
-3. ТЕЛЕФОННЫЙ ТЕМП И ФОРМАТ: 1-2 коротких, естественных, живых предложения (не более 25 слов!). Никакого канцелярского сухого тона. Никаких слов "Я искусственный интеллект" или "Как языковая модель". Используйте естественные вводные фразы ("Да, конечно!", "Смотрите, какая ситуация...", "Отличный район!").
-4. ЗНАНИЕ РЫНКА ТАШКЕНТА: Мирабад ($1600-2500/м²), Яккасарай ($1300-1850/м²), Шайхантахур ($1200-1800/м²), Мирзо-Улугбек ($1000-1550/м²), Юнусабад ($950-1400/м²), Чиланзар ($900-1300/м²), Яшнабад ($850-1250/м²), Сергели/Янгихаёт ($700-950/м²). Рассрочка от застройщиков 0%, субсидированная ипотека 17-18%, проверка кадастра.
-5. ОБЯЗАТЕЛЬНЫЙ ВСТРЕЧНЫЙ ШАГ: В конце реплики всегда задавайте естественный квалификационный вопрос (о бюджете, способе оплаты — нал/ипотека/рассрочка, или сроках переезда).`
-        : `Siz Toshkentdagi eng tajribali va samimiy rieltor-ekspert Shohruxsiz (yoki Malika).
-Siz mijoz bilan haqiqiy jonli telefon orqali gaplashyapsiz.
-
-QAT'IY CHEKLOVLAR VA QOIDALAR (GUARDRAILS):
-1. FAQAT KO'CHMAS MULK (STRICT DOMAIN): Siz FAQAT Toshkent ko'chmas mulki (kvartira sotib olish, sotish, ijara, novostroyka, ikkilamchi bozor, kadastr, ipoteka, tumanlar) haqida gapirasiz. Agar mijoz ob-havo, siyosat, pazandachilik, IT yoki boshqa mavzularga chalg'isa — CHALG'IMANG! 1 ta samimiy gap bilan mavzuni mulkka qaytaring: "Men faqat Toshkent ko'chmas mulki bo'yicha maslahat beraman. Keling, uy tanlashga qaytamiz — qaysi tuman yoki qanday byudjet sizga ma'qul?".
-2. TUSHUNMAGANDA DARHOL SO'RASH (ANTI-HALLUCINATION): Agar mijozning gapi tushunarsiz, uzilib qolgan yoki g'o'ldirash bo'lsa — HECH QACHON O'ZINGIZDAN TO'QIMANG! Darhol ochiq ayting: "Alo, ovozingiz biroz uzilib keldi. Qaytadan aytib yubora olasizmi, qaysi tuman yoki qanday byudjetni nazarda tutdingiz?".
-3. TELEFON FORMATI: 1-2 ta qisqa, jarangdor, insoniy gap (25 ta so'zdan oshmasin!). Kitobiy qoliplar, "Men sun'iy intellektman" kabi so'zlarni MUTLAQO ISHLATMANG! "Vaalaykum assalom!", "Qarang...", "To'g'risi...", "Ajoyib variantlar bor!" kabi so'zlashuv iboralaridan foydalaning.
-4. TOSHKENT BOZORI BILIMI: Mirobod ($1600-2500/m²), Yakkasaroy ($1300-1850/m²), Mirzo Ulug'bek ($1000-1550/m²), Yunusobod ($950-1400/m²), Chilonzor ($900-1300/m²), Yashnobod ($850-1250/m²), Sergeli ($700-950/m²). Kotlovan xavfsizligi, kadastr, 0% muddatli to'lov (rassrochka), ipoteka 17-18%.
-5. TABIIY SAVOL: Har doim javobingiz oxirida mijozga tabiiy savol bering (masalan: "To'lov naqdmi yoki bo'lib to'lashgami?").`;
+      systemPrompt = buildRealtorSystemPrompt(language, isFemale, Boolean(playedFillerAck));
     } else {
-      systemPrompt = language === "ru"
-        ? `Вы — умный, эмоциональный и чуткий голосовой AI-собеседник в прямом радиоэфире или подкасте.
+      const crispProtocolSuffix =
+        language === "ru"
+          ? `\n\n⚡ ПРОТОКОЛ СЖАТОГО ДИАЛОГА:
+1. ЖЁСТКИЙ ЛИМИТ 12–15 СЛОВ: Ваш ответ должен состоять МАКСИМУМ из 1–2 коротких фраз.
+2. ЗАПРЕТ ШАБЛОНОВ: Не говорите "Я искусственный интеллект", "Спасибо за ваш вопрос".`
+          : `\n\n⚡ QISQA DIALOG PROTOKOLI:
+1. QAT'IY 12–15 SO'Z QOIDASI: Javobingiz MAKSIMAL 1–2 ta juda qisqa gapdan iborat bo'lsin.
+2. NEGATIV FILTR: "Men sun'iy intellektman", "Savolingiz uchun katta rahmat" kabi iboralarni ishlatmang.`;
+
+      systemPrompt =
+        (language === "ru"
+          ? `Вы — умный и живой голосовой собеседник в прямом эфире.
 Роль: ${persona}.
 Тема беседы: "${topic}".
-ГЛАВНОЕ ПРАВИЛО: Внимательно слушайте реплику пользователя ("${recognizedUserText}") и отвечайте СТРОГО на неё!
-Не уходите в общие шаблоны. Обращайтесь к сказанному, задавайте встречный вопрос, реагируйте как живой ведущий.
-Формат: 1-2 коротких разговорных предложения, естественные интонации, без списков и markdown.`
-        : `Siz jonli efirda suhbatlashayotgan aqlli, samimiy va jonli AI ovozli suhbatdoshi (Shohrux).
+Отвечайте коротко и строго по сути реплики пользователя ("${recognizedUserText}").`
+          : `Siz jonli efirda suhbatlashayotgan samimiy ovozli suhbatdoshsiz (${realtorName}).
 Sizning rolingiz: ${persona}.
 Efir mavzusi: "${topic}".
-ASOSIY QOIDA: Foydalanuvchining aytgan gapini ("${recognizedUserText}") diqqat bilan tinglang va aynan uning so'zlariga bog'lab javob bering!
-Umumiy shablonlardan qoching.
-Format: 1-2 ta qisqa jonli so'zlashuv jumlasi (lotin yozuvida), hech qanday markdown belgilarsiz.`;
+Foydalanuvchining aytgan gapiga ("${recognizedUserText}") qisqa va aniq javob bering.`) + crispProtocolSuffix;
     }
 
     const contents: any[] = [];
 
-    // Add prior conversation history (filtering out empty or placeholder messages)
     conversationHistory.slice(-8).forEach((msg: any) => {
       const txt = (msg.text || "").trim();
       if (txt && txt !== "🎤 Ovozli savol" && txt !== "🎤 Голосовое сообщение") {
@@ -6170,126 +7500,200 @@ Format: 1-2 ta qisqa jonli so'zlashuv jumlasi (lotin yozuvida), hech qanday mark
       }
     });
 
-    // Add current user turn with actual recognized text
     contents.push({
       role: "user",
       parts: [{ text: recognizedUserText }],
     });
 
-    // Generate conversational response with ultra-low latency (<400ms) with offline fallback
     let replyText = "";
     let isOfflineFallback = false;
-
-    // Stage 2: Crisp Turn-Taking Protocol (15-Word Rule + Negative Filter + Ping-Pong Question Return)
-    const crispProtocolSuffix =
-      language === "ru"
-        ? `\n\n⚡ ПРОТОКОЛ СЖАТОГО ДИАЛОГА (CRISP TURN-TAKING PROTOCOL):
-1. ЖЁСТКИЙ ЛИМИТ 12–15 СЛОВ: Ваш ответ должен состоять МАКСИМУМ из 1–2 коротких фраз (не более 15 слов!). Никаких длинных монологов и списков.
-2. ЗАПРЕТ ШАБЛОНОВ (ZERO POLITENESS BLOAT): Категорически запрещено говорить: "Я искусственный интеллект", "Уважаемый клиент, рад вам помочь", "Большое спасибо за ваш вопрос", "Понял вас, сейчас подробно расскажу".
-3. ФОРМУЛА ПИНГ-ПОНГА: [Прямой факт/ответ (до 7 слов)] + [Встречный вопрос-пас (до 6 слов)].`
-        : `\n\n⚡ QISQA DIALOG PROTOKOLI (CRISP TURN-TAKING PROTOCOL):
-1. QAT'IY 12–15 SO'Z QOIDASI: Javobingiz MAKSIMAL 1–2 ta juda qisqa gapdan iborat bo'lsin (12–15 ta so'zdan oshmasin!). Uzundan-uzoq monolog va ro'yxatlar taqiqlanadi.
-2. NEGATIV FILTR (SHABLONLAR TAQIQLANADI): "Men sun'iy intellektman", "Hurmatli mijoz, sizga yordam berishdan xursandman", "Savolingiz uchun katta rahmat", "Tushundim, hozir to'liq aytib beraman" kabi keraksiz kirish gaplarni ASLO ISHLATMANG!
-3. PING-PONG FORMULASI: [Aniq fakt/javob (maks 7 so'z)] + [Qisqa savol-pas (maks 6 so'z)]. Masalan: "Chilonzorda 2 xonali uylar 55 mingdan boshlanadi. Naqdga olasizmi yoki ipotekagami?"`;
+    const tText0 = Date.now();
 
     try {
       const agentTextRes = await generateFastTextWithFallback({
         contents,
         config: {
-          systemInstruction: systemPrompt + crispProtocolSuffix,
-          thinkingConfig: { thinkingBudget: 0 },
-          temperature: 0.65,
-          maxOutputTokens: 70,
+          systemInstruction: systemPrompt,
         },
-        timeoutMs: 9000,
+        timeoutMs: 8000,
       });
 
       replyText =
         agentTextRes.text?.trim() ||
         (language === "ru"
-          ? "Есть отличные варианты! Какой бюджет рассматриваете?"
-          : "Zo'r variantlar bor! Qancha byudjet mo'ljallayapsiz?");
+          ? "Хорошо. Какой бюджет рассматриваете?"
+          : "Xo'p. Qancha byudjet mo'ljallayapsiz?");
     } catch (textErr: any) {
       console.warn("Agent text generation fallback triggered:", textErr?.message);
       isOfflineFallback = true;
       replyText = generateOfflineRealEstateReply(recognizedUserText, language, persona);
     }
+    const textMs = Date.now() - tText0;
 
-    // Clean any parenthesis or brackets from speech text
+    // Strip duplicate filler word if client already played a cached filler clip
+    if (playedFillerAck) {
+      replyText = replyText
+        .replace(/^(Tushunarli|Xo'p|Ha|Bo'ldi|Понял вас|Понял|Хорошо|Так)[,.\s]+/i, "")
+        .trim();
+      if (replyText) {
+        replyText = replyText.charAt(0).toUpperCase() + replyText.slice(1);
+      }
+    }
+
     const { speechText } = cleanScriptForSpeech(replyText);
 
-    // Dynamic Real Estate Lead Extraction & Guardrail Analysis (runs in fast background promise)
+    // Fast non-blocking progressive lead update (0ms synchronous)
     let leadUpdate: any = null;
     let isOffTopic = false;
     let clarificationNeeded = false;
 
-    if (persona === "tashkent_real_estate" && !isOfflineFallback) {
-      try {
-        const leadAnalyzeRes = await ai.models.generateContent({
-          model: "gemini-3.8-flash",
-          contents: [
-            {
-              role: "user",
-              parts: [
-                {
-                  text: `Analyze this conversational exchange in a Tashkent real estate voice call.
-User spoken text: "${recognizedUserText}"
-Agent replied: "${replyText}"
-
-Extract structured lead qualification data if mentioned or implied.
-Return strict JSON:
-{
-  "district": "Mirobod" | "Yakkasaroy" | "Chilonzor" | "Yunusobod" | "Mirzo Ulug'bek" | "Yashnobod" | "Sergeli" | null,
-  "budgetRange": string or null (e.g. "$60,000", "$45,000 - $70,000"),
-  "clientIntent": "buy" | "rent" | "sell" | "invest" | null,
-  "propertyType": "novostroyka" | "vtorichka" | "commercial" | "cottage" | null,
-  "roomsCount": "1 xonali" | "2 xonali" | "3 xonali" | "4+ xonali" | null,
-  "urgency": "immediate" | "this_month" | "exploring" | null,
-  "paymentMethod": "cash" | "mortgage" | "installments" | null,
-  "leadTemperature": "hot" | "warm" | "cold" | null,
-  "isOffTopic": boolean (true if user talked about cooking, politics, unrelated subjects),
-  "clarificationNeeded": boolean (true if user speech was muffled/unintelligible and agent had to ask to repeat)
-}`,
-                },
-              ],
-            },
-          ],
-          config: {
-            responseMimeType: "application/json",
-            thinkingConfig: { thinkingBudget: 0 },
-            temperature: 0.1,
-            maxOutputTokens: 350,
-          },
-        });
-
-        const rawJson = leadAnalyzeRes.text?.trim();
-        if (rawJson) {
-          const parsed = JSON.parse(rawJson);
-          leadUpdate = parsed;
-          isOffTopic = !!parsed.isOffTopic;
-          clarificationNeeded = !!parsed.clarificationNeeded;
-        }
-      } catch (err) {
-        // Fallback: non-blocking
+    if (persona === "tashkent_real_estate") {
+      const extracted = extractProgressiveRealtorLead(`${recognizedUserText} ${replyText}`);
+      if (Object.keys(extracted).length > 0) {
+        leadUpdate = extracted;
+      }
+      if (replyText.includes("faqat uy-joy") || replyText.includes("только по вопросам недвижимости")) {
+        isOffTopic = true;
+      }
+      if (replyText.includes("eshitilmadi") || replyText.includes("uzilib qoldi") || replyText.includes("плохо слышно")) {
+        clarificationNeeded = true;
       }
     }
 
-    // Synthesize speech with Gemini 3.8 Flash TTS for expressive natural dialogue
+    let creditsRemaining = (req as any).userBalance;
+    const callSession = sessionId ? activeAgentCallSessions.get(sessionId) : undefined;
+    const isCoveredByActiveCall =
+      callSession &&
+      callSession.uid === (req as any).uid &&
+      callSession.turnsUsed < 15 &&
+      Date.now() - callSession.createdAt < 30 * 60 * 1000;
+
+    if (isCoveredByActiveCall && callSession) {
+      callSession.turnsUsed += 1;
+    } else if (typeof (req as any).deductCredits === "function") {
+      try {
+        creditsRemaining = await (req as any).deductCredits(1);
+      } catch (deductErr) {
+        console.warn("Credit deduction notice:", deductErr);
+      }
+    }
+
+    const { primaryVoiceConfig: voiceConfig, fallbackVoiceConfig, customIdToTrack } =
+      resolveAgentTtsVoiceConfig(agentVoiceId);
+
+    const ttsStyle =
+      language === "ru"
+        ? "Спокойный, чёткий и деловой телефонный ответ менеджера недвижимости Ташкента без лишних эмоций."
+        : "Toshkentlik xotirjam, aniq va tabiiy rieltor telefon suhbati, 0% aksentsiz sof o'zbekcha talaffuz.";
+
+    // STREAMING MODE: Flush metadata immediately, then stream 24kHz PCM chunks from generateContentStream
+    if (stream) {
+      res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+
+      res.write(
+        JSON.stringify({
+          type: "meta",
+          recognizedUserText,
+          replyText: speechText || replyText,
+          leadUpdate,
+          isOffTopic,
+          clarificationNeeded,
+          creditsRemaining,
+          timing: { transcribeMs, textMs },
+        }) + "\n"
+      );
+
+      let ttsFirstChunkMs = 0;
+      let chunkCount = 0;
+      const tTts0 = Date.now();
+
+      if (!isOfflineFallback) {
+        const streamWithConfig = async (vConfig: any, modelName = "gemini-3.8-flash-lite-tts") => {
+          const ttsStream = await ai.models.generateContentStream({
+            model: modelName,
+            contents: [
+              {
+                role: "user",
+                parts: [
+                  {
+                    text: speechText || replyText,
+                    speechMetadata: {
+                      speaker: realtorName,
+                      style: ttsStyle,
+                    },
+                  },
+                ],
+              },
+            ],
+            config: {
+              responseModalities: ["AUDIO"],
+              speechConfig: { voiceConfig: vConfig },
+            },
+          });
+
+          for await (const chunk of ttsStream) {
+            const parts = chunk.candidates?.[0]?.content?.parts || [];
+            for (const part of parts) {
+              if (part?.inlineData?.data) {
+                chunkCount++;
+                if (!ttsFirstChunkMs) {
+                  ttsFirstChunkMs = Date.now() - tTts0;
+                }
+                res.write(
+                  JSON.stringify({
+                    type: "audioChunk",
+                    audio: part.inlineData.data,
+                    firstChunkMs: ttsFirstChunkMs,
+                  }) + "\n"
+                );
+              }
+            }
+          }
+        };
+
+        try {
+          await streamWithConfig(voiceConfig);
+        } catch {
+          if (customIdToTrack) unsupportedCustomVoiceIds.add(customIdToTrack);
+          try {
+            await streamWithConfig(fallbackVoiceConfig);
+          } catch (ttsStreamErr: any) {
+            console.warn("Streaming TTS error in call-turn:", ttsStreamErr?.message);
+          }
+        }
+      }
+
+      const totalMs = Date.now() - turnStartAt;
+      console.log(
+        `[CALL-TIMING][Cloned Stream] transcribe=${transcribeMs}ms | text=${textMs}ms | ttsFirstChunk=${ttsFirstChunkMs}ms | total=${totalMs}ms | chunks=${chunkCount} | voice=${agentVoiceId}`
+      );
+
+      res.write(
+        JSON.stringify({
+          type: "done",
+          timing: {
+            transcribeMs,
+            textMs,
+            ttsFirstChunkMs,
+            totalFirstAudioMs: transcribeMs + textMs + ttsFirstChunkMs,
+            totalMs,
+          },
+        }) + "\n"
+      );
+      return res.end();
+    }
+
+    // NON-STREAMING FALLBACK MODE
     let audioBase64 = "";
     let fallbackSpeech = isOfflineFallback;
+    const tTts0 = Date.now();
 
     if (!isOfflineFallback) {
       try {
-        const isCustomVoice =
-          agentVoiceId &&
-          (agentVoiceId.startsWith("voice_") ||
-            agentVoiceId.startsWith("voicekey_"));
-        const voiceConfig = isCustomVoice
-          ? { voice: agentVoiceId }
-          : { prebuiltVoiceConfig: { voiceName: agentVoiceId || "Puck" } };
-
         const ttsRes = await ai.models.generateContent({
-          model: "gemini-3.8-flash-tts",
+          model: "gemini-3.8-flash-lite-tts",
           contents: [
             {
               role: "user",
@@ -6297,10 +7701,8 @@ Return strict JSON:
                 {
                   text: speechText || replyText,
                   speechMetadata: {
-                    speaker: language === "ru" ? "Шохрух" : "Shohrux",
-                    style: language === "ru"
-                      ? "Быстрый живой динамичный диалог по телефону, уверенный риелтор Ташкента."
-                      : "Tezkor, samimiy va jonli telefon suhbati, sof o'zbekcha talaffuz, Toshkentlik tajribali rieltor.",
+                    speaker: realtorName,
+                    style: ttsStyle,
                   },
                 },
               ],
@@ -6323,15 +7725,11 @@ Return strict JSON:
         fallbackSpeech = true;
       }
     }
-
-    let creditsRemaining = (req as any).userBalance;
-    if (typeof (req as any).deductCredits === "function") {
-      try {
-        creditsRemaining = await (req as any).deductCredits(1);
-      } catch (deductErr) {
-        console.warn("Credit deduction notice:", deductErr);
-      }
-    }
+    const ttsMs = Date.now() - tTts0;
+    const totalMs = Date.now() - turnStartAt;
+    console.log(
+      `[CALL-TIMING][Cloned Full] transcribe=${transcribeMs}ms | text=${textMs}ms | tts=${ttsMs}ms | total=${totalMs}ms`
+    );
 
     res.json({
       recognizedUserText,
@@ -6341,6 +7739,7 @@ Return strict JSON:
       leadUpdate,
       isOffTopic,
       clarificationNeeded,
+      timing: { transcribeMs, textMs, ttsMs, totalMs },
       timestamp: new Date().toLocaleTimeString(language === "ru" ? "ru-RU" : "uz-UZ", {
         hour: "2-digit",
         minute: "2-digit",
@@ -6426,8 +7825,7 @@ Quyidagi qat'iy JSON formatida javob qaytaring:
       contents: [{ role: "user", parts: [{ text: promptText }] }],
       config: {
         responseMimeType: "application/json",
-        thinkingConfig: { thinkingBudget: 0 },
-        temperature: 0.2,
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
       },
     });
 
@@ -6462,7 +7860,7 @@ Requirements:
       model: "gemini-3.8-flash",
       contents: prompt,
       config: {
-        temperature: 0.6,
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
       },
     });
 
@@ -6498,8 +7896,18 @@ Requirements:
       </svg>`;
     }
 
+    let creditsRemaining = (req as any).userBalance;
+    if (typeof (req as any).deductCredits === "function") {
+      try {
+        creditsRemaining = await (req as any).deductCredits(1);
+      } catch (deductErr) {
+        console.warn("Cover credit deduction notice:", deductErr);
+      }
+    }
+
     res.json({
       svg: svgText,
+      creditsRemaining,
     });
   } catch (error: any) {
     console.error("Error generating cover art:", error);
@@ -6519,13 +7927,50 @@ app.post("/api/podcast/analyze-document", requireCreditBalance(1), async (req, r
       mimeType = "application/pdf",
       sourceText = "",
       sourceUrl = "",
-      targetFormat = "podcast", // 'podcast' | 'interview' | 'voiceover' | 'audiobook'
+      targetFormat = "podcast", // 'podcast' | 'interview' | 'voiceover' | 'audiobook' | 'verbatim_dubbing'
       targetDuration = "10 daqiqa",
       userInstructions = "",
       category = "Tarixiy",
       tone = "engaging",
       languageMode = "uzbek",
     } = req.body;
+
+    // If user selected verbatim dubbing OR pasted a timestamped storyboard ("Видеоряд:" / "Интонация:" / "Текст:" / "00:00 – 00:02"),
+    // route directly through the strict 1:1 verbatim storyboard parser & translator without inventing any extra dialogue!
+    const looksLikeStoryboard =
+      sourceText &&
+      !documentBase64 &&
+      (/(?:видеоряд|интонация|текст)\s*:/i.test(sourceText) ||
+        /\d{1,2}:\d{2}\s*(?:[—–\-]|-->)\s*\d{1,2}:\d{2}/.test(sourceText));
+
+    if (
+      (targetFormat === "verbatim_dubbing" ||
+        (looksLikeStoryboard && (targetFormat === "interview" || targetFormat === "voiceover"))) &&
+      sourceText.trim().length > 10
+    ) {
+      const verbatimResult = await parseAndTranslateVerbatimStoryboard(ai, sourceText);
+      const numericCost =
+        typeof verbatimResult.estimatedCostUsd === "number"
+          ? verbatimResult.estimatedCostUsd
+          : Number(verbatimResult.estimatedCostUsd?.totalUsd ?? 0.03);
+      let creditsRemaining = (req as any).userBalance;
+      if (typeof (req as any).deductCredits === "function") {
+        try {
+          creditsRemaining = await (req as any).deductCredits(1);
+        } catch {}
+      }
+      return res.json({
+        ...verbatimResult,
+        totalVideoDurationSec: verbatimResult.totalDurationSec,
+        estimatedCostUsd: numericCost,
+        estimatedCostBreakdown: verbatimResult.estimatedCostUsd,
+        topic: verbatimResult.title,
+        category,
+        isVerbatimDubbing: true,
+        srtSubtitles: generateSrtFromTurns(verbatimResult.turns),
+        creditsRemaining,
+      });
+    }
 
     const parts: any[] = [];
 
@@ -6964,7 +8409,7 @@ wss.on("connection", (clientWs: WebSocket, req: http.IncomingMessage) => {
         const {
           persona = "tashkent_real_estate",
           topic = "Toshkentda uy xarid qilish va ijara maslahati",
-          voiceName = "Puck",
+          voiceName = "Charon",
           language = "uz",
           skipInitialGreeting = false,
         } = data;
@@ -6979,6 +8424,37 @@ wss.on("connection", (clientWs: WebSocket, req: http.IncomingMessage) => {
         lastUserTranscript = "";
         currentTurnAgentText = "";
         taxiOrderDispatched = false;
+
+        let liveVoice = isSuperTaxi ? "Aoede" : isRealEstate ? "Charon" : "Puck";
+        const lowerVoice = (voiceName || "").toLowerCase();
+        if (lowerVoice === "charon" || lowerVoice.includes("jasur") || lowerVoice.includes("shohrux")) {
+          liveVoice = "Charon";
+        } else if (
+          lowerVoice === "aoede" ||
+          lowerVoice.includes("madina") ||
+          lowerVoice.includes("malika") ||
+          lowerVoice.includes("ayol") ||
+          lowerVoice.includes("female")
+        ) {
+          liveVoice = "Aoede";
+        } else if (lowerVoice === "kore" || lowerVoice.includes("aziza")) {
+          liveVoice = "Kore";
+        } else if (lowerVoice === "fenrir" || lowerVoice.includes("ulug'bek") || lowerVoice.includes("ulugbek")) {
+          liveVoice = "Fenrir";
+        } else if (lowerVoice === "zephyr") {
+          liveVoice = "Zephyr";
+        } else if (lowerVoice === "puck" || lowerVoice.includes("otabek")) {
+          liveVoice = "Puck";
+        }
+
+        const isFemaleLive = isFemaleVoiceName(liveVoice);
+        const realtorLiveName = isFemaleLive
+          ? language === "ru"
+            ? "Малика"
+            : "Malika"
+          : language === "ru"
+          ? "Шохрух"
+          : "Shohrux";
 
         let systemInstruction = "";
 
@@ -7008,36 +8484,7 @@ Telefon ko'tarilganda mijozga allaqachon: "Assalomu alaykum, SuperTaksi! Eshitam
 4. O'ZBEK FONETIKASI:
    - "Q" (qabul, qilindi, qo'ng'iroq), "G'" (qo'ng'iroq, sog' bo'ling), "X" (xayr, xiyobon), "H" (hozir, haydovchimiz), "O'" (mo'ljal, ko'cha) harflarini sof Toshkent ohangida talaffuz qiling.`;
         } else if (isRealEstate) {
-          systemInstruction = `Siz Toshkent ko'chmas mulk bozoridagi eng mohir, samimiy va xarizmatik rieltor-ekspertisiz (Shohrux yoki Malika).
-Muloqot tili: ${language === "ru" ? "Rus tili (Русский язык, живой разговорный ташкентский диалог без роботизированности)" : "O'zbek tili (Sof o'zbek adabiy va jonli Toshkent shahar ohangida)"}.
-
-🎯 SIZNING VAZIFANGIZ:
-Mijozga Toshkentda kvartira, novostroyka, ikkilamchi bozor (vtorichka), ijara yoki tijoriy mulk bo'yicha to'liq, professional va xolisona maslahat berish.
-
-🗣️ O'ZBEK TILI TALAFFUZI VA EMOTSIYASI (QAT'IY QOIDALAR):
-1. ROBOTIK CHET ELCHA AKSENT BO'LMASIN:
-   - Siz Toshkentda yashovchi, o'zbek tilini ona tili biladigan jonli insonsiz.
-   - Harflarni aniq va jarangdor talaffuz qiling: "Q" (qayerda, qancha), "G'" (to'g'ri, og'ir), "H" va "X" (ha, xush ko'rdik, yaxshi).
-   - "Men sun'iy intellektman", "Hurmatli mijoz", "Sizga qanday yordam bera olaman?" kabi kitobiy qoliplarni MUTLAQO ISHLATMANG!
-2. JONLI, ILIQ VA DIALOGIK OHANG:
-   - "Va alaykum assalom! Xush ko'rdik!", "Qarang...", "To'g'risini aytsam...", "Ajoyib tanlov!", "Mirobodda zo'r novostroyka bor" kabi jonli iboralarni ishlating.
-   - Har bir javobingiz 1 yoki 2 ta qisqa, jarangdor gap bo'lsin.
-   - Javob oxirida doimo mijozga tabiiy savol bering (masalan: "O'zingiz yashamoqchimisiz yoki ijaraga berishgami?").
-
-🏢 TOSHKENT TUMANLARI VA NARXLARI (2025-2026):
-- Mirobod (Oybek, Госпитальный, Chexov, Ts-1): $1600 - $2500+/m² (Elita, expatlar, ijara $1000-$2500/oy).
-- Yakkasaroy (Shota Rustaveli, Rakat, Bobur bog'i): $1300 - $1850/m² (Markazga yaqin, qulay).
-- Mirzo Ulug'bek (Buyuk Ipak Yo'li, TTZ, Qorasuv): $1000 - $1550/m² (Yashil, ekologik, oilaviy).
-- Yunusobod (Shahriston, Megaplanet, 1-19 mavzelar): $950 - $1400/m² (Metro, infratuzilma a'lo, ijara $450-$800/oy).
-- Chilonzor (Novza, Qatortol, 1-20 mavzelar): $900 - $1300/m² (Eng xaridorgir ikkilamchi bozor, $400-$750 ijara).
-- Yashnobod (Parkent, Do'stlik, Tuzel): $850 - $1250/m² (Tez o'sayotgan investitsion tuman).
-- Sergeli va Yangihayot: $700 - $950/m² (Arzon novostroykalar, subsidiyali ipoteka).
-
-⚖️ YURIDIK VA MOLIYAVIY:
-- Kadastr mavjudligi va notarius orqali taqiq (zapret) tekshirish.
-- Kotlovanda 20-30% tejash, ishonchli developerlar (Golden House, Murad Buildings, NRG, Discover Invest, FDG).
-- Ipoteka: boshlang'ich to'lov 15-25%, subsidiyalar.
-- Bo'lib to'lash (rassrochka 0% foizsiz 12-36 oy).`;
+          systemInstruction = buildRealtorSystemPrompt(language, isFemaleLive);
         } else {
           const personaDescriptions: Record<string, string> = {
             live_cohost: "Jonli podkast hamkor-boshlovchisi. Quvnoq, samimiy, qisqa va lo'nda suhbatdosh.",
@@ -7048,7 +8495,7 @@ Mijozga Toshkentda kvartira, novostroyka, ikkilamchi bozor (vtorichka), ijara yo
 
           const personaDesc = personaDescriptions[persona] || personaDescriptions.live_cohost;
 
-          systemInstruction = `Siz OvozStudio AI jonli telefon suhbatdoshisiz (Shohrux).
+          systemInstruction = `Siz OvozStudio AI jonli telefon suhbatdoshisiz (${realtorLiveName}).
 Mavzu: "${topic}".
 Sizning rolingiz: ${personaDesc}
 Muloqot tili: ${language === "ru" ? "Rus tili (естественный живой диалог)" : "O'zbek tili (samimiy, jonli, hech qanday chet elcha aksentsiz sof o'zbekcha)"}.
@@ -7060,47 +8507,17 @@ Muloqot tili: ${language === "ru" ? "Rus tili (естественный живо
 4. BARGE-IN: Mijoz gap boshlasa, darhol to'xtab tinglang.`;
         }
 
-        // Also enforce Crisp Turn-Taking Protocol on Real Estate persona
-        if (isRealEstate) {
-          systemInstruction += `\n\n⚡ QISQA DIALOG PROTOKOLI (CRISP TURN-TAKING PROTOCOL — QAT'IY):
-1. 15 SO'Z QOIDASI: Har bir javobingiz MAKSIMAL 1–2 ta juda qisqa gap (12–15 ta so'z) bo'lsin! Monolog o'qimang.
-2. NEGATIV FILTR: "Men sun'iy intellektman", "Hurmatli mijoz", "Savolingiz uchun katta rahmat", "Hozir batafsil aytib beraman" kabi iboralarni ISHLATMANG!
-3. PING-PONG FORMULASI: [Aniq fakt/narx (maks 7 so'z)] + [Kvalifikatsion savol (maks 6 so'z)]. Masalan: "Chilonzorda 2 xonali uylar 55 mingdan boshlanadi. Naqdga olasizmi yoki ipotekagami?"`;
-        }
-
         currentSystemInstruction = systemInstruction;
-
-        let liveVoice = isSuperTaxi ? "Aoede" : "Puck";
-        const lowerVoice = (voiceName || "").toLowerCase();
-        if (lowerVoice === "charon" || lowerVoice.includes("jasur")) {
-          liveVoice = "Charon";
-        } else if (
-          lowerVoice === "aoede" ||
-          lowerVoice.includes("madina") ||
-          lowerVoice.includes("malika") ||
-          lowerVoice.includes("ayol") ||
-          lowerVoice.includes("female")
-        ) {
-          liveVoice = "Aoede";
-        } else if (lowerVoice === "kore" || lowerVoice.includes("aziza")) {
-          liveVoice = "Kore";
-        } else if (lowerVoice === "fenrir" || lowerVoice.includes("ulug'bek") || lowerVoice.includes("ulugbek")) {
-          liveVoice = "Fenrir";
-        } else if (lowerVoice === "zephyr") {
-          liveVoice = "Zephyr";
-        } else if (lowerVoice === "puck" || lowerVoice.includes("shohrux") || lowerVoice.includes("otabek")) {
-          liveVoice = "Puck";
-        }
 
         const agentPickupLine = isSuperTaxi
           ? "Assalomu alaykum, SuperTaksi! Eshitaman sizni."
           : isRealEstate
-          ? (language === "ru"
-              ? "Алло, здравствуйте! Недвижимость Ташкента, Шохрух на связи. Слушаю вас!"
-              : "Alo, assalomu alaykum! Toshkent ko'chmas mulk bo'yicha Shohruxman. Eshitaman sizni?")
-          : (language === "ru"
-              ? "Алло, здравствуйте! Я вас внимательно слушаю."
-              : "Alo, assalomu alaykum! Tinglayapman sizni.");
+          ? language === "ru"
+            ? `Здравствуйте, агентство недвижимости, ${realtorLiveName}. Слушаю вас.`
+            : `Assalomu alaykum, ko'chmas mulk agentligi, ${realtorLiveName}. Eshitaman.`
+          : language === "ru"
+          ? "Алло, здравствуйте! Я вас внимательно слушаю."
+          : "Alo, assalomu alaykum! Tinglayapman sizni.";
 
         const dispatchTaxiOrderIfMatched = () => {
           const lowerTurn = currentTurnAgentText.toLowerCase();
@@ -7168,111 +8585,290 @@ Muloqot tili: ${language === "ru" ? "Rus tili (естественный живо
           }
         };
 
-        // Connect to Gemini 3.8 Live API with verified prebuilt voice
+        const saveLeadDeclaration = {
+          name: "save_lead",
+          description: "Saves qualified real estate client lead parameters to CRM lead card.",
+          parameters: {
+            type: Type.OBJECT,
+            properties: {
+              clientIntent: {
+                type: Type.STRING,
+                description: "buy, rent, sell, or invest",
+              },
+              district: {
+                type: Type.STRING,
+                description: "Tashkent district (e.g. Chilonzor, Mirobod, Yunusobod, Yakkasaroy, Mirzo Ulug'bek, Yashnobod, Sergeli)",
+              },
+              roomsCount: {
+                type: Type.STRING,
+                description: "Number of rooms (e.g. 1 xonali, 2 xonali, 3 xonali, 4 xonali)",
+              },
+              budgetRange: {
+                type: Type.STRING,
+                description: "Client budget (e.g. $50,000, $70,000)",
+              },
+              paymentMethod: {
+                type: Type.STRING,
+                description: "cash, mortgage, or installments",
+              },
+              propertyType: {
+                type: Type.STRING,
+                description: "novostroyka or vtorichka",
+              },
+              clientName: {
+                type: Type.STRING,
+                description: "Client's name",
+              },
+              preferredContactTime: {
+                type: Type.STRING,
+                description: "Preferred callback time or Telegram/office preference",
+              },
+            },
+          },
+        };
+
+        // Connect to Gemini 3.8 Live API with verified prebuilt voice & 220ms ultra-fast VAD
         try {
           const voiceConfig = { prebuiltVoiceConfig: { voiceName: liveVoice } };
+          const liveConfig: any = {
+            responseModalities: [Modality.AUDIO],
+            speechConfig: { voiceConfig },
+            systemInstruction,
+            inputAudioTranscription: {},
+            outputAudioTranscription: {},
+            ...(isSuperTaxi
+              ? {
+                  realtimeInputConfig: {
+                    automaticActivityDetection: {
+                      disabled: false,
+                      silenceDurationMs: 220,
+                      prefixPaddingMs: 40,
+                    },
+                  },
+                }
+              : {
+                  realtimeInputConfig: {
+                    automaticActivityDetection: {
+                      disabled: false,
+                      startOfSpeechSensitivity: StartSensitivity.START_SENSITIVITY_HIGH,
+                      endOfSpeechSensitivity: EndSensitivity.END_SENSITIVITY_LOW,
+                      prefixPaddingMs: 200,
+                      silenceDurationMs: 450,
+                    },
+                  },
+                }),
+          };
 
-          liveSession = await ai.live.connect({
-            model: "gemini-3.8-live",
-            config: {
-              responseModalities: [Modality.AUDIO],
-              speechConfig: { voiceConfig },
-              systemInstruction,
-              inputAudioTranscription: {},
-              outputAudioTranscription: {},
-            },
-            callbacks: {
-              onmessage: (msg: any) => {
-                if (clientWs.readyState !== WebSocket.OPEN) return;
+          if (isRealEstate) {
+            liveConfig.tools = [{ functionDeclarations: [saveLeadDeclaration] }];
+          }
 
-                // 1. Audio stream chunks from Gemini (iterate all parts so no audio chunk is ever skipped)
-                for (const part of msg.serverContent?.modelTurn?.parts ?? []) {
-                  if (part.inlineData?.data) {
+          const activeLiveKey = resolveActiveGeminiKey();
+          if (!activeLiveKey) {
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(
+                JSON.stringify({
+                  type: "apiKeyExpired",
+                  error: "Gemini API kaliti belgilanmagan. Iltimos, kalit kiriting.",
+                })
+              );
+            }
+            return;
+          }
+
+          let receivedAnyTurnOutput = false;
+          let didRetryCompatConfig = false;
+
+          const startLiveSession = async (cfg: any, keyToUse: string) => {
+            const clientForLive = getGeminiClient(keyToUse);
+            return await clientForLive.live.connect({
+              model: "gemini-3.8-live",
+              config: cfg,
+              callbacks: {
+                onmessage: (msg: any) => {
+                  if (msg?.serverContent?.modelTurn || msg?.serverContent?.outputTranscription || msg?.toolCall) {
+                    receivedAnyTurnOutput = true;
+                  }
+                  if (clientWs.readyState !== WebSocket.OPEN) return;
+
+                  // 0. Handle save_lead Function Call from Gemini Live
+                  if (msg.toolCall?.functionCalls?.length) {
+                    const functionResponses: any[] = [];
+                    for (const call of msg.toolCall.functionCalls) {
+                      if (call.name === "save_lead") {
+                        const args = call.args || {};
+                        clientWs.send(
+                          JSON.stringify({
+                            type: "leadSaved",
+                            lead: {
+                              ...args,
+                              leadTemperature: "hot",
+                            },
+                            finalized: true,
+                          })
+                        );
+                      }
+                      functionResponses.push({
+                        id: call.id,
+                        name: call.name,
+                        response: { result: "saved" },
+                      });
+                    }
+                    if (liveSession && functionResponses.length > 0) {
+                      try {
+                        liveSession.sendToolResponse({ functionResponses });
+                      } catch (toolErr) {
+                        console.warn("sendToolResponse warning:", toolErr);
+                      }
+                    }
+                  }
+
+                  // 1. Audio stream chunks from Gemini (iterate all parts so no audio chunk is ever skipped)
+                  for (const part of msg.serverContent?.modelTurn?.parts ?? []) {
+                    if (part.inlineData?.data) {
+                      isAgentGeneratingTurn = true;
+                      clientWs.send(JSON.stringify({ type: "audio", audio: part.inlineData.data }));
+                    }
+                  }
+
+                  // 1b. Input audio transcription from user
+                  const inputTranscript = msg.serverContent?.inputTranscription?.text;
+                  if (inputTranscript && inputTranscript.trim()) {
+                    lastUserTranscript = `${lastUserTranscript} ${inputTranscript}`.trim();
+                    clientWs.send(JSON.stringify({ type: "userTranscript", text: inputTranscript }));
+                    if (isRealEstate) {
+                      const progressiveLead = extractProgressiveRealtorLead(lastUserTranscript);
+                      if (Object.keys(progressiveLead).length > 0) {
+                        clientWs.send(
+                          JSON.stringify({
+                            type: "leadSaved",
+                            lead: progressiveLead,
+                            finalized: false,
+                          })
+                        );
+                      }
+                    }
+                  }
+
+                  // 2. Text parts / output audio transcripts if present
+                  const partText = msg.serverContent?.modelTurn?.parts
+                    ?.map((p: any) => p.text)
+                    .filter(Boolean)
+                    .join(" ");
+                  const outTranscript = msg.serverContent?.outputTranscription?.text;
+                  const text = outTranscript || partText;
+                  if (text) {
                     isAgentGeneratingTurn = true;
-                    clientWs.send(JSON.stringify({ type: "audio", audio: part.inlineData.data }));
+                    currentTurnAgentText = `${currentTurnAgentText} ${text}`.trim();
+                    clientWs.send(JSON.stringify({ type: "text", text }));
                   }
-                }
 
-                // 1b. Input audio transcription from user
-                const inputTranscript = msg.serverContent?.inputTranscription?.text;
-                if (inputTranscript && inputTranscript.trim()) {
-                  lastUserTranscript = `${lastUserTranscript} ${inputTranscript}`.trim();
-                  clientWs.send(JSON.stringify({ type: "userTranscript", text: inputTranscript }));
-                }
+                  // Reset fallback turn-end timer whenever Gemini is actively streaming audio or text
+                  if (isSuperTaxi && (msg.serverContent?.modelTurn?.parts?.length || text)) {
+                    if (turnEndFallbackTimer) clearTimeout(turnEndFallbackTimer);
+                    turnEndFallbackTimer = setTimeout(() => {
+                      finalizeAgentTurn();
+                    }, 1200);
+                  }
 
-                // 2. Text parts / output audio transcripts if present
-                const partText = msg.serverContent?.modelTurn?.parts
-                  ?.map((p: any) => p.text)
-                  .filter(Boolean)
-                  .join(" ");
-                const outTranscript = msg.serverContent?.outputTranscription?.text;
-                const text = outTranscript || partText;
-                if (text) {
-                  isAgentGeneratingTurn = true;
-                  currentTurnAgentText = `${currentTurnAgentText} ${text}`.trim();
-                  clientWs.send(JSON.stringify({ type: "text", text }));
-                }
+                  // 3. User interrupted agent mid-speech (ignore on SuperTaxi IVR so mic noise/echo never aborts confirmation speech)
+                  if (msg.serverContent?.interrupted) {
+                    if (!isSuperTaxi) {
+                      isAgentGeneratingTurn = false;
+                      currentTurnAgentText = "";
+                      clientWs.send(JSON.stringify({ type: "interrupted" }));
+                    }
+                  }
 
-                // Reset fallback turn-end timer whenever Gemini is actively streaming audio or text
-                if (isSuperTaxi && (msg.serverContent?.modelTurn?.parts?.length || text)) {
-                  if (turnEndFallbackTimer) clearTimeout(turnEndFallbackTimer);
-                  turnEndFallbackTimer = setTimeout(() => {
+                  // 4. Agent completed its current turn
+                  if (msg.serverContent?.turnComplete) {
                     finalizeAgentTurn();
-                  }, 1200);
-                }
-
-                // 3. User interrupted agent mid-speech (ignore on SuperTaxi IVR so mic noise/echo never aborts confirmation speech)
-                if (msg.serverContent?.interrupted) {
-                  if (!isSuperTaxi) {
-                    isAgentGeneratingTurn = false;
-                    currentTurnAgentText = "";
-                    clientWs.send(JSON.stringify({ type: "interrupted" }));
                   }
-                }
+                },
+                onclose: async (closeEvent?: any) => {
+                  if (turnEndFallbackTimer) {
+                    clearTimeout(turnEndFallbackTimer);
+                    turnEndFallbackTimer = null;
+                  }
+                  const closeCode = closeEvent?.code;
+                  const closeReason = String(closeEvent?.reason || "");
+                  console.warn("Gemini Live session close notice:", closeCode, closeReason);
+                  if (clientWs.readyState !== WebSocket.OPEN) return;
 
-                // 4. Agent completed its current turn
-                if (msg.serverContent?.turnComplete) {
-                  finalizeAgentTurn();
-                }
+                  // Only treat as expired API key if the reason actually indicates a key/auth failure!
+                  if (isGeminiKeyErrorMessage(closeReason)) {
+                    const fallbackKey = markGeminiKeyExpiredAndFallback(keyToUse);
+                    if (fallbackKey && fallbackKey !== keyToUse) {
+                      try {
+                        liveSession = await startLiveSession(cfg, fallbackKey);
+                        return;
+                      } catch {}
+                    }
+                    liveSession = null;
+                    clientWs.send(JSON.stringify({
+                      type: "apiKeyExpired",
+                      error: "Gemini API kaliti muddati tugagan. Iltimos, yangi kalit kiriting.",
+                    }));
+                  } else if (closeCode === 1007 && !receivedAnyTurnOutput && !didRetryCompatConfig) {
+                    // Retry once with minimal Live config (without sensitivity enums)
+                    didRetryCompatConfig = true;
+                    const minimalConfig: any = {
+                      responseModalities: [Modality.AUDIO],
+                      speechConfig: { voiceConfig },
+                      systemInstruction,
+                      inputAudioTranscription: {},
+                      outputAudioTranscription: {},
+                      realtimeInputConfig: {
+                        automaticActivityDetection: {
+                          disabled: false,
+                          prefixPaddingMs: 200,
+                          silenceDurationMs: 450,
+                        },
+                      },
+                      ...(isRealEstate ? { tools: [{ functionDeclarations: [saveLeadDeclaration] }] } : {}),
+                    };
+                    try {
+                      liveSession = await startLiveSession(minimalConfig, keyToUse);
+                      return;
+                    } catch (retryErr: any) {
+                      liveSession = null;
+                      clientWs.send(JSON.stringify({
+                        type: "error",
+                        error: retryErr?.message || closeReason || "Gemini Live WebSocket config error (1007)",
+                      }));
+                    }
+                  } else if (closeCode === 1007) {
+                    liveSession = null;
+                    clientWs.send(JSON.stringify({
+                      type: "error",
+                      error: closeReason || "Gemini Live WebSocket invalid argument (1007)",
+                    }));
+                  } else {
+                    clientWs.send(JSON.stringify({ type: "sessionClosed", reason: closeReason }));
+                  }
+                },
+                onerror: (err: any) => {
+                  const errMsg = String(err?.message || err || "");
+                  console.warn("Gemini Live session warning:", errMsg);
+                  if (clientWs.readyState !== WebSocket.OPEN) return;
+                  if (isGeminiKeyErrorMessage(errMsg)) {
+                    markGeminiKeyExpiredAndFallback(keyToUse);
+                    clientWs.send(JSON.stringify({
+                      type: "apiKeyExpired",
+                      error: "Gemini API kaliti muddati tugagan. Iltimos, yangi kalit kiriting.",
+                    }));
+                  } else {
+                    clientWs.send(JSON.stringify({
+                      type: "error",
+                      error: errMsg || "Gemini Live WebSocket error",
+                    }));
+                  }
+                },
               },
-              onclose: (closeEvent?: any) => {
-                if (turnEndFallbackTimer) {
-                  clearTimeout(turnEndFallbackTimer);
-                  turnEndFallbackTimer = null;
-                }
-                const closeCode = closeEvent?.code;
-                const closeReason = String(closeEvent?.reason || "");
-                console.warn("Gemini Live session close notice:", closeCode, closeReason);
-                if (clientWs.readyState !== WebSocket.OPEN) return;
+            });
+          };
 
-                if (closeCode === 1007 || closeReason.includes("API key") || closeReason.includes("expired") || closeReason.includes("API_KEY_INVALID")) {
-                  liveSession = null;
-                  clientWs.send(JSON.stringify({
-                    type: "apiKeyExpired",
-                    error: "Gemini API kaliti muddati tugagan. Iltimos, yangi kalit kiriting.",
-                  }));
-                } else {
-                  clientWs.send(JSON.stringify({ type: "sessionClosed", reason: closeReason }));
-                }
-              },
-              onerror: (err: any) => {
-                const errMsg = String(err?.message || err || "");
-                console.warn("Gemini Live session warning:", errMsg);
-                if (clientWs.readyState !== WebSocket.OPEN) return;
-                if (errMsg.includes("API key") || errMsg.includes("expired") || errMsg.includes("API_KEY_INVALID")) {
-                  clientWs.send(JSON.stringify({
-                    type: "apiKeyExpired",
-                    error: "Gemini API kaliti muddati tugagan. Iltimos, yangi kalit kiriting.",
-                  }));
-                } else {
-                  clientWs.send(JSON.stringify({
-                    type: "error",
-                    error: errMsg || "Gemini Live WebSocket error",
-                  }));
-                }
-              },
-            },
-          });
+          liveSession = await startLiveSession(liveConfig, activeLiveKey);
 
           // Deduct 1 credit atomically on the server and log generation when Gemini Live session connects
           let creditsRemaining: number | undefined;
@@ -7333,7 +8929,8 @@ Muloqot tili: ${language === "ru" ? "Rus tili (естественный живо
           liveSession = null;
 
           if (clientWs.readyState === WebSocket.OPEN) {
-            if (errMsg.includes("API key") || errMsg.includes("expired") || errMsg.includes("API_KEY_INVALID")) {
+            if (isGeminiKeyErrorMessage(errMsg)) {
+              markGeminiKeyExpiredAndFallback();
               clientWs.send(
                 JSON.stringify({
                   type: "apiKeyExpired",

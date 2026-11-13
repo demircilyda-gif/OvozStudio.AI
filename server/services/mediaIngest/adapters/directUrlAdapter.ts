@@ -1,6 +1,6 @@
 import fs from "node:fs";
-import { BaseMediaAdapter, AdapterResult } from "./baseAdapter.js";
-import { MediaPlatform } from "../types.js";
+import { BaseMediaAdapter, type AdapterResult } from "./baseAdapter.ts";
+import type { MediaPlatform } from "../types.ts";
 
 export class DirectUrlAdapter extends BaseMediaAdapter {
   readonly name = "DirectUrlAdapter";

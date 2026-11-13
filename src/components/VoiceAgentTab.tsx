@@ -94,34 +94,34 @@ export interface RealtimeVoiceOption {
 
 export const REALTIME_VOICES: RealtimeVoiceOption[] = [
   {
-    id: 'Puck',
-    nameUz: 'Shohrux (Puck)',
-    nameRu: 'Шохрух (Puck)',
-    gender: 'male',
-    toneUz: 'Dinamik, samimiy va jonli erkak ovozi. Tezkor javoblar uchun eng yaxshisi.',
-    toneRu: 'Динамичный, живой и уверенный мужской тембр. Идеален для быстрых ответов.',
-    badgeUz: 'Tavsiya (Default)',
-    badgeRu: 'Основной',
-  },
-  {
     id: 'Charon',
-    nameUz: 'Jasur (Charon)',
-    nameRu: 'Жасур (Charon)',
+    nameUz: 'Shohrux (Charon)',
+    nameRu: 'Шохрух (Charon)',
     gender: 'male',
-    toneUz: 'Chuqur bariton, nufuzli va tajribali rieltor-broker ovozi.',
-    toneRu: 'Глубокий баритон, солидный и опытный риелтор-брокер.',
-    badgeUz: 'Katta Rieltor',
-    badgeRu: 'Старший Брокер',
+    toneUz: 'Toshkent ko\'chmas mulk agentligi menejeri. Xotirjam, aniq va ishbilarmon erkak ovozi.',
+    toneRu: 'Менеджер агентства недвижимости Ташкента. Спокойный, чёткий и деловой мужской тембр.',
+    badgeUz: 'Rieltor (Asosiy)',
+    badgeRu: 'Риелтор (Основной)',
   },
   {
     id: 'Aoede',
-    nameUz: 'Madina (Aoede)',
-    nameRu: 'Мадина (Aoede)',
+    nameUz: 'Malika / Madina (Aoede)',
+    nameRu: 'Малика / Мадина (Aoede)',
     gender: 'female',
-    toneUz: 'Xarizmatik, samimiy va jozibali ayol ovozi.',
-    toneRu: 'Харизматичный, тёплый и располагающий женский тембр.',
-    badgeUz: 'Samimiy Rieltor',
-    badgeRu: 'Харизматичный',
+    toneUz: 'Aniq, tabiiy va xotirjam ayol menejer ovozi (Rieltor Malika / SuperTaksi Madina).',
+    toneRu: 'Чёткий, естественный и спокойный женский голос менеджера (Риелтор Малика / SuperTaksi Мадина).',
+    badgeUz: 'Ayol Menejer',
+    badgeRu: 'Женский Менеjer',
+  },
+  {
+    id: 'Puck',
+    nameUz: 'Otabek (Puck)',
+    nameRu: 'Отабек (Puck)',
+    gender: 'male',
+    toneUz: 'Dinamik va tezkor erkak ovozi. Qisqa va lo\'nda javoblar uchun mos.',
+    toneRu: 'Динамичный и быстрый мужской тембр для коротких диалогов.',
+    badgeUz: 'Tezkor',
+    badgeRu: 'Быстрый',
   },
   {
     id: 'Kore',
@@ -129,14 +129,14 @@ export const REALTIME_VOICES: RealtimeVoiceOption[] = [
     nameRu: 'Азиза (Kore)',
     gender: 'female',
     toneUz: 'Muloyim, xotirjam va ishonch uyg\'otuvchi ayol maslahatchi.',
-    toneRu: 'Мягкий, умиротворяющий и интеллигентный голос консультанта.',
-    badgeUz: 'Konsultatsiya',
+    toneRu: 'Мягкий, спокойный и интеллигентный женский голос консультанта.',
+    badgeUz: 'Konsultant',
     badgeRu: 'Консультант',
   },
   {
     id: 'Fenrir',
     nameUz: 'Ulug\'bek (Fenrir)',
-    nameRu: 'Улугbek (Fenrir)',
+    nameRu: 'Улугбек (Fenrir)',
     gender: 'male',
     toneUz: 'Qat\'iy, nufuzli, tajribali rahbar va biznes eksperti.',
     toneRu: 'Авторитетный, сильный голос руководителя и эксперта.',
@@ -213,7 +213,10 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
   lang,
 }) => {
   const { isAuthenticated, isAdmin, requireAuth, syncCredits, logGeneration } = useAuth();
-  const shokhrukhVoiceId = userClonedVoiceId || 'voice_17raj9ewke3g';
+  const shokhrukhVoiceId =
+    userClonedVoiceId && userClonedVoiceId !== 'user-replicated'
+      ? userClonedVoiceId
+      : 'voice_17raj9ewke3g';
 
   // Call Engine Mode: 'live' = Gemini 3.8 Live API WebSocket (~0.3s, 5 official voices), 'cloned' = Custom Cloned Voice via Gemini 3.8 Flash TTS
   const [callMode, setCallMode] = useState<'live' | 'cloned'>('live');
@@ -343,10 +346,13 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
   const nextPlaybackTimeRef = useRef<number>(0);
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const callTimerRef = useRef<any>(null);
+  const callSessionIdRef = useRef<string | null>(null);
   const conversationHistoryRef = useRef<TranscriptLine[]>([]);
   const interimSpeechRef = useRef<string>('');
   const speechSilenceTimerRef = useRef<any>(null);
   const restartListeningRef = useRef<() => void>(() => {});
+  const [lastTurnTimingMs, setLastTurnTimingMs] = useState<number | null>(null);
+  const fillerTurnCounterRef = useRef<number>(0);
 
   useEffect(() => {
     isMutedRef.current = isMuted;
@@ -528,17 +534,19 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
     }
   }, [stopAllAudio]);
 
-  // Execute conversational turn (Gemini 3.8 Flash Neural Call)
+  // Execute conversational turn (Streaming 24kHz PCM + 0.3s Backchannel Reaction)
   const executeNaturalTurn = useCallback(async (spokenText: string) => {
     if (!spokenText.trim() || isLoadingTurn) return;
 
+    const turnStartMs = Date.now();
     setIsLoadingTurn(true);
     setUserSpeaking(false);
 
+    const cleanSpoken = spokenText.trim();
     const userLine: TranscriptLine = {
       id: `u-${Date.now()}`,
       sender: 'user',
-      text: spokenText.trim(),
+      text: cleanSpoken,
       timestamp: new Date().toLocaleTimeString(lang === 'ru' ? 'ru-RU' : 'uz-UZ', {
         hour: '2-digit',
         minute: '2-digit',
@@ -548,17 +556,41 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
 
     setTranscriptLines((prev) => [...prev, userLine]);
 
+    // Play cached 0.3s backchannel reaction ("Xo'p...", "Ha...") in Cloned Voice on alternate statement turns
+    const isDirectQuestion =
+      cleanSpoken.includes('?') ||
+      /\b(qancha|necha|qayerda|qanaqa|bormi|сколько|где|какой|какая|есть ли)\b/i.test(cleanSpoken);
+    const shouldPlayQuickFiller =
+      selectedPersona === 'tashkent_real_estate' &&
+      !isDirectQuestion &&
+      fillerTurnCounterRef.current % 2 === 0;
+    fillerTurnCounterRef.current += 1;
+
+    let fillerAudioElem: HTMLAudioElement | null = null;
+    if (shouldPlayQuickFiller) {
+      try {
+        const fillerIdx = fillerTurnCounterRef.current % 3;
+        const fillerUrl = `/api/agent/realtor-filler.wav?voice=${encodeURIComponent(agentVoiceId)}&lang=${lang}&idx=${fillerIdx}`;
+        fillerAudioElem = new Audio(fillerUrl);
+        fillerAudioElem.volume = 0.9;
+        fillerAudioElem.play().catch(() => {});
+      } catch (e) {}
+    }
+
     try {
       const res = await authFetch('/api/agent/call-turn', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          userText: spokenText.trim(),
+          sessionId: callSessionIdRef.current || undefined,
+          userText: cleanSpoken,
           conversationHistory: conversationHistoryRef.current,
           persona: selectedPersona,
           topic: callTopic,
           agentVoiceId: agentVoiceId,
           language: lang,
+          stream: true,
+          playedFillerAck: shouldPlayQuickFiller,
         }),
       });
 
@@ -566,14 +598,128 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
         throw new Error('Call turn failed');
       }
 
+      const contentType = res.headers.get('content-type') || '';
+
+      // Handle NDJSON Streaming Response (24kHz PCM chunks)
+      if (contentType.includes('application/x-ndjson') && res.body) {
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let firstAudioReceived = false;
+
+        const handleMetaPayload = (data: any) => {
+          if (typeof data.creditsRemaining === 'number') {
+            syncCredits(data.creditsRemaining);
+          }
+          const replyText = data.replyText || '';
+          setCurrentSubtitle(replyText);
+
+          if (data.leadUpdate) {
+            setReLeadCard((prev) => ({
+              ...prev,
+              ...(data.leadUpdate.district ? { district: data.leadUpdate.district } : {}),
+              ...(data.leadUpdate.budgetRange ? { budgetRange: data.leadUpdate.budgetRange } : {}),
+              ...(data.leadUpdate.clientIntent ? { clientIntent: data.leadUpdate.clientIntent } : {}),
+              ...(data.leadUpdate.propertyType ? { propertyType: data.leadUpdate.propertyType } : {}),
+              ...(data.leadUpdate.roomsCount ? { roomsCount: data.leadUpdate.roomsCount } : {}),
+              ...(data.leadUpdate.urgency ? { urgency: data.leadUpdate.urgency } : {}),
+              ...(data.leadUpdate.paymentMethod ? { paymentMethod: data.leadUpdate.paymentMethod } : {}),
+              ...(data.leadUpdate.leadTemperature ? { leadTemperature: data.leadUpdate.leadTemperature } : {}),
+            }));
+          }
+
+          if (data.isOffTopic) {
+            setOffTopicCount((prev) => prev + 1);
+            setGuardrailAlert(
+              lang === 'uz'
+                ? "🛡️ Guardrail faol: Begona mavzu to'xtatildi, agent suhbatni ko'chmas mulkka qaytardi"
+                : '🛡️ Защита темы: оффтоп отклонён, агент вернул диалог к недвижимости'
+            );
+            setTimeout(() => setGuardrailAlert(null), 4500);
+          }
+
+          if (data.clarificationNeeded) {
+            setClarificationCount((prev) => prev + 1);
+            setClarificationAlert(
+              lang === 'uz'
+                ? "✨ Halol aniqlashtirish: Ovoz noaniq bo'lgani uchun agent to'qimasdan qayta so'radi"
+                : '✨ Честное уточнение: агент не стал домысливать и переспросил неясный запрос'
+            );
+            setTimeout(() => setClarificationAlert(null), 4500);
+          }
+
+          const agentLine: TranscriptLine = {
+            id: `a-${Date.now()}`,
+            sender: 'agent',
+            text: replyText,
+            timestamp: new Date().toLocaleTimeString(lang === 'ru' ? 'ru-RU' : 'uz-UZ', {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            }),
+          };
+          setTranscriptLines((prev) => [...prev, agentLine]);
+        };
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            try {
+              const event = JSON.parse(trimmed);
+              if (event.type === 'meta') {
+                handleMetaPayload(event);
+              } else if (event.type === 'audioChunk' && event.audio) {
+                if (!firstAudioReceived) {
+                  firstAudioReceived = true;
+                  const firstAudioLatency = Date.now() - turnStartMs;
+                  setLastTurnTimingMs(firstAudioLatency);
+                  if (fillerAudioElem) {
+                    try {
+                      fillerAudioElem.pause();
+                    } catch (e) {}
+                    fillerAudioElem = null;
+                  }
+                }
+                playLiveAudioChunk(event.audio);
+              }
+            } catch (parseErr) {
+              console.warn('NDJSON line parse warning:', parseErr);
+            }
+          }
+        }
+
+        // Wait until all queued 24kHz PCM chunks finish playing before re-enabling continuous speech recognition
+        const waitStart = Date.now();
+        const waitForStreamPlaybackEnd = () => {
+          const ctx = outputAudioCtxRef.current;
+          const remainingSec = ctx ? Math.max(0, nextPlaybackTimeRef.current - ctx.currentTime) : 0;
+          const stillPlaying = activeSourcesRef.current.length > 0 || remainingSec > 0.06;
+          if (stillPlaying && Date.now() - waitStart < 15000) {
+            setTimeout(waitForStreamPlaybackEnd, 150);
+          } else {
+            restartListeningRef.current();
+          }
+        };
+        waitForStreamPlaybackEnd();
+        return;
+      }
+
+      // Fallback JSON mode
       const data = await res.json();
+      setLastTurnTimingMs(Date.now() - turnStartMs);
       if (typeof data.creditsRemaining === 'number') {
         syncCredits(data.creditsRemaining);
       }
       const replyText = data.replyText || '';
       setCurrentSubtitle(replyText);
 
-      // Handle real-time lead qualification update
       if (data.leadUpdate) {
         setReLeadCard((prev) => ({
           ...prev,
@@ -586,34 +732,6 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
           ...(data.leadUpdate.paymentMethod ? { paymentMethod: data.leadUpdate.paymentMethod } : {}),
           ...(data.leadUpdate.leadTemperature ? { leadTemperature: data.leadUpdate.leadTemperature } : {}),
         }));
-        setLiveLeadUpdateToast(
-          lang === 'uz'
-            ? '🎯 BANT Lead-kartasi jonli suhbatdan yangilandi!'
-            : '🎯 Лид-карта обновлена из живого диалога!'
-        );
-        setTimeout(() => setLiveLeadUpdateToast(null), 3500);
-      }
-
-      // Handle Strict Real Estate Guardrail deflection
-      if (data.isOffTopic) {
-        setOffTopicCount((prev) => prev + 1);
-        setGuardrailAlert(
-          lang === 'uz'
-            ? "🛡️ Guardrail faol: Begona mavzu to'xtatildi, agent suhbatni ko'chmas mulkka qaytardi"
-            : '🛡️ Защита темы: оффтоп отклонён, агент вернул диалог к недвижимости'
-        );
-        setTimeout(() => setGuardrailAlert(null), 4500);
-      }
-
-      // Handle Anti-Hallucination clarification trigger
-      if (data.clarificationNeeded) {
-        setClarificationCount((prev) => prev + 1);
-        setClarificationAlert(
-          lang === 'uz'
-            ? "✨ Halol aniqlashtirish: Ovoz noaniq bo'lgani uchun agent to'qimasdan qayta so'radi"
-            : '✨ Честное уточнение: агент не стал домысливать и переспросил неясный запрос'
-        );
-        setTimeout(() => setClarificationAlert(null), 4500);
       }
 
       const agentLine: TranscriptLine = {
@@ -633,14 +751,6 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
           restartListeningRef.current();
         });
       } else {
-        if (data.errorNotice === 'gemini_api_key_expired' || data.isApiKeyExpired) {
-          setCallErrorMessage(
-            lang === 'uz'
-              ? "Gemini API kaliti muddati tugagan. Davom ettirish uchun [Kalitni yangilash] tugmasini bosing."
-              : "Срок действия Gemini API ключа истёк. Нажмите [Обновить ключ] для продолжения."
-          );
-          window.dispatchEvent(new CustomEvent('open-api-key-modal'));
-        }
         restartListeningRef.current();
       }
     } catch (err: any) {
@@ -651,17 +761,23 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
         err?.code === 'API_KEY_EXPIRED';
       if (isExpired) {
         setCallErrorMessage(
-          lang === 'uz'
-            ? "Gemini API kaliti muddati tugagan. [Kalitni yangilash] tugmasini bosing."
-            : "Срок действия Gemini API ключа истёк. Нажмите [Обновить ключ]."
+          isAdmin
+            ? lang === 'uz'
+              ? "Gemini API kaliti muddati tugagan. [Kalitni yangilash] tugmasini bosing."
+              : "Срок действия Gemini API ключа истёк. Нажмите [Обновить ключ]."
+            : lang === 'uz'
+              ? "AI ovozli server vaqtincha texnik xizmatda. Iltimos, administratorga xabar bering."
+              : "Голосовой AI-сервер временно недоступен. Пожалуйста, обратитесь к администратору."
         );
-        window.dispatchEvent(new CustomEvent('open-api-key-modal'));
+        if (isAdmin) {
+          window.dispatchEvent(new CustomEvent('open-api-key-modal'));
+        }
       }
       restartListeningRef.current();
     } finally {
       setIsLoadingTurn(false);
     }
-  }, [isLoadingTurn, lang, selectedPersona, callTopic, agentVoiceId, playTurnAudio, syncCredits]);
+  }, [isLoadingTurn, lang, selectedPersona, callTopic, agentVoiceId, playTurnAudio, playLiveAudioChunk, syncCredits]);
 
   // Start continuous speech recognition for customer with smart VAD silence detection
   const startContinuousListening = useCallback(() => {
@@ -728,9 +844,8 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
           return;
         }
 
-        // SMART VAD: 850ms silence after speech pause triggers immediate turn!
-        // Cuts user waiting time down from 10-15s to ~1.5s!
-        if (interimSpeechRef.current.trim().length >= 3) {
+        // SMART VAD: 620ms silence after speech pause triggers immediate turn!
+        if (interimSpeechRef.current.trim().length >= 2) {
           if (speechSilenceTimerRef.current) {
             clearTimeout(speechSilenceTimerRef.current);
           }
@@ -744,7 +859,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
               } catch (e) {}
               executeNaturalTurn(textToSend);
             }
-          }, 850);
+          }, 620);
         }
       };
 
@@ -812,6 +927,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
       micStreamRef.current = null;
     }
     inputAudioCtxRef.current = null;
+    callSessionIdRef.current = null;
     agentSpeakingRef.current = false;
     setAgentSpeaking(false);
     setUserSpeaking(false);
@@ -862,9 +978,16 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
       );
     }
 
-    // Mode 2: Custom Cloned Voice via Gemini 3.8 Flash + Gemini 3.8 Flash TTS
+    // Mode 2: Personal Cloned Voice with Streaming Audio & Cached 0.3s Fillers
     const startTurnBasedCall = async () => {
       try {
+        setLastTurnTimingMs(null);
+        // Pre-warm short backchannel fillers in the background
+        [0, 1].forEach((idx) => {
+          fetch(
+            `/api/agent/realtor-filler.wav?voice=${encodeURIComponent(agentVoiceId)}&lang=${lang}&idx=${idx}`
+          ).catch(() => {});
+        });
         const res = await authFetch('/api/agent/start-call', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -882,6 +1005,9 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
           throw new Error(errMsg);
         }
         const data = await res.json();
+        if (data.sessionId) {
+          callSessionIdRef.current = data.sessionId;
+        }
 
         setCallStatus('connected');
         setCallDuration(0);
@@ -892,17 +1018,22 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
 
         if (data.errorNotice === 'gemini_api_key_expired' || data.isApiKeyExpired) {
           setCallErrorMessage(
-            lang === 'uz'
-              ? "Gemini API kaliti muddati tugagan. Qo'ng'iroq faqat eng so'nggi Gemini modeli bilan ishlashi uchun yangi kalit kiriting."
-              : "Срок действия Gemini API ключа истёк. Введите новый ключ для работы звонка через последнюю модель Gemini."
+            isAdmin
+              ? lang === 'uz'
+                ? "Gemini API kaliti muddati tugagan. Qo'ng'iroq faqat eng so'nggi Gemini modeli bilan ishlashi uchun yangi kalit kiriting."
+                : "Срок действия Gemini API ключа истёк. Введите новый ключ для работы звонка через последнюю модель Gemini."
+              : lang === 'uz'
+                ? "AI ovozli server vaqtincha texnik xizmatda. Iltimos, birozdan so'ng urinib ko'ring."
+                : "Голосовой AI-сервер временно недоступен. Пожалуйста, попробуйте позже."
           );
-          window.dispatchEvent(new CustomEvent('open-api-key-modal'));
+          if (isAdmin) {
+            window.dispatchEvent(new CustomEvent('open-api-key-modal'));
+          }
         }
 
         if (typeof data.creditsRemaining === 'number') {
           syncCredits(data.creditsRemaining);
         }
-        logGeneration('agent_call', 'AI Realtor Call', 1).catch(() => {});
 
         const greeting =
           data.greetingText ||
@@ -933,11 +1064,17 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
         } else {
           if (data.errorNotice === 'gemini_api_key_expired' || data.isApiKeyExpired) {
             setCallErrorMessage(
-              lang === 'uz'
-                ? "Gemini API kaliti muddati tugagan. Qo'ng'iroq uchun yangi kalit kiriting."
-                : "Срок действия Gemini API ключа истёк. Введите новый ключ для звонка."
+              isAdmin
+                ? lang === 'uz'
+                  ? "Gemini API kaliti muddati tugagan. Qo'ng'iroq uchun yangi kalit kiriting."
+                  : "Срок действия Gemini API ключа истёк. Введите новый ключ для звонка."
+                : lang === 'uz'
+                  ? "AI ovozli server vaqtincha texnik xizmatda. Iltimos, birozdan so'ng urinib ko'ring."
+                  : "Голосовой AI-сервер временно недоступен. Пожалуйста, попробуйте позже."
             );
-            window.dispatchEvent(new CustomEvent('open-api-key-modal'));
+            if (isAdmin) {
+              window.dispatchEvent(new CustomEvent('open-api-key-modal'));
+            }
           }
           if (micStreamRef.current) {
             startContinuousListening();
@@ -950,12 +1087,14 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
           err?.message?.includes('API key expired') ||
           err?.message?.includes('API_KEY_INVALID') ||
           err?.code === 'API_KEY_EXPIRED';
-        if (isExpired) {
+        if (isExpired && isAdmin) {
           window.dispatchEvent(new CustomEvent('open-api-key-modal'));
         }
         setCallErrorMessage(
           isExpired
-            ? (lang === 'uz' ? "Gemini API kaliti muddati tugagan. [Kalitni yangilash] tugmasini bosing." : "Срок действия Gemini API ключа истёк. Нажмите [Обновить ключ].")
+            ? isAdmin
+              ? (lang === 'uz' ? "Gemini API kaliti muddati tugagan. [Kalitni yangilash] tugmasini bosing." : "Срок действия Gemini API ключа истёк. Нажмите [Обновить ключ].")
+              : (lang === 'uz' ? "AI ovozli server vaqtincha texnik xizmatda. Iltimos, administratorga xabar bering." : "Голосовой AI-сервер временно недоступен. Пожалуйста, обратитесь к администратору.")
             : (err.message || 'Call start failed')
         );
       }
@@ -965,6 +1104,16 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
     const startLiveWebSocketCall = async () => {
       try {
         const isSuperTaxiCall = selectedPersona === 'supertaxi_ivr';
+        const isRealEstateCall = selectedPersona === 'tashkent_real_estate';
+        const effectiveVoice = isSuperTaxiCall
+          ? 'Aoede'
+          : agentVoiceId.startsWith('voice_')
+          ? 'Charon'
+          : agentVoiceId || 'Charon';
+        const isFemaleVoice =
+          effectiveVoice.toLowerCase() === 'aoede' ||
+          effectiveVoice.toLowerCase() === 'kore' ||
+          effectiveVoice.toLowerCase() === 'zephyr';
         taxiOrderConfirmedRef.current = false;
 
         if (isSuperTaxiCall) {
@@ -1000,9 +1149,9 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
               type: 'start',
               persona: selectedPersona,
               topic: callTopic,
-              voiceName: isSuperTaxiCall && agentVoiceId.startsWith('voice_') ? 'Aoede' : agentVoiceId,
+              voiceName: effectiveVoice,
               language: isSuperTaxiCall ? 'uz' : lang,
-              skipInitialGreeting: isSuperTaxiCall,
+              skipInitialGreeting: isSuperTaxiCall || isRealEstateCall,
             })
           );
         };
@@ -1024,20 +1173,36 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
               }
               logGeneration(
                 'agent_call',
-                isSuperTaxiCall ? 'SuperTaksi IVR Live Call (0-Token WAV + gemini-3.8-live)' : 'AI Live Call (gemini-3.8-live)',
+                isSuperTaxiCall
+                  ? 'SuperTaksi IVR Live Call (0-Token WAV + gemini-3.8-live)'
+                  : isRealEstateCall
+                  ? 'Toshkent Rieltor Live Call (0-Token WAV + gemini-3.8-live)'
+                  : 'AI Live Call (gemini-3.8-live)',
                 1
               ).catch(() => {});
 
-              // Play 0-Token Pre-Recorded WAV Greeting immediately on SuperTaxi pickup
-              if (isSuperTaxiCall) {
-                const greetingText = 'Assalomu alaykum, SuperTaksi! Eshitaman sizni.';
+              // Play 0-Token Pre-Recorded WAV Greeting immediately on SuperTaxi or Realtor pickup
+              if (isSuperTaxiCall || isRealEstateCall) {
+                const realtorAgentName = isFemaleVoice
+                  ? lang === 'ru'
+                    ? 'Малика'
+                    : 'Malika'
+                  : lang === 'ru'
+                  ? 'Шохрух'
+                  : 'Shohrux';
+                const greetingText = isSuperTaxiCall
+                  ? 'Assalomu alaykum, SuperTaksi! Eshitaman sizni.'
+                  : lang === 'ru'
+                  ? `Здравствуйте, агентство недвижимости, ${realtorAgentName}. Слушаю вас.`
+                  : `Assalomu alaykum, ko'chmas mulk agentligi, ${realtorAgentName}. Eshitaman.`;
+
                 setCurrentSubtitle(greetingText);
                 setTranscriptLines([
                   {
                     id: `a-${Date.now()}`,
                     sender: 'agent',
                     text: greetingText,
-                    timestamp: new Date().toLocaleTimeString('uz-UZ', {
+                    timestamp: new Date().toLocaleTimeString(lang === 'ru' ? 'ru-RU' : 'uz-UZ', {
                       hour: '2-digit',
                       minute: '2-digit',
                       second: '2-digit',
@@ -1046,14 +1211,19 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                 ]);
 
                 try {
-                  const greetingAudio = new Audio('/api/agent/supertaxi-greeting.wav');
+                  const greetingWavUrl = isSuperTaxiCall
+                    ? '/api/agent/supertaxi-greeting.wav'
+                    : `/api/agent/realtor-greeting.wav?voice=${encodeURIComponent(effectiveVoice)}&lang=${lang}`;
+                  const greetingAudio = new Audio(greetingWavUrl);
                   currentAudioElemRef.current = greetingAudio;
                   isGreetingPlayingRef.current = true;
+                  agentSpeakingRef.current = true;
                   setAgentSpeaking(true);
                   setAudioLevel(0.7);
 
                   const releaseGreetingLock = () => {
                     isGreetingPlayingRef.current = false;
+                    agentSpeakingRef.current = false;
                     setAgentSpeaking(false);
                     setAudioLevel(0);
                     currentAudioElemRef.current = null;
@@ -1075,13 +1245,14 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                   });
                 } catch (wavErr) {
                   isGreetingPlayingRef.current = false;
+                  agentSpeakingRef.current = false;
                   console.warn('0-token WAV greeting playback warning:', wavErr);
                 }
               } else {
                 isGreetingPlayingRef.current = false;
               }
 
-              // Stream 16kHz PCM microphone input to Gemini Live WebSocket
+              // Stream 16kHz PCM microphone input to Gemini Live WebSocket via AudioWorklet (with ScriptProcessor fallback)
               if (micStreamRef.current) {
                 try {
                   const inputCtx = getLiveInputAudioContext();
@@ -1090,25 +1261,22 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                     inputCtx.resume().catch(() => {});
                   }
                   const source = inputCtx.createMediaStreamSource(micStreamRef.current);
-                  const processor = inputCtx.createScriptProcessor(4096, 1, 1);
-                  micProcessorRef.current = processor;
-
                   let lastVoiceActivityAt = Date.now();
-                  const silentFrame = new Float32Array(4096);
+                  const silentFrame = new Float32Array(1024);
 
-                  processor.onaudioprocess = (e) => {
-                    // Do not stream mic audio while muted or while the 0-token WAV greeting is playing (prevents speaker echo)
-                    if (isMutedRef.current || isGreetingPlayingRef.current || ws.readyState !== WebSocket.OPEN) return;
+                  const processMicFrame = (inputData: Float32Array) => {
+                    if (isMutedRef.current || ws.readyState !== WebSocket.OPEN) return;
 
-                    // Do not forward speaker echo to Gemini while SuperTaxi operator is speaking or after order is confirmed
+                    // For SuperTaxi IVR only: block mic while greeting or operator confirmation is playing
                     if (
                       isSuperTaxiCall &&
-                      (agentSpeakingRef.current || activeSourcesRef.current.length > 0 || taxiOrderConfirmedRef.current)
+                      (isGreetingPlayingRef.current ||
+                        agentSpeakingRef.current ||
+                        activeSourcesRef.current.length > 0 ||
+                        taxiOrderConfirmedRef.current)
                     ) {
                       return;
                     }
-
-                    const inputData = e.inputBuffer.getChannelData(0);
 
                     let sum = 0;
                     for (let i = 0; i < inputData.length; i++) {
@@ -1119,14 +1287,12 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                       lastVoiceActivityAt = Date.now();
                       setUserSpeaking(true);
                       setAudioLevel(Math.min(1, rms * 8));
-                      // Only trigger client barge-in on non-IVR calls with strong voice signal so speaker echo never cuts off SuperTaxi confirmation
-                      if (!isSuperTaxiCall && rms > 0.09 && agentSpeakingRef.current) {
-                        stopAllAudio();
-                        ws.send(JSON.stringify({ type: 'interrupt' }));
-                      }
                     } else {
                       setUserSpeaking(false);
                     }
+
+                    // Do not stream speaker echo while initial WAV greeting is playing
+                    if (isGreetingPlayingRef.current) return;
 
                     const isWithinSpeechHangover = Date.now() - lastVoiceActivityAt <= 650;
                     const frameToSend = isSuperTaxiCall && !isWithinSpeechHangover ? silentFrame : inputData;
@@ -1134,14 +1300,97 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                     ws.send(JSON.stringify({ type: 'audio', audio: base64Audio }));
                   };
 
-                  source.connect(processor);
-                  processor.connect(inputCtx.destination);
+                  const attachScriptProcessorFallback = () => {
+                    const processor = inputCtx.createScriptProcessor(1024, 1, 1);
+                    micProcessorRef.current = processor;
+                    processor.onaudioprocess = (e) => {
+                      processMicFrame(e.inputBuffer.getChannelData(0));
+                    };
+                    source.connect(processor);
+                    processor.connect(inputCtx.destination);
+                  };
+
+                  if (inputCtx.audioWorklet && typeof AudioWorkletNode !== 'undefined') {
+                    const workletCode = `
+                      class PcmCaptureProcessor extends AudioWorkletProcessor {
+                        constructor() {
+                          super();
+                          this.buf = new Float32Array(1024);
+                          this.offset = 0;
+                        }
+                        process(inputs) {
+                          const ch = inputs[0] && inputs[0][0];
+                          if (!ch) return true;
+                          for (let i = 0; i < ch.length; i++) {
+                            this.buf[this.offset++] = ch[i];
+                            if (this.offset >= 1024) {
+                              this.port.postMessage(this.buf.slice(0));
+                              this.offset = 0;
+                            }
+                          }
+                          return true;
+                        }
+                      }
+                      registerProcessor('pcm-capture-processor', PcmCaptureProcessor);
+                    `;
+                    const blob = new Blob([workletCode], { type: 'application/javascript' });
+                    const workletUrl = URL.createObjectURL(blob);
+                    inputCtx.audioWorklet
+                      .addModule(workletUrl)
+                      .then(() => {
+                        URL.revokeObjectURL(workletUrl);
+                        const workletNode = new AudioWorkletNode(inputCtx, 'pcm-capture-processor');
+                        (micProcessorRef as any).current = workletNode;
+                        workletNode.port.onmessage = (ev) => {
+                          if (ev.data instanceof Float32Array) {
+                            processMicFrame(ev.data);
+                          }
+                        };
+                        source.connect(workletNode);
+                        workletNode.connect(inputCtx.destination);
+                      })
+                      .catch(() => {
+                        URL.revokeObjectURL(workletUrl);
+                        attachScriptProcessorFallback();
+                      });
+                  } else {
+                    attachScriptProcessorFallback();
+                  }
                 } catch (audioErr) {
                   console.warn('Live mic stream setup warning:', audioErr);
                 }
               }
             } else if (msg.type === 'audio' && msg.audio) {
               playLiveAudioChunk(msg.audio);
+            } else if (msg.type === 'leadSaved' && msg.lead) {
+              const incoming = msg.lead;
+              setReLeadCard((prev) => ({
+                ...prev,
+                ...(incoming.clientIntent ? { clientIntent: incoming.clientIntent } : {}),
+                ...(incoming.district ? { district: incoming.district } : {}),
+                ...(incoming.roomsCount ? { roomsCount: incoming.roomsCount } : {}),
+                ...(incoming.budgetRange ? { budgetRange: incoming.budgetRange } : {}),
+                ...(incoming.paymentMethod ? { paymentMethod: incoming.paymentMethod } : {}),
+                ...(incoming.propertyType ? { propertyType: incoming.propertyType } : {}),
+                ...(incoming.clientName ? { clientName: incoming.clientName } : {}),
+                ...(incoming.preferredContactTime ? { preferredContactTime: incoming.preferredContactTime } : {}),
+                ...(incoming.leadTemperature ? { leadTemperature: incoming.leadTemperature } : {}),
+                ...(incoming.clientName || incoming.preferredContactTime
+                  ? {
+                      nextStep: `${incoming.clientName ? `${incoming.clientName} — ` : ''}${
+                        incoming.preferredContactTime || (lang === 'ru' ? 'Передать агенту' : 'Agentga uzatish')
+                      }`,
+                    }
+                  : {}),
+              }));
+              if (msg.finalized) {
+                setLiveLeadUpdateToast(
+                  lang === 'uz'
+                    ? '✅ Lead-karta saqlandi (save_lead) va agentga uzatildi!'
+                    : '✅ Лид-карта сохранена (save_lead) и передана агенту!'
+                );
+                setTimeout(() => setLiveLeadUpdateToast(null), 4000);
+              }
             } else if (msg.type === 'userTranscript' && msg.text) {
               setTranscriptLines((prev) => {
                 const last = prev[prev.length - 1];
@@ -1237,12 +1486,20 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
             } else if (msg.type === 'apiKeyExpired') {
               cleanupCall();
               setCallStatus('idle');
-              setCallErrorMessage(
-                lang === 'uz'
-                  ? "Gemini API kaliti muddati tugagan. Realtime API (gemini-3.8-live) ishlashi uchun yangi kalit kiriting."
-                  : "Срок действия Gemini API ключа истёк. Введите новый ключ для работы Realtime API (gemini-3.8-live)."
-              );
-              window.dispatchEvent(new CustomEvent('open-api-key-modal'));
+              if (isAdmin) {
+                setCallErrorMessage(
+                  lang === 'uz'
+                    ? "Gemini API kaliti muddati tugagan. Realtime API (gemini-3.8-live) ishlashi uchun yangi kalit kiriting."
+                    : "Срок действия Gemini API ключа истёк. Введите новый ключ для работы Realtime API (gemini-3.8-live)."
+                );
+                window.dispatchEvent(new CustomEvent('open-api-key-modal'));
+              } else {
+                setCallErrorMessage(
+                  lang === 'uz'
+                    ? "AI ovozli server vaqtincha texnik xizmatda. Iltimos, birozdan so'ng urinib ko'ring yoki administratorga xabar bering."
+                    : "Сервис AI-звонков временно недоступен (требуется обновление серверного ключа администратором)."
+                );
+              }
             } else if (msg.type === 'error') {
               setCallErrorMessage(msg.error || 'Gemini Live error');
             } else if (msg.type === 'sessionClosed') {
@@ -1523,8 +1780,8 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
               <span className="px-2.5 py-0.5 rounded-full bg-[rgba(14,124,134,0.1)] text-[#0E7C86] text-[11px] font-mono tracking-wider font-semibold border border-[#0E7C86]/30 flex items-center gap-1 uppercase">
                 <Zap className="w-3 h-3 text-[#0E7C86]" />
                 {selectedPersona === 'supertaxi_ivr'
-                  ? '0-TOKEN WAV SALOMLASHUV + GEMINI 3.8 LIVE API (15–20S)'
-                  : 'GEMINI 3.8 LIVE & TTS (NEURAL CALL)'}
+                  ? '0-TOKEN WAV SALOMLASHUV + JONLI EFIR (15–20S)'
+                  : 'JONLI EFIR (LIVE) & SHAXSIY OVOZ'}
               </span>
               {selectedPersona === 'supertaxi_ivr' && (
                 <span className="px-2.5 py-0.5 rounded-full bg-[#C98A12]/15 text-[#8F5F08] text-[11px] font-mono font-bold border border-[#C98A12]/35">
@@ -1643,6 +1900,9 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                 type="button"
                 onClick={() => {
                   setSelectedPersona('tashkent_real_estate');
+                  if (callMode === 'live') {
+                    setAgentVoiceId('Charon');
+                  }
                   setCallTopic("Toshkentda novostroyka, ikkilamchi bozor, ijara va narxlar");
                 }}
                 className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
@@ -1651,7 +1911,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                     : 'bg-white/80 text-[#5D594E] hover:text-[#161511] border border-[rgba(22,21,17,0.14)]'
                 }`}
               >
-                <span>🏢 Toshkent Rieltor</span>
+                <span>🏢 Toshkent Rieltor (Shohrux / Malika)</span>
               </button>
             </div>
 
@@ -1765,13 +2025,11 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
             isAuthenticated={isAuthenticated}
             lang={lang}
             agentVoiceName={
-              agentVoiceId === shokhrukhVoiceId
-                ? 'SHOHRUX'
-                : agentVoiceId.toLowerCase() === 'aoede'
+              selectedPersona === 'supertaxi_ivr'
                 ? 'MADINA'
-                : agentVoiceId.toLowerCase() === 'puck'
-                ? 'SHOHRUX'
-                : agentVoiceId.toUpperCase()
+                : agentVoiceId.toLowerCase() === 'aoede' || agentVoiceId.toLowerCase() === 'kore'
+                ? 'MALIKA'
+                : 'SHOHRUX'
             }
             onSendText={handleSendQuickPrompt}
             micWarning={micWarning}
@@ -1781,6 +2039,16 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
               setApiKeyNotice(null);
               setCallErrorMessage(null);
             }}
+            callMode={callMode}
+            onSelectCallMode={(mode) => {
+              setCallMode(mode);
+              if (mode === 'cloned') {
+                setAgentVoiceId(shokhrukhVoiceId);
+              } else if (agentVoiceId.startsWith('voice_')) {
+                setAgentVoiceId('Aoede');
+              }
+            }}
+            lastTurnTimingMs={lastTurnTimingMs}
           />
         </div>
       )}
@@ -2612,6 +2880,12 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                         type="button"
                         onClick={() => {
                           setSelectedPersona(key);
+                          if (key === 'supertaxi_ivr') {
+                            setCallMode('live');
+                            setAgentVoiceId('Aoede');
+                          } else if (key === 'tashkent_real_estate' && callMode === 'live') {
+                            setAgentVoiceId('Charon');
+                          }
                           const topics = PERSONA_TOPICS[key];
                           if (topics) {
                             setCallTopic(lang === 'ru' ? topics.defaultTopicRu : topics.defaultTopicUz);
@@ -2707,14 +2981,14 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                     </h3>
                   </div>
 
-                  {/* Engine Switcher: Realtime API vs Cloned Voice */}
+                  {/* Engine Switcher: Live vs Personal Cloned Voice */}
                   <div className="flex flex-wrap items-center gap-2 bg-[#F4F1EA] p-1 rounded-full border border-[rgba(22,21,17,0.12)]">
                     <button
                       type="button"
                       onClick={() => {
                         setCallMode('live');
                         if (agentVoiceId.startsWith('voice_')) {
-                          setAgentVoiceId('Puck');
+                          setAgentVoiceId('Aoede');
                         }
                       }}
                       className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
@@ -2724,7 +2998,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                       }`}
                     >
                       <Zap className="w-3.5 h-3.5" />
-                      <span>{lang === 'uz' ? '⚡ Realtime API (0.3s Jonli)' : '⚡ Realtime API (0.3с Живой)'}</span>
+                      <span>{lang === 'uz' ? '⚡ Jonli Efir (Live · 0.3s)' : '⚡ Живой Эфир (Live · 0.3с)'}</span>
                     </button>
 
                     <button
@@ -2740,7 +3014,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                       }`}
                     >
                       <Sparkles className="w-3.5 h-3.5 text-[#C98A12]" />
-                      <span>{lang === 'uz' ? '⭐ Shaxsiy Klonlangan Ovoz (1.5-2.5s)' : '⭐ Свой Клонированный Голос (1.5-2.5с)'}</span>
+                      <span>{lang === 'uz' ? '🎙️ Shaxsiy Ovoz (Shohrux)' : '🎙️ Личный Голос (Шохрух)'}</span>
                     </button>
                   </div>
                 </div>
@@ -2820,20 +3094,20 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                     </div>
                   </div>
                 ) : (
-                  /* MODE 2: Custom Cloned Voices (Shohrux & User Replicated Voices via Gemini 3.8 Flash TTS) */
+                  /* MODE 2: Custom Cloned Voices (Shohrux & User Replicated Voices) */
                   <div className="space-y-3">
                     <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/25 text-xs text-[#161511] flex items-start gap-2.5">
                       <Sparkles className="w-4 h-4 text-[#C98A12] shrink-0 mt-0.5" />
                       <div>
                         <b className="font-semibold block">
                           {lang === 'uz'
-                            ? "Shaxsiy Klonlangan Ovoz Rejimi (Gemini 3.8 Flash TTS)"
-                            : "Режим Клонированного Голоса (Gemini 3.8 Flash TTS)"}
+                            ? "Shaxsiy Ovoz Rejimi (Shohrux va Klonlangan Ovozlar)"
+                            : "Режим Личного Голоса (Шохрух и Клонированные Голоса)"}
                         </b>
                         <p className="text-[11px] text-[#5D594E] mt-0.5 leading-relaxed">
                           {lang === 'uz'
-                            ? "Realtime API (gemini-3.8-live) faqat Google'ning 5 ta bazaviy ovozini qo'llab-quvvatlaydi. Shaxsiy klonlangan ovozda (Shohrux yoki «Ovozlarim» bo'limida yaratilgan ovozlarda) gaplashish uchun ushbu rejim ishlatiladi."
-                            : "Realtime API (gemini-3.8-live) на стороне Google поддерживает только 5 встроенных голосов. Чтобы говорить вашим собственным клонированным голосом (голос Шохруха или голоса из раздела «Голоса»), используется этот режим на базе Gemini 3.8 Flash TTS."}
+                            ? "Shaxsiy klonlangan ovozda (Shohrux yoki «Ovozlarim» bo'limida yaratilgan ovozlarda) oqimli (streaming) rejimda, 0% chet el aksentsiz suhbatlashish."
+                            : "Живой телефонный разговор вашим собственным клонированным голосом (голос Шохруха или голоса из раздела «Голоса») в потоковом режиме без иностранного акцента."}
                         </p>
                       </div>
                     </div>
@@ -2858,7 +3132,7 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                                   {cv.name}
                                 </span>
                                 <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-amber-500/15 text-[#C98A12] border border-amber-500/30 shrink-0">
-                                  {lang === 'ru' ? 'Клон голоса' : 'Klonlangan'}
+                                  {lang === 'ru' ? 'Личный голос' : 'Shaxsiy ovoz'}
                                 </span>
                               </div>
                               <p className="text-[11px] text-[#5D594E] line-clamp-2 leading-relaxed">
@@ -2886,18 +3160,18 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                         <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
                         <h4 className="text-base font-bold text-[#161511]">
                           {callMode === 'live'
-                            ? (lang === 'uz' ? "Realtime API (0.3s Jonli Efir) tayyor" : "Realtime API (0.3с Живой Эфир) готов")
-                            : (lang === 'uz' ? "Shaxsiy Klonlangan Ovoz rejimi tayyor" : "Режим Клонированного Голоса готов")}
+                            ? (lang === 'uz' ? "Jonli Efir (Live) tayyor" : "Живой Эфир (Live) готов")
+                            : (lang === 'uz' ? "Shaxsiy Ovoz (Shohrux) tayyor" : "Личный Голос (Шохрух) готов")}
                         </h4>
                       </div>
                       <p className="text-xs text-[#5D594E] leading-relaxed">
                         {callMode === 'live'
                           ? (lang === 'uz'
-                              ? "⚡ Gemini 3.8 Live API WebSocket orqali ~0.3s tezkor suhbat. Gapni bo'lish va jonli dialog."
-                              : "⚡ Прямое двустороннее соединение через Gemini 3.8 Live API WebSocket (~0.3 сек задержка).")
+                              ? "⚡ Jonli WebSocket orqali ~0.3s tezkor suhbat. Gapni bo'lish va tabiiy dialog."
+                              : "⚡ Прямое двустороннее соединение (~0.3 сек отклик) с естественным перебиванием.")
                           : (lang === 'uz'
-                              ? "⭐ Shaxsiy klonlangan ovozda (Gemini 3.8 Flash TTS) telefon muloqoti."
-                              : "⭐ Телефонный диалог вашим клонированным голосом через Gemini 3.8 Flash TTS.")}
+                              ? "🎙️ Shaxsiy ovozda (Shohrux) 0.3s tezkor reaktsiya va oqimli javob."
+                              : "🎙️ Разговор вашим личным голосом (Шохрух) с мгновенной реакцией 0.3с и потоковым звуком.")}
                       </p>
                     </div>
 
@@ -2909,8 +3183,8 @@ export const VoiceAgentTab: React.FC<VoiceAgentTabProps> = ({
                       <PhoneCall className="w-5 h-5 fill-current text-[#5CC8CF]" />
                       <span>
                         {callMode === 'live'
-                          ? (lang === 'uz' ? "📞 Realtime Qo'ng'iroqni Boshlash (0.3s)" : "📞 Начать Realtime Звонок (0.3с)")
-                          : (lang === 'uz' ? "📞 Klonlangan Ovozda Qo'ng'iroq" : "📞 Звонок Клонированным Голосом")}
+                          ? (lang === 'uz' ? "📞 Qo'ng'iroqni Boshlash (Jonli Live)" : "📞 Начать Звонок (Живой Live)")
+                          : (lang === 'uz' ? "📞 Qo'ng'iroqni Boshlash (Shaxsiy Ovoz)" : "📞 Начать Звонок (Личный Голос)")}
                       </span>
                     </button>
                   </div>

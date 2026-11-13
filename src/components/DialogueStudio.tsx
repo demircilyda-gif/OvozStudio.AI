@@ -19,7 +19,6 @@ import {
   mixAudioTracks,
   base64ToArrayBuffer,
   autoPlanPodcastCues,
-  cleanScriptForSpeech,
   stripAllStageConditions,
   detectScriptConditions,
 } from '../utils/audioUtils';
@@ -34,19 +33,14 @@ import {
   CheckCircle2,
   Volume2,
   Clock,
-  MessageSquare,
   Bot,
   User,
   Upload,
   Save,
   Check,
   Music,
-  Headphones,
-  Sliders,
-  Gauge,
   ShieldCheck,
   Eraser,
-  Lock,
   Youtube,
   Video,
   StopCircle,
@@ -55,9 +49,263 @@ import {
   FileText,
   Wand2,
   ArrowLeftRight,
+  Film,
+  Subtitles,
+  DollarSign,
+  EyeOff,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { YUGAY_BURKHANOV_TURNS, YUGAY_BURKHANOV_METADATA } from '../data/yugayBurkhanovPreset';
+
+const CAR_REVIEW_STORYBOARD_RU = `Спикер 1 (Ж) — Девушка: сидит на переднем пассажирском кресле в белом лонгсливе и солнечных очках (на 02:30 пересаживается на второй ряд). Голос живой, эмоциональный, любопытный.
+
+Спикер 2 (М) — Мужчина: водитель в красной клетчатой рубашке и очках. Голос спокойный, уверенный, экспертный, местами с легкой улыбкой.
+
+Сцена 1. Габариты, комфорт и динамика разгона (00:00 – 00:45)
+Фоном играет бодрая фоновая музыка. Камера внутри салона, машина едет по трассе.
+
+00:00 – 00:02 | Девушка (Ж):
+Видеоряд: Крупный план сбоку, девушка поворачивается к водителю и жестикулирует левой рукой.
+Интонация: С интересом, вопросительно.
+Текст: «Ну как она на ходу? Машина-то крупная».
+
+00:02 – 00:09 | Мужчина (М):
+Видеоряд: Камера на водителя (00:02–00:05), затем вид с заднего ряда на обоих и экран мультимедиа (00:05–00:07), снова на водителя (00:08).
+Интонация: Спокойно, уверенно, небольшая пауза перед словом «понятно».
+Текст: «К габаритам привыкаешь за несколько поворотов. Сидишь высоко, дорогу видно хорошо, и управляется... понятно».
+
+00:10 – 00:11 | Мужчина (М):
+Видеоряд: Поворачивает голову к девушке, слегка улыбается.
+Интонация: Дружелюбно.
+Текст: «Лучше скажи, как тебе на пассажирском?»
+
+00:12 – 00:18 | Девушка (Ж):
+Видеоряд: Камера на девушку, она опирается рукой на центральный подлокотник, активно жестикулирует, в конце фразы улыбается.
+Интонация: Довольно, расслабленно, с легким смешком в конце.
+Текст: «Слушай, мне очень свободно. Места с запасом, сиденье мягкое. Сижу, отдыхаю (хе-хе)».
+
+00:19 – 00:26 | Мужчина (М):
+Видеоряд: Камера на водителя (00:19–00:21), затем крупный план девушки, которая слушает и кивает (00:22–00:24), снова водитель (00:25).
+Интонация: Уверенно, с интригой в конце.
+Текст: «Это мы ещё спокойно едем. Сейчас выйдем на свободный участок — покажу, как она ускоряется».
+
+00:26 – 00:27 | Девушка (Ж):
+Видеоряд: Быстро поворачивается к водителю с азартом.
+Интонация: Коротко, с вызовом и предвкушением.
+Текст: «Давай!»
+
+00:27 – 00:31 | Девушка (Ж):
+Видеоряд: Машина резко ускоряется, девушку вдавливает в спинку кресла, она эмоционально вскидывает руку и смеется.
+Интонация: Восторженно, удивленно, протяжно.
+Текст: «Ого-о! Вот это вдавило! Вообще не ожидала такой прыти!»
+
+00:32 – 00:44 | Мужчина (М):
+Видеоряд: Водитель спокойно рулит, объясняя техническую часть (00:32–00:37), на экране всплывает плашка «5,4 секунды (0–100 км/ч)» (00:37–00:39), девушка внимательно слушает (00:42).
+Интонация: Экспертно, весомо, с акцентом на цифрах.
+Текст: «Пять и четыре до сотни. Тут два электромотора, полный привод и почти пятьсот лошадиных сил. При этом тяга ровная, без рывков — просто нажал и поехал».
+
+00:45 – 00:52 | Музыка и графика (Без слов):
+Видеоряд: Динамичные кадры проезда серебристого кроссовера Li L7 по залитой солнцем дороге с разных ракурсов. На экране 3D-графика поверх авто: «449 л.с. (330 кВт) | 620 Н·м».
+
+Сцена 2. Подвеска и плавность хода (00:53 – 01:36)
+00:53 – 00:57 | Девушка (Ж):
+Видеоряд: Внутри салона, девушка разводит руками, показывая на дорогу.
+Интонация: Удивленно, задумчиво.
+Текст: «Слушай, ну разгон понятно, впечатляет. Но почему в салоне так тихо и вообще не трясёт?»
+
+00:58 – 01:07 | Музыка и графика (Без слов):
+Видеоряд: Красивый проезд автомобиля по мосту, вид с дрона сверху и сбоку. Над крышей авто 3D-надпись: «Пневмоподвеска Magic Carpet».`;
+
+const CAR_REVIEW_VERBATIM_TURNS_UZ: DialogueTurn[] = [
+  {
+    id: 'turn-1',
+    speakerId: 'HOST_1',
+    speakerName: 'Девушка (Ж)',
+    speakerGender: 'female',
+    timecode: '00:00 - 00:02',
+    startSec: 0,
+    endSec: 2,
+    durationSec: 2,
+    sceneTitle: 'Сцена 1. Габариты, комфорт и динамика разгона (00:00 – 00:45)',
+    visualContext: 'Крупный план сбоку, девушка поворачивается к водителю и жестикулирует левой рукой.',
+    intonationRu: 'С интересом, вопросительно.',
+    originalTextRu: 'Ну как она на ходу? Машина-то крупная.',
+    originalText: 'Ну как она на ходу? Машина-то крупная.',
+    text: "Xo'sh, yurishi qanaqa ekan? Mashina katta-ku.",
+    emotion: 'curious',
+    speechStyle: 'Curious, lively, questioning tone. Visual context: turning to driver and gesturing.',
+    pace: 'normal',
+  },
+  {
+    id: 'turn-2',
+    speakerId: 'HOST_2',
+    speakerName: 'Мужчина (М)',
+    speakerGender: 'male',
+    timecode: '00:02 - 00:09',
+    startSec: 2,
+    endSec: 9,
+    durationSec: 7,
+    sceneTitle: 'Сцена 1. Габариты, комфорт и динамика разгона (00:00 – 00:45)',
+    visualContext: 'Камера на водителя (00:02–00:05), затем вид с заднего ряда на обоих и экран мультимедиа.',
+    intonationRu: 'Спокойно, уверенно, небольшая пауза перед словом «понятно».',
+    originalTextRu: 'К габаритам привыкаешь за несколько поворотов. Сидишь высоко, дорогу видно хорошо, и управляется... понятно.',
+    originalText: 'К габаритам привыкаешь за несколько поворотов. Сидишь высоко, дорогу видно хорошо, и управляется... понятно.',
+    text: "O'lchamlariga bir nechta burilishda o'rganasan. Baland o'tirasan, yo'l yaxshi ko'rinadi va boshqaruvi <short pause> tushunarli.",
+    emotion: 'calm',
+    speechStyle: 'Calm, confident, expert tone with a brief pause before the last word.',
+    pace: 'normal',
+  },
+  {
+    id: 'turn-3',
+    speakerId: 'HOST_2',
+    speakerName: 'Мужчина (М)',
+    speakerGender: 'male',
+    timecode: '00:10 - 00:11',
+    startSec: 10,
+    endSec: 11,
+    durationSec: 1,
+    sceneTitle: 'Сцена 1. Габариты, комфорт и динамика разгона (00:00 – 00:45)',
+    visualContext: 'Поворачивает голову к девушке, слегка улыбается.',
+    intonationRu: 'Дружелюбно.',
+    originalTextRu: 'Лучше скажи, как тебе на пассажирском?',
+    originalText: 'Лучше скажи, как тебе на пассажирском?',
+    text: "Yaxshisi ayt-chi, yo'lovchi o'rindig'i qalay?",
+    emotion: 'friendly',
+    speechStyle: 'Warm, friendly, smiling slightly.',
+    pace: 'fast',
+  },
+  {
+    id: 'turn-4',
+    speakerId: 'HOST_1',
+    speakerName: 'Девушка (Ж)',
+    speakerGender: 'female',
+    timecode: '00:12 - 00:18',
+    startSec: 12,
+    endSec: 18,
+    durationSec: 6,
+    sceneTitle: 'Сцена 1. Габариты, комфорт и динамика разгона (00:00 – 00:45)',
+    visualContext: 'Камера на девушку, она опирается рукой на центральный подлокотник, в конце фразы улыбается.',
+    intonationRu: 'Довольно, расслабленно, с легким смешком в конце.',
+    originalTextRu: 'Слушай, мне очень свободно. Места с запасом, сиденье мягкое. Сижу, отдыхаю (хе-хе).',
+    originalText: 'Слушай, мне очень свободно. Места с запасом, сиденье мягкое. Сижу, отдыхаю (хе-хе).',
+    text: "Bilasanmi, menga juda keng. Joy bemalol, o'rindiq yumshoq. O'tirib, dam olyapman <laugh>",
+    emotion: 'joyful',
+    speechStyle: 'Pleased, relaxed, comfortable, ending with a light short chuckle.',
+    pace: 'normal',
+  },
+  {
+    id: 'turn-5',
+    speakerId: 'HOST_2',
+    speakerName: 'Мужчина (М)',
+    speakerGender: 'male',
+    timecode: '00:19 - 00:26',
+    startSec: 19,
+    endSec: 26,
+    durationSec: 7,
+    sceneTitle: 'Сцена 1. Габариты, комфорт и динамика разгона (00:00 – 00:45)',
+    visualContext: 'Камера на водителя, затем крупный план девушки, которая слушает и кивает.',
+    intonationRu: 'Уверенно, с интригой в конце.',
+    originalTextRu: 'Это мы ещё спокойно едем. Сейчас выйдем на свободный участок — покажу, как она ускоряется.',
+    originalText: 'Это мы ещё спокойно едем. Сейчас выйдем на свободный участок — покажу, как она ускоряется.',
+    text: "Hali tinch ketyapmiz. Hozir ochiq yo'lga chiqaylik — qanday tezlanishini ko'rsataman.",
+    emotion: 'confident',
+    speechStyle: 'Confident, building intrigue at the end.',
+    pace: 'normal',
+  },
+  {
+    id: 'turn-6',
+    speakerId: 'HOST_1',
+    speakerName: 'Девушка (Ж)',
+    speakerGender: 'female',
+    timecode: '00:26 - 00:27',
+    startSec: 26,
+    endSec: 27,
+    durationSec: 1,
+    sceneTitle: 'Сцена 1. Габариты, комфорт и динамика разгона (00:00 – 00:45)',
+    visualContext: 'Быстро поворачивается к водителю с азартом.',
+    intonationRu: 'Коротко, с вызовом и предвкушением.',
+    originalTextRu: 'Давай!',
+    originalText: 'Давай!',
+    text: 'Ketdik!',
+    emotion: 'excited',
+    speechStyle: 'Short, eager, excited anticipation.',
+    pace: 'fast',
+  },
+  {
+    id: 'turn-7',
+    speakerId: 'HOST_1',
+    speakerName: 'Девушка (Ж)',
+    speakerGender: 'female',
+    timecode: '00:27 - 00:31',
+    startSec: 27,
+    endSec: 31,
+    durationSec: 4,
+    sceneTitle: 'Сцена 1. Габариты, комфорт и динамика разгона (00:00 – 00:45)',
+    visualContext: 'Машина резко ускоряется, девушку вдавливает в спинку кресла, она эмоционально вскидывает руку и смеется.',
+    intonationRu: 'Восторженно, удивленно, протяжно.',
+    originalTextRu: 'Ого-о! Вот это вдавило! Вообще не ожидала такой прыти!',
+    originalText: 'Ого-о! Вот это вдавило! Вообще не ожидала такой прыти!',
+    text: "O'ho'-o'! Zo'r tortdi-yu! Bunday chaqqonlikni umuman kutmagandim!",
+    emotion: 'surprised',
+    speechStyle: 'Thrilled, amazed, drawn-out exclamation as the car accelerates.',
+    pace: 'normal',
+  },
+  {
+    id: 'turn-8',
+    speakerId: 'HOST_2',
+    speakerName: 'Мужчина (М)',
+    speakerGender: 'male',
+    timecode: '00:32 - 00:44',
+    startSec: 32,
+    endSec: 44,
+    durationSec: 12,
+    sceneTitle: 'Сцена 1. Габариты, комфорт и динамика разгона (00:00 – 00:45)',
+    visualContext: 'Водитель спокойно рулит, на экране всплывает плашка «5,4 секунды (0–100 км/ч)».',
+    intonationRu: 'Экспертно, весомо, с акцентом на цифрах.',
+    originalTextRu: 'Пять и четыре до сотни. Тут два электромотора, полный привод и почти пятьсот лошадиных сил. При этом тяга ровная, без рывков — просто нажал и поехал.',
+    originalText: 'Пять и четыре до сотни. Тут два электромотора, полный привод и почти пятьсот лошадиных сил. При этом тяга ровная, без рывков — просто нажал и поехал.',
+    text: "Yuzgacha besh butun to'rt soniya. Bu yerda ikkita elektromotor, to'liq uzatma va deyarli besh yuz ot kuchi bor. Tortishi esa tekis, silkinishlarsiz — shunchaki bosding va ketding.",
+    emotion: 'authoritative',
+    speechStyle: 'Expert, authoritative, emphasizing the numbers clearly.',
+    pace: 'normal',
+  },
+  {
+    id: 'turn-9',
+    speakerId: 'HOST_1',
+    speakerName: 'Девушка (Ж)',
+    speakerGender: 'female',
+    timecode: '00:53 - 00:57',
+    startSec: 53,
+    endSec: 57,
+    durationSec: 4,
+    sceneTitle: 'Сцена 2. Подвеска и плавность хода (00:53 – 01:36)',
+    visualContext: 'Внутри салона, девушка разводит руками, показывая на дорогу.',
+    intonationRu: 'Удивленно, задумчиво.',
+    originalTextRu: 'Слушай, ну разгон понятно, впечатляет. Но почему в салоне так тихо и вообще не трясёт?',
+    originalText: 'Слушай, ну разгон понятно, впечатляет. Но почему в салоне так тихо и вообще не трясёт?',
+    text: "Qara, tezlanishi tushunarli, qoyil. Lekin nega salonda bunchalik tinch va umuman silkitmayapti?",
+    emotion: 'surprised',
+    speechStyle: 'Surprised, thoughtful, gesturing at the smooth road.',
+    pace: 'normal',
+  },
+];
+
+const CAR_REVIEW_NO_SPEECH_INTERVALS = [
+  {
+    timecode: '00:45 - 00:52',
+    startSec: 45,
+    endSec: 52,
+    durationSec: 7,
+    description: 'Динамичные кадры проезда Li L7 по дороге. 3D-графика: «449 л.с. (330 кВт) | 620 Н·м».',
+  },
+  {
+    timecode: '00:58 - 01:07',
+    startSec: 58,
+    endSec: 67,
+    durationSec: 9,
+    description: 'Проезд автомобиля по мосту, вид с дрона. Надпись: «Пневмоподвеска Magic Carpet».',
+  },
+];
 
 interface DialogueStudioProps {
   voices: VoiceProfile[];
@@ -69,6 +317,36 @@ interface DialogueStudioProps {
   lang: 'uz' | 'ru';
 }
 
+interface SavedDialogueHistoryItem {
+  id: string;
+  ownerUid: string;
+  ownerEmail: string;
+  title: string;
+  storyboardTextRu: string;
+  turns: DialogueTurn[];
+  noSpeechIntervals: Array<{
+    timecode: string;
+    startSec: number;
+    endSec: number;
+    durationSec: number;
+    description: string;
+  }>;
+  speaker1Name: string;
+  speaker1VoiceId: string;
+  speaker2Name: string;
+  speaker2VoiceId: string;
+  masterAudioMode: 'continuous' | 'time_aligned';
+  totalVideoDurationSec: number;
+  estimatedCostUsd: number;
+  updatedAt: string;
+}
+
+const getDialogueDraftKey = (uid?: string | null) =>
+  uid ? `ovozstudio_dialogue_draft_v2_${uid}` : null;
+
+const getDialogueHistoryKey = (uid?: string | null) =>
+  uid ? `ovozstudio_dialogue_history_v2_${uid}` : null;
+
 export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   voices,
   userClonedVoiceId,
@@ -78,56 +356,93 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   onOpenDocumentModal,
   lang,
 }) => {
-  const { isAuthenticated, requireAuth, useCredit, syncCredits, logGeneration } = useAuth();
+  const { user, requireAuth, useCredit, syncCredits, logGeneration } = useAuth();
 
-  // Master Audio Mode: 'continuous' (seamless 0.35s pause, recommended) vs 'time_aligned' (max 2s pause clamp)
-  const [masterAudioMode, setMasterAudioMode] = useState<'continuous' | 'time_aligned'>('continuous');
+  // Master Audio Mode: 'time_aligned' (strict timecodes for 1:1 video dubbing) vs 'continuous' (0.35s pause for podcasts)
+  const [masterAudioMode, setMasterAudioMode] = useState<'continuous' | 'time_aligned'>('time_aligned');
   const [isDiarizing, setIsDiarizing] = useState<boolean>(false);
+  const [dialogueNotice, setDialogueNotice] = useState<string | null>(null);
 
-  // Speaker 1 (User's cloned voice or selected host voice)
+  // Speaker 1 (Default: Female speaker)
   const [speaker1VoiceId, setSpeaker1VoiceId] = useState<string>(() => {
-    return userClonedVoiceId || 'jasur-business';
+    const femaleVoice = voices.find((v) => v.id === 'aziza' || v.baseVoice === 'Kore' || v.gender === 'female');
+    return femaleVoice?.id || userClonedVoiceId || 'aziza';
   });
-  const [speaker1Name, setSpeaker1Name] = useState<string>('Artur Yugay');
-  const [speaker1Role, setSpeaker1Role] = useState<string>('Boshlovchi & Intervyuer');
+  const [speaker1Name, setSpeaker1Name] = useState<string>('Спикер 1 (Ж)');
+  const [speaker1Role, setSpeaker1Role] = useState<string>('Ведущая · Эмоциональный голос');
   const [speaker1Tempo, setSpeaker1Tempo] = useState<string>('1.0x');
 
-  // Keep speaker1VoiceId in sync with user's verified cloned voice
-  useEffect(() => {
-    if (userClonedVoiceId) {
-      setSpeaker1VoiceId(userClonedVoiceId);
-    }
-  }, [userClonedVoiceId]);
-
-  // Speaker 2 (Guest / Expert) - Default to male guest for the interview
-  const [speaker2GenderFilter, setSpeaker2GenderFilter] = useState<'all' | 'female' | 'male'>('male');
+  // Speaker 2 (Default: Cloned Male Voice or male expert voice)
+  const [speaker2GenderFilter, setSpeaker2GenderFilter] = useState<'all' | 'female' | 'male'>('all');
   const [speaker2VoiceId, setSpeaker2VoiceId] = useState<string>(() => {
-    const fenrirVoice = voices.find((v) => v.id === 'farrux-tech' || v.baseVoice === 'Fenrir') || voices[1] || voices[0];
-    return fenrirVoice?.id || 'farrux-tech';
+    return userClonedVoiceId || 'voice_17raj9ewke3g';
   });
-  const [speaker2Name, setSpeaker2Name] = useState<string>('Ayubxon Burxonov');
-  const [speaker2Role, setSpeaker2Role] = useState<string>('Moliya & Biznes Eksperti');
+  const [speaker2Name, setSpeaker2Name] = useState<string>('Спикер 2 (М)');
+  const [speaker2Role, setSpeaker2Role] = useState<string>('Эксперт · Собеседник');
   const [speaker2Gender, setSpeaker2Gender] = useState<'female' | 'male'>('male');
   const [speaker2Tempo, setSpeaker2Tempo] = useState<string>('1.0x');
-  const [speaker2Timbre, setSpeaker2Timbre] = useState<string>('Tahliliy & Salobatli');
-  const [speaker2Emotion, setSpeaker2Emotion] = useState<string>('thoughtful');
+  const [speaker2Timbre, setSpeaker2Timbre] = useState<string>('Salobatli & Ishbilarmon');
 
-  // YouTube 2-Speaker Dubbing & Import State (Supports long interviews up to 1.5 hours)
-  const [studioSourceMode, setStudioSourceMode] = useState<'prompt' | 'youtube'>('prompt');
+  // Extra speakers (HOST_3, HOST_4...) when storyboard has >2 speakers
+  const [extraSpeakers, setExtraSpeakers] = useState<
+    Array<{
+      speakerId: string;
+      name: string;
+      gender: 'female' | 'male';
+      voiceId: string;
+      baseVoice: string;
+      description?: string;
+    }>
+  >([]);
+
+  // Unified 3-Mode Source Switcher:
+  // 'verbatim' = 🎯 Точный дубляж 1:1 (Раскадровка + Видео до 15 мин)
+  // 'prompt'   = ✨ ИИ-Диалог по теме / PDF (до 10 мин)
+  // 'youtube'  = 📝 Импорт субтитров (.SRT / .VTT / Текст)
+  const [studioSourceMode, setStudioSourceMode] = useState<'verbatim' | 'prompt' | 'youtube'>('verbatim');
+
+  // Verbatim 1:1 Storyboard & Video Dubbing State — Starts EMPTY by default, scoped strictly per user.uid!
+  const [storyboardTextRu, setStoryboardTextRu] = useState<string>('');
+  const [isParsingStoryboard, setIsParsingStoryboard] = useState<boolean>(false);
+  const [noSpeechIntervals, setNoSpeechIntervals] = useState<
+    Array<{ timecode: string; startSec: number; endSec: number; durationSec: number; description: string }>
+  >([]);
+  const [estimatedCostUsd, setEstimatedCostUsd] = useState<number>(0);
+  const [totalVideoDurationSec, setTotalVideoDurationSec] = useState<number>(0);
+  const [srtSubtitles, setSrtSubtitles] = useState<string>('');
+  const [resynthesizingTurnId, setResynthesizingTurnId] = useState<string | null>(null);
+
+  // Per-User Saved Dubbing Projects History (strictly isolated by user.uid)
+  const [userHistory, setUserHistory] = useState<SavedDialogueHistoryItem[]>([]);
+
+  // Uploaded Video File State (up to 15 min / 600 MB)
+  const [uploadedVideoFileId, setUploadedVideoFileId] = useState<string | null>(null);
+  const [uploadedVideoFileName, setUploadedVideoFileName] = useState<string | null>(null);
+  const [uploadedVideoSizeMb, setUploadedVideoSizeMb] = useState<number | null>(null);
+  const [uploadedVideoPreviewUrl, setUploadedVideoPreviewUrl] = useState<string | null>(null);
+  const [isUploadingVideo, setIsUploadingVideo] = useState<boolean>(false);
+  const [autoExtractFromVideo, setAutoExtractFromVideo] = useState<boolean>(false);
+  const [duckingMode, setDuckingMode] = useState<'smart_ducking' | 'mute_speech_keep_music' | 'voice_only'>('smart_ducking');
+  const [isMuxingVideo, setIsMuxingVideo] = useState<boolean>(false);
+  const [muxedVideoDownloadUrl, setMuxedVideoDownloadUrl] = useState<string | null>(null);
+  const videoInputRef = useRef<HTMLInputElement | null>(null);
+  const dubVideoRef = useRef<HTMLVideoElement | null>(null);
+
+  // Subtitles / YouTube Import State
   const [youtubeImportUrl, setYoutubeImportUrl] = useState<string>('');
   const [youtubeTargetLang, setYoutubeTargetLang] = useState<'uz' | 'ru'>('uz');
   const [isImportingYoutube, setIsImportingYoutube] = useState<boolean>(false);
   const [youtubeImportNotice, setYoutubeImportNotice] = useState<string | null>(null);
   const [youtubeImportError, setYoutubeImportError] = useState<string | null>(null);
   const [manualTranscriptText, setManualTranscriptText] = useState<string>('');
-  const [showManualTranscriptInput, setShowManualTranscriptInput] = useState<boolean>(false);
+  const [showManualTranscriptInput, setShowManualTranscriptInput] = useState<boolean>(true);
   const [youtubeVideoId, setYoutubeVideoId] = useState<string | null>(null);
   const [youtubeEmbedUrl, setYoutubeEmbedUrl] = useState<string | null>(null);
   const [youtubeVideoTitle, setYoutubeVideoTitle] = useState<string | null>(null);
   const [youtubeAuthorName, setYoutubeAuthorName] = useState<string | null>(null);
   const [showOriginalTranscript, setShowOriginalTranscript] = useState<boolean>(true);
 
-  // Progressive Batch Synthesis State for long dialogues (avoids HTTP timeouts)
+  // Progressive Batch Synthesis State
   const [batchProgress, setBatchProgress] = useState<{
     currentBatch: number;
     totalBatches: number;
@@ -145,201 +460,29 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   const speaker1Profile = voices.find((v) => v.id === speaker1VoiceId) || voices[0];
   const speaker2Profile =
     voices.find((v) => v.id === speaker2VoiceId) ||
-    voices.find((v) => (speaker2Gender === 'female' ? v.gender === 'female' || v.baseVoice === 'Kore' || v.baseVoice === 'Aoede' : v.gender === 'male')) ||
-    voices.find((v) => v.id === 'aziza-ai' || v.baseVoice === 'Kore') ||
-    voices.find((v) => v.gender === 'female') ||
-    voices[1];
+    voices.find((v) => v.isReplicatedVoice || v.id.includes('17raj9')) ||
+    voices[1] ||
+    voices[0];
 
-  const handleSelectSpeaker1Voice = (vId: string) => {
-    setSpeaker1VoiceId(vId);
-    const chosen = voices.find((v) => v.id === vId);
-    if (chosen) {
-      const rawName = chosen.name || chosen.id;
-      const nameMatch = rawName.match(/^([^(]+)/);
-      const newName = (nameMatch?.[1] || rawName).trim();
-      const prevName = speaker1Name;
-      if (newName) {
-        setSpeaker1Name(newName);
-        setTurns((prev) =>
-          prev.map((t) => {
-            if (t.speakerId === 'HOST_1') {
-              return { ...t, speakerName: newName };
-            }
-            if (t.speakerId === 'HOST_2' && prevName && t.text.includes(prevName)) {
-              return { ...t, text: t.text.replaceAll(prevName, newName) };
-            }
-            return t;
-          })
-        );
-      }
-    }
-  };
-
-  const handleSelectSpeaker2Voice = (vId: string) => {
-    const chosen = voices.find((v) => v.id === vId);
-    if (!chosen) return;
-
-    setSpeaker2VoiceId(vId);
-    const isFemale =
-      chosen.gender === 'female' ||
-      chosen.baseVoice === 'Kore' ||
-      chosen.baseVoice === 'Aoede' ||
-      chosen.baseVoice === 'Zephyr' ||
-      /aziza|madina|dilnoza|zarina|nodira|malika|zephyr|kore|aoede|sevara|shahnoza|rayhon|gulzoda|umida|nigora|feruza|ayol/i.test(
-        chosen.name || chosen.id
-      );
-    setSpeaker2Gender(isFemale ? 'female' : 'male');
-    if (chosen.tempo) setSpeaker2Tempo(chosen.tempo.match(/[\d.]+x/)?.[0] || '1.0x');
-    if (chosen.timbre) setSpeaker2Timbre(chosen.timbre);
-
-    // Dynamically extract name and role from chosen voice (e.g. "Jasur (Tadbirkor & Biznes Ekspert)")
-    const rawName = chosen.name || chosen.id;
-    const nameMatch = rawName.match(/^([^(]+)(?:\((.*?)\))?/);
-    const extractedName = (nameMatch?.[1] || rawName).trim();
-    const extractedRole = (nameMatch?.[2] || chosen.style || (isFemale ? 'AI & Fan Eksperti' : 'Mutaxassis')).trim();
-
-    const previousSpeaker2Name = speaker2Name;
-    const newName = extractedName || (isFemale ? 'Aziza' : 'Jasur');
-    const newRole = extractedRole || (isFemale ? 'Ekspert' : 'Mutaxassis');
-
-    setSpeaker2Name(newName);
-    setSpeaker2Role(newRole);
-
-    // Synchronously update all turns assigned to HOST_2 so they reflect the chosen voice & name
-    setTurns((prev) =>
-      prev.map((t) => {
-        if (t.speakerId === 'HOST_2') {
-          return { ...t, speakerName: newName };
-        }
-        // Also update greeting in turn 1 if it referenced previous guest name
-        if (t.speakerId === 'HOST_1' && previousSpeaker2Name && t.text.includes(previousSpeaker2Name)) {
-          return { ...t, text: t.text.replaceAll(previousSpeaker2Name, newName) };
-        }
-        return t;
-      })
-    );
-  };
-
-  const handleSetSpeaker2GenderFilter = (gender: 'all' | 'female' | 'male') => {
-    setSpeaker2GenderFilter(gender);
-    if (gender === 'male' && speaker2Gender === 'female') {
-      const firstMale = voices.find(
-        (v) =>
-          !v.isReplicatedVoice &&
-          !v.id.includes('17raj9') &&
-          (v.gender === 'male' || ['Charon', 'Puck', 'Fenrir'].includes(v.baseVoice))
-      );
-      if (firstMale) {
-        handleSelectSpeaker2Voice(firstMale.id);
-      }
-    } else if (gender === 'female' && speaker2Gender === 'male') {
-      const firstFemale = voices.find(
-        (v) =>
-          !v.isReplicatedVoice &&
-          !v.id.includes('17raj9') &&
-          (v.gender === 'female' || ['Kore', 'Aoede', 'Zephyr'].includes(v.baseVoice))
-      );
-      if (firstFemale) {
-        handleSelectSpeaker2Voice(firstFemale.id);
-      }
-    }
-  };
-
-  const handleTestSpeakerVoice = async (speaker: 'host1' | 'host2') => {
-    if (previewingSpeaker === speaker) {
-      if (speakerPreviewAudioRef.current) {
-        speakerPreviewAudioRef.current.pause();
-      }
-      setPreviewingSpeaker(null);
-      return;
-    }
-
-    try {
-      setPreviewingSpeaker(speaker);
-      const isH1 = speaker === 'host1';
-      const prof = isH1 ? speaker1Profile : speaker2Profile;
-      const previewUrl =
-        prof?.sampleAudioUrl ||
-        (prof?.id ? getVoicePreviewUrl(prof.id) : undefined) ||
-        (prof?.id ? `/api/voices/preview/${prof.id}` : undefined);
-
-      if (previewUrl) {
-        const audio = new Audio(previewUrl);
-        speakerPreviewAudioRef.current = audio;
-        audio.onended = () => setPreviewingSpeaker(null);
-        audio.onerror = () => setPreviewingSpeaker(null);
-        await audio.play();
-        return;
-      }
-
-      const spkName = prof?.name || (isH1 ? speaker1Name : speaker2Name);
-      const isFemaleSpeaker =
-        prof?.gender === 'female' ||
-        prof?.baseVoice === 'Kore' ||
-        prof?.baseVoice === 'Aoede' ||
-        prof?.baseVoice === 'Zephyr' ||
-        /aziza|madina|dilnoza|zarina|nodira|malika|zephyr|kore|aoede|ayol/i.test(spkName || prof?.id || '');
-
-      const sampleText = isH1
-        ? `Assalomu alaykum! Men ${spkName}man. Bugungi intervyu podkastimizga xush kelibsiz.`
-        : isFemaleSpeaker
-        ? `Salom! Men ${spkName} bo'laman. Bugungi qiziqarli suhbatda qatnashishdan judayam mamnunman.`
-        : `Assalomu alaykum! Men ${spkName}man. Bugungi intervyuda dolzarb savollarga javob berishga tayyorman.`;
-
-      const res = await authFetch('/api/podcast/synthesize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: sampleText,
-          voiceProfile: {
-            voiceName: spkName,
-            voiceId: prof?.voiceId || prof?.id,
-            baseVoice: prof?.baseVoice || (isFemaleSpeaker ? 'Kore' : (isH1 ? 'Charon' : 'Fenrir')),
-            timbre: isH1 ? prof?.timbre : speaker2Timbre || prof?.timbre,
-            tempo: isH1 ? speaker1Tempo : speaker2Tempo,
-            customPersonaPrompt: prof?.customPersonaPrompt,
-          },
-        }),
-      });
-
-      if (!res.ok) throw new Error('Ovoz sintezida xato');
-      const data = await res.json();
-      if (data.audioBase64) {
-        const audio = new Audio(`data:audio/wav;base64,${data.audioBase64}`);
-        speakerPreviewAudioRef.current = audio;
-        audio.onended = () => setPreviewingSpeaker(null);
-        audio.play().catch(console.warn);
-      } else {
-        setPreviewingSpeaker(null);
-      }
-    } catch (err) {
-      console.warn('Speaker voice test error:', err);
-      setPreviewingSpeaker(null);
-    }
-  };
-
-  const [topic, setTopic] = useState<string>(
-    initialTopic || YUGAY_BURKHANOV_METADATA.title
-  );
+  const [topic, setTopic] = useState<string>(initialTopic || '');
   const [tone, setTone] = useState<string>('Jonli va intellektual bahs');
 
-  const [targetDuration, setTargetDuration] = useState<string>('30 daqiqa');
+  // Duration selector for AI Topic Podcast (strictly up to 10 minutes)
+  const [targetDuration, setTargetDuration] = useState<string>('5 daqiqa');
   const [isGeneratingScript, setIsGeneratingScript] = useState(false);
   const [isExpandingDialogue, setIsExpandingDialogue] = useState(false);
   const [isSynthesizing, setIsSynthesizing] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
 
-  // Turns — Defaults directly to Artur Yugay & Ayubxon Burxanov 73-turn interview with precise diarization
+  // Turns — Starts EMPTY by default (or from initialTurns if passed from DocumentModal)
   const [turns, setTurns] = useState<DialogueTurn[]>(() => {
     if (initialTurns && initialTurns.length > 0) return initialTurns;
-    return YUGAY_BURKHANOV_TURNS;
+    return [];
   });
 
-  // Pre-calculate estimated generation duration for dialogue (parallel batches of 3)
   const estimatedDialogueSeconds = calculateInterviewDialogueSeconds(turns.length);
   const dialogueCountdown = useGenerationCountdown(isSynthesizing, estimatedDialogueSeconds, lang, 'audio_dialogue');
 
-  // Pre-calculate estimated generation duration for AI interview script
   const estimatedInterviewScriptSeconds = calculateAiScriptSeconds(targetDuration, 'interview');
   const interviewScriptCountdown = useGenerationCountdown(
     isGeneratingScript || isExpandingDialogue,
@@ -348,18 +491,267 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     'script_interview'
   );
 
-  // Sound Director State
-  const [soundDirectorStrategy, setSoundDirectorStrategy] = useState<{
-    strategyUz: string;
-    strategyRu: string;
-  } | null>({
-    strategyUz: "Professional saund-dizayn: Uzluksiz chalg'ituvchi fon o'rniga dinamik reja tuzildi — kirishda jingle, suhbatda toza ovoz (silence), savol almashganda stinger va xulosada mayin pianino.",
-    strategyRu: "Профессиональный саунд-дизайн: Интеллектуальная расстановка — интро-джингл, чистый голос без музыки в диалоге, переходной акцент и эмоциональный эмбиент в финале.",
-  });
-  const [isPlanningSound, setIsPlanningSound] = useState(false);
   const [dynamicDuckingEnabled, setDynamicDuckingEnabled] = useState(true);
 
-  // Sync when initialTurns changes (e.g. from Document/PDF analysis)
+  // Synthesis results
+  const [masterAudioBase64, setMasterAudioBase64] = useState<string | null>(null);
+  const [totalDuration, setTotalDuration] = useState<number>(0);
+  const [synthesizedTurns, setSynthesizedTurns] = useState<DialogueTurn[]>([]);
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [activeTurnIndex, setActiveTurnIndex] = useState<number>(-1);
+
+  // Ref to avoid overwriting user storage while hydrating on user switch
+  const isHydratingUserRef = useRef<boolean>(false);
+
+  // Load current user's draft & history when user?.uid changes (or reset to empty for another/new account!)
+  useEffect(() => {
+    isHydratingUserRef.current = true;
+    try {
+      // Stop any active playback from previous user session
+      audioRef.current?.pause();
+      singleAudioRef.current?.pause();
+      dubVideoRef.current?.pause();
+      setIsPlaying(false);
+      setActiveTurnIndex(-1);
+      setMasterAudioBase64(null);
+      setSynthesizedTurns([]);
+      setTotalDuration(0);
+      setSrtSubtitles('');
+      setDialogueNotice(null);
+      setUploadedVideoFileId(null);
+      setUploadedVideoFileName(null);
+      setUploadedVideoSizeMb(null);
+      setUploadedVideoPreviewUrl(null);
+      setMuxedVideoDownloadUrl(null);
+
+      if (!user?.uid) {
+        // Logged out / guest -> completely empty workspace and history
+        setStoryboardTextRu('');
+        setTurns(initialTurns && initialTurns.length > 0 ? initialTurns : []);
+        setNoSpeechIntervals([]);
+        setTopic(initialTopic || '');
+        setEstimatedCostUsd(0);
+        setTotalVideoDurationSec(0);
+        setUserHistory([]);
+        return;
+      }
+
+      // 1. Load per-user saved history
+      const histKey = getDialogueHistoryKey(user.uid);
+      let loadedHistory: SavedDialogueHistoryItem[] = [];
+      if (histKey) {
+        try {
+          const rawHist = localStorage.getItem(histKey);
+          if (rawHist) {
+            const parsedHist = JSON.parse(rawHist);
+            if (Array.isArray(parsedHist)) {
+              loadedHistory = parsedHist.filter((item) => item && item.ownerUid === user.uid);
+            }
+          }
+        } catch (err) {
+          console.warn('Could not read user dialogue history:', err);
+        }
+      }
+      setUserHistory(loadedHistory);
+
+      // 2. Load per-user active draft
+      const draftKey = getDialogueDraftKey(user.uid);
+      let loadedDraft: any = null;
+      if (draftKey) {
+        try {
+          const rawDraft = localStorage.getItem(draftKey);
+          if (rawDraft) {
+            const parsedDraft = JSON.parse(rawDraft);
+            if (parsedDraft && parsedDraft.ownerUid === user.uid) {
+              loadedDraft = parsedDraft;
+            }
+          }
+        } catch (err) {
+          console.warn('Could not read user dialogue draft:', err);
+        }
+      }
+
+      if (loadedDraft) {
+        setStoryboardTextRu(typeof loadedDraft.storyboardTextRu === 'string' ? loadedDraft.storyboardTextRu : '');
+        setTurns(
+          initialTurns && initialTurns.length > 0
+            ? initialTurns
+            : Array.isArray(loadedDraft.turns)
+            ? loadedDraft.turns
+            : []
+        );
+        setNoSpeechIntervals(Array.isArray(loadedDraft.noSpeechIntervals) ? loadedDraft.noSpeechIntervals : []);
+        setTopic(initialTopic || loadedDraft.topic || '');
+        setEstimatedCostUsd(Number(loadedDraft.estimatedCostUsd) || 0);
+        setTotalVideoDurationSec(Number(loadedDraft.totalVideoDurationSec) || 0);
+        if (loadedDraft.speaker1Name) setSpeaker1Name(loadedDraft.speaker1Name);
+        if (loadedDraft.speaker1VoiceId) setSpeaker1VoiceId(loadedDraft.speaker1VoiceId);
+        if (loadedDraft.speaker2Name) setSpeaker2Name(loadedDraft.speaker2Name);
+        if (loadedDraft.speaker2VoiceId) setSpeaker2VoiceId(loadedDraft.speaker2VoiceId);
+        if (loadedDraft.masterAudioMode) setMasterAudioMode(loadedDraft.masterAudioMode);
+      } else {
+        // New or different account that hasn't entered anything -> completely EMPTY!
+        setStoryboardTextRu('');
+        setTurns(initialTurns && initialTurns.length > 0 ? initialTurns : []);
+        setNoSpeechIntervals([]);
+        setTopic(initialTopic || '');
+        setEstimatedCostUsd(0);
+        setTotalVideoDurationSec(0);
+        setSpeaker1Name('Спикер 1 (Ж)');
+        setSpeaker2Name('Спикер 2 (М)');
+      }
+    } finally {
+      setTimeout(() => {
+        isHydratingUserRef.current = false;
+      }, 0);
+    }
+  }, [user?.uid]);
+
+  // Persist current user's active draft strictly under their own user.uid
+  useEffect(() => {
+    if (isHydratingUserRef.current || !user?.uid) return;
+    const draftKey = getDialogueDraftKey(user.uid);
+    if (!draftKey) return;
+    try {
+      const strippedTurns = turns.map(({ audioBase64, ...rest }) => rest);
+      const payload = {
+        ownerUid: user.uid,
+        ownerEmail: user.email || '',
+        storyboardTextRu,
+        turns: strippedTurns,
+        noSpeechIntervals,
+        topic,
+        estimatedCostUsd,
+        totalVideoDurationSec,
+        speaker1Name,
+        speaker1VoiceId,
+        speaker2Name,
+        speaker2VoiceId,
+        masterAudioMode,
+        updatedAt: new Date().toISOString(),
+      };
+      localStorage.setItem(draftKey, JSON.stringify(payload));
+    } catch (err) {
+      console.warn('Could not save user dialogue draft:', err);
+    }
+  }, [
+    user?.uid,
+    user?.email,
+    storyboardTextRu,
+    turns,
+    noSpeechIntervals,
+    topic,
+    estimatedCostUsd,
+    totalVideoDurationSec,
+    speaker1Name,
+    speaker1VoiceId,
+    speaker2Name,
+    speaker2VoiceId,
+    masterAudioMode,
+  ]);
+
+  // Save a named project snapshot into the current user's personal history
+  const saveProjectToUserHistory = (params: {
+    title?: string;
+    storyboardTextRu?: string;
+    turns?: DialogueTurn[];
+    noSpeechIntervals?: Array<{ timecode: string; startSec: number; endSec: number; durationSec: number; description: string }>;
+    totalVideoDurationSec?: number;
+    estimatedCostUsd?: number;
+  }) => {
+    if (!user?.uid) return;
+    const histKey = getDialogueHistoryKey(user.uid);
+    if (!histKey) return;
+
+    const projectTurns = (params.turns ?? turns).map(({ audioBase64, ...rest }) => rest);
+    if (projectTurns.length === 0 && !(params.storyboardTextRu ?? storyboardTextRu).trim()) return;
+
+    const projectTitle =
+      (params.title || topic || 'Дубляж по раскадровке').trim() ||
+      `Дубляж (${projectTurns.length} реплик)`;
+
+    const newItem: SavedDialogueHistoryItem = {
+      id: `dub-${Date.now()}`,
+      ownerUid: user.uid,
+      ownerEmail: user.email || '',
+      title: projectTitle,
+      storyboardTextRu: params.storyboardTextRu ?? storyboardTextRu,
+      turns: projectTurns,
+      noSpeechIntervals: params.noSpeechIntervals ?? noSpeechIntervals,
+      speaker1Name,
+      speaker1VoiceId,
+      speaker2Name,
+      speaker2VoiceId,
+      masterAudioMode,
+      totalVideoDurationSec: params.totalVideoDurationSec ?? totalVideoDurationSec,
+      estimatedCostUsd: params.estimatedCostUsd ?? estimatedCostUsd,
+      updatedAt: new Date().toISOString(),
+    };
+
+    setUserHistory((prev) => {
+      // Replace existing item with same title or prepend
+      const filtered = prev.filter(
+        (item) => item.ownerUid === user.uid && item.title.toLowerCase() !== projectTitle.toLowerCase()
+      );
+      const updated = [newItem, ...filtered].slice(0, 12);
+      try {
+        localStorage.setItem(histKey, JSON.stringify(updated));
+      } catch (e) {
+        console.warn('Failed to persist user dialogue history:', e);
+      }
+      return updated;
+    });
+  };
+
+  const handleLoadHistoryItem = (item: SavedDialogueHistoryItem) => {
+    if (!user?.uid || item.ownerUid !== user.uid) return;
+    setStoryboardTextRu(item.storyboardTextRu || '');
+    setTurns(item.turns || []);
+    setNoSpeechIntervals(item.noSpeechIntervals || []);
+    setTopic(item.title || '');
+    setSpeaker1Name(item.speaker1Name || 'Спикер 1 (Ж)');
+    if (item.speaker1VoiceId) setSpeaker1VoiceId(item.speaker1VoiceId);
+    setSpeaker2Name(item.speaker2Name || 'Спикер 2 (М)');
+    if (item.speaker2VoiceId) setSpeaker2VoiceId(item.speaker2VoiceId);
+    setMasterAudioMode(item.masterAudioMode || 'time_aligned');
+    setTotalVideoDurationSec(Number(item.totalVideoDurationSec) || 0);
+    setEstimatedCostUsd(Number(item.estimatedCostUsd) || 0);
+    setMasterAudioBase64(null);
+    setSynthesizedTurns([]);
+    setDialogueNotice(`📂 Загружен ваш проект «${item.title}» (${item.turns.length} реплик).`);
+  };
+
+  const handleDeleteHistoryItem = (id: string) => {
+    if (!user?.uid) return;
+    const histKey = getDialogueHistoryKey(user.uid);
+    setUserHistory((prev) => {
+      const updated = prev.filter((item) => item.id !== id && item.ownerUid === user.uid);
+      if (histKey) {
+        try {
+          localStorage.setItem(histKey, JSON.stringify(updated));
+        } catch {}
+      }
+      return updated;
+    });
+  };
+
+  const handleClearWorkspace = () => {
+    setStoryboardTextRu('');
+    setTurns([]);
+    setNoSpeechIntervals([]);
+    setTopic('');
+    setEstimatedCostUsd(0);
+    setTotalVideoDurationSec(0);
+    setMasterAudioBase64(null);
+    setSynthesizedTurns([]);
+    setSrtSubtitles('');
+    if (user?.uid) {
+      const draftKey = getDialogueDraftKey(user.uid);
+      if (draftKey) localStorage.removeItem(draftKey);
+    }
+    setDialogueNotice('🧹 Рабочая область очищена. Вы можете вставить новую раскадровку или загрузить видео.');
+  };
+
   useEffect(() => {
     if (initialTurns && initialTurns.length > 0) {
       setTurns(initialTurns);
@@ -372,20 +764,12 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     }
   }, [initialTopic]);
 
-  // Synthesis results
-  const [masterAudioBase64, setMasterAudioBase64] = useState<string | null>(null);
-  const [totalDuration, setTotalDuration] = useState<number>(0);
-  const [synthesizedTurns, setSynthesizedTurns] = useState<DialogueTurn[]>([]);
-  const [isPlaying, setIsPlaying] = useState<boolean>(false);
-  const [activeTurnIndex, setActiveTurnIndex] = useState<number>(-1);
-
-  // Ambient Soundscape for Interviews (Disabled by default for 100% clean, noise-free studio speech)
-  const [ambientSound, setAmbientSound] = useState<AmbientSoundscape>('midnight-jazz');
+  // Ambient Soundscape
+  const [ambientSound, setAmbientSound] = useState<AmbientSoundscape>('none');
   const [ambientEnabled, setAmbientEnabled] = useState<boolean>(false);
   const [ambientVolume, setAmbientVolume] = useState<number>(14);
   const ambientAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Maintain ambient loop in DialogueStudio
   useEffect(() => {
     if (ambientSound === 'none') {
       if (ambientAudioRef.current) {
@@ -427,20 +811,543 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     }
   }, [ambientVolume]);
 
-  // Individual turn audio player
   const [playingTurnId, setPlayingTurnId] = useState<string | null>(null);
   const singleAudioRef = useRef<HTMLAudioElement | null>(null);
-
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Generate dialogue script
+  const handleSelectSpeaker1Voice = (vId: string) => {
+    setSpeaker1VoiceId(vId);
+    const chosen = voices.find((v) => v.id === vId);
+    if (chosen) {
+      const rawName = chosen.name || chosen.id;
+      const nameMatch = rawName.match(/^([^(]+)/);
+      const newName = (nameMatch?.[1] || rawName).trim();
+      if (newName) {
+        setSpeaker1Name(newName);
+        setTurns((prev) =>
+          prev.map((t) => (t.speakerId === 'HOST_1' ? { ...t, speakerName: newName, voiceId: vId, baseVoice: chosen.baseVoice } : t))
+        );
+      }
+    }
+  };
+
+  const handleSelectSpeaker2Voice = (vId: string) => {
+    const chosen = voices.find((v) => v.id === vId);
+    if (!chosen) return;
+
+    setSpeaker2VoiceId(vId);
+    const isFemale =
+      chosen.gender === 'female' ||
+      chosen.baseVoice === 'Kore' ||
+      chosen.baseVoice === 'Aoede' ||
+      chosen.baseVoice === 'Zephyr' ||
+      /aziza|madina|dilnoza|zarina|nodira|malika|zephyr|kore|aoede|sevara|shahnoza|rayhon|gulzoda|umida|nigora|feruza|ayol/i.test(
+        chosen.name || chosen.id
+      );
+    setSpeaker2Gender(isFemale ? 'female' : 'male');
+    if (chosen.tempo) setSpeaker2Tempo(chosen.tempo.match(/[\d.]+x/)?.[0] || '1.0x');
+    if (chosen.timbre) setSpeaker2Timbre(chosen.timbre);
+
+    const rawName = chosen.name || chosen.id;
+    const nameMatch = rawName.match(/^([^(]+)(?:\((.*?)\))?/);
+    const extractedName = (nameMatch?.[1] || rawName).trim();
+    const extractedRole = (nameMatch?.[2] || chosen.style || (isFemale ? 'AI & Fan Eksperti' : 'Mutaxassis')).trim();
+
+    setSpeaker2Name(extractedName);
+    setSpeaker2Role(extractedRole);
+
+    setTurns((prev) =>
+      prev.map((t) => (t.speakerId === 'HOST_2' ? { ...t, speakerName: extractedName, voiceId: vId, baseVoice: chosen.baseVoice } : t))
+    );
+  };
+
+  const handleSetSpeaker2GenderFilter = (gender: 'all' | 'female' | 'male') => {
+    setSpeaker2GenderFilter(gender);
+    if (gender === 'male' && speaker2Gender === 'female') {
+      const firstMale = voices.find(
+        (v) => v.gender === 'male' || ['Charon', 'Puck', 'Fenrir'].includes(v.baseVoice)
+      );
+      if (firstMale) {
+        handleSelectSpeaker2Voice(firstMale.id);
+      }
+    } else if (gender === 'female' && speaker2Gender === 'male') {
+      const firstFemale = voices.find(
+        (v) => v.gender === 'female' || ['Kore', 'Aoede', 'Zephyr'].includes(v.baseVoice)
+      );
+      if (firstFemale) {
+        handleSelectSpeaker2Voice(firstFemale.id);
+      }
+    }
+  };
+
+  const handleTestSpeakerVoice = async (speaker: 'host1' | 'host2') => {
+    if (previewingSpeaker === speaker) {
+      if (speakerPreviewAudioRef.current) {
+        speakerPreviewAudioRef.current.pause();
+      }
+      setPreviewingSpeaker(null);
+      return;
+    }
+
+    try {
+      setPreviewingSpeaker(speaker);
+      const isH1 = speaker === 'host1';
+      const prof = isH1 ? speaker1Profile : speaker2Profile;
+      const previewUrl =
+        prof?.sampleAudioUrl ||
+        (prof?.id ? getVoicePreviewUrl(prof.id) : undefined) ||
+        (prof?.id ? `/api/voices/preview/${prof.id}` : undefined);
+
+      if (previewUrl) {
+        const audio = new Audio(previewUrl);
+        speakerPreviewAudioRef.current = audio;
+        audio.onended = () => setPreviewingSpeaker(null);
+        audio.onerror = () => setPreviewingSpeaker(null);
+        await audio.play();
+        return;
+      }
+
+      const spkName = prof?.name || (isH1 ? speaker1Name : speaker2Name);
+      const isFemaleSpeaker =
+        prof?.gender === 'female' ||
+        prof?.baseVoice === 'Kore' ||
+        prof?.baseVoice === 'Aoede' ||
+        prof?.baseVoice === 'Zephyr';
+
+      const sampleText = `Assalomu alaykum! Men ${spkName}man. Bugungi videodublyaj va intervyuda ishtirok etyapman.`;
+
+      const res = await authFetch('/api/podcast/synthesize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: sampleText,
+          voiceProfile: {
+            voiceName: spkName,
+            voiceId: prof?.voiceId || prof?.id,
+            baseVoice: prof?.baseVoice || (isFemaleSpeaker ? 'Kore' : 'Charon'),
+            timbre: isH1 ? prof?.timbre : speaker2Timbre || prof?.timbre,
+            tempo: isH1 ? speaker1Tempo : speaker2Tempo,
+          },
+        }),
+      });
+
+      if (!res.ok) throw new Error('Ovoz sintezida xato');
+      const data = await res.json();
+      if (data.audioBase64) {
+        const audio = new Audio(`data:audio/wav;base64,${data.audioBase64}`);
+        speakerPreviewAudioRef.current = audio;
+        audio.onended = () => setPreviewingSpeaker(null);
+        audio.play().catch(console.warn);
+      } else {
+        setPreviewingSpeaker(null);
+      }
+    } catch (err) {
+      console.warn('Speaker voice test error:', err);
+      setPreviewingSpeaker(null);
+    }
+  };
+
+  // Load the Car Review 1:1 Verbatim Storyboard Preset (saves ONLY to the current user's account)
+  const handleLoadCarReviewPreset = () => {
+    const presetTitle = 'Тест-драйв Li L7: Габариты, разгон 5,4с и пневмоподвеска (Дубляж 1:1)';
+    setStoryboardTextRu(CAR_REVIEW_STORYBOARD_RU);
+    setTurns(CAR_REVIEW_VERBATIM_TURNS_UZ);
+    setNoSpeechIntervals(CAR_REVIEW_NO_SPEECH_INTERVALS);
+    setEstimatedCostUsd(0.029);
+    setTotalVideoDurationSec(67);
+    setMasterAudioMode('time_aligned');
+    setTopic(presetTitle);
+
+    // Set Speaker 1 = Female (Девушка (Ж)), Speaker 2 = Male Cloned Voice (Мужчина (М) — Shohrux)
+    const fem = voices.find((v) => v.id === 'aziza' || v.baseVoice === 'Kore' || v.gender === 'female');
+    if (fem) {
+      setSpeaker1VoiceId(fem.id);
+    }
+    setSpeaker1Name('Девушка (Ж)');
+    setSpeaker1Role('Пассажир · Живой эмоциональный голос');
+
+    const clonedOrMale =
+      voices.find((v) => v.isReplicatedVoice || v.id.includes('17raj9')) ||
+      voices.find((v) => v.gender === 'male');
+    if (clonedOrMale) {
+      setSpeaker2VoiceId(clonedOrMale.id);
+      setSpeaker2Gender('male');
+    }
+    setSpeaker2Name('Мужчина (М) — Shohrux');
+    setSpeaker2Role('Водитель · Спокойный уверенный эксперт');
+
+    saveProjectToUserHistory({
+      title: presetTitle,
+      storyboardTextRu: CAR_REVIEW_STORYBOARD_RU,
+      turns: CAR_REVIEW_VERBATIM_TURNS_UZ,
+      noSpeechIntervals: CAR_REVIEW_NO_SPEECH_INTERVALS,
+      totalVideoDurationSec: 67,
+      estimatedCostUsd: 0.029,
+    });
+
+    setDialogueNotice(
+      '✅ Загружена раскадровка (9 реплик + 2 музыкальные вставки «Без слов») и сохранена в историю вашего текущего аккаунта.'
+    );
+  };
+
+  // Parse & Translate any custom Russian Storyboard 1:1 via /api/podcast/parse-verbatim-storyboard
+  const handleParseVerbatimStoryboard = async () => {
+    if (!storyboardTextRu.trim()) {
+      setDialogueNotice('Вставьте текст раскадровки с таймкодами!');
+      return;
+    }
+    if (
+      !requireAuth(
+        () => {},
+        'Разбор и перевод раскадровки 1:1 доступен только для зарегистрированных пользователей.'
+      )
+    )
+      return;
+
+    setIsParsingStoryboard(true);
+    setDialogueNotice(null);
+    try {
+      const res = await authFetch('/api/podcast/parse-verbatim-storyboard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          storyboardText: storyboardTextRu,
+          userClonedVoiceId: userClonedVoiceId || 'voice_17raj9ewke3g',
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Ошибка при разборе раскадровки');
+      }
+
+      const data = await res.json();
+      if (Array.isArray(data.turns) && data.turns.length > 0) {
+        const parsedCost =
+          typeof data.estimatedCostUsd === 'number'
+            ? data.estimatedCostUsd
+            : Number(data.estimatedCostUsd?.totalUsd ?? 0.03);
+        const safeCost = Number.isFinite(parsedCost) ? parsedCost : 0.03;
+        const safeDuration = Number(data.totalVideoDurationSec || data.totalDurationSec || 60);
+        const newTitle = data.title || topic || 'Дубляж по раскадровке 1:1';
+
+        setTurns(data.turns);
+        setNoSpeechIntervals(data.noSpeechIntervals || []);
+        setEstimatedCostUsd(safeCost);
+        setTotalVideoDurationSec(safeDuration);
+        setMasterAudioMode('time_aligned');
+        setTopic(newTitle);
+
+        // Save strictly to the current user's personal history
+        saveProjectToUserHistory({
+          title: newTitle,
+          storyboardTextRu,
+          turns: data.turns,
+          noSpeechIntervals: data.noSpeechIntervals || [],
+          totalVideoDurationSec: safeDuration,
+          estimatedCostUsd: safeCost,
+        });
+
+        // Auto-assign speakers based on detected gender
+        if (Array.isArray(data.speakers) && data.speakers.length > 0) {
+          const sp1 = data.speakers.find((s: any) => s.speakerId === 'HOST_1') || data.speakers[0];
+          const sp2 = data.speakers.find((s: any) => s.speakerId === 'HOST_2') || data.speakers[1];
+
+          if (sp1) {
+            setSpeaker1Name(sp1.name);
+            if (sp1.description) setSpeaker1Role(sp1.description.slice(0, 60));
+            if (sp1.gender === 'female') {
+              const femVoice = voices.find((v) => v.id === 'aziza' || v.baseVoice === 'Kore' || v.gender === 'female');
+              if (femVoice) setSpeaker1VoiceId(femVoice.id);
+            } else {
+              const maleVoice = voices.find((v) => v.isReplicatedVoice || v.id.includes('17raj9')) || voices.find((v) => v.gender === 'male');
+              if (maleVoice) setSpeaker1VoiceId(maleVoice.id);
+            }
+          }
+
+          if (sp2) {
+            setSpeaker2Name(sp2.name);
+            if (sp2.description) setSpeaker2Role(sp2.description.slice(0, 60));
+            setSpeaker2Gender(sp2.gender === 'female' ? 'female' : 'male');
+            if (sp2.gender === 'male') {
+              const clonedVoice = voices.find((v) => v.isReplicatedVoice || v.id.includes('17raj9')) || voices.find((v) => v.gender === 'male');
+              if (clonedVoice) setSpeaker2VoiceId(clonedVoice.id);
+            } else {
+              const femVoice = voices.find((v) => v.id === 'aziza' || v.baseVoice === 'Kore' || v.gender === 'female');
+              if (femVoice) setSpeaker2VoiceId(femVoice.id);
+            }
+          }
+
+          if (data.speakers.length > 2) {
+            setExtraSpeakers(data.speakers.slice(2));
+          } else {
+            setExtraSpeakers([]);
+          }
+        }
+
+        setDialogueNotice(
+          `✅ Раскадровка разобрана и переведена 1:1 (${data.turns.length} реплик, ${(data.noSpeechIntervals || []).length} вставок «Без слов»). Сохранено только в вашем аккаунте.`
+        );
+      }
+    } catch (e: any) {
+      setDialogueNotice(`Ошибка: ${e.message}`);
+    } finally {
+      setIsParsingStoryboard(false);
+    }
+  };
+
+  // Upload Video File up to 15 min / 600 MB via multipart/form-data
+  const handleVideoFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const sizeMb = Number((file.size / (1024 * 1024)).toFixed(1));
+    if (sizeMb > 600) {
+      setDialogueNotice('Размер видео превышает лимит 600 МБ (15 минут).');
+      return;
+    }
+
+    // Create local object URL for immediate synchronized preview in browser
+    if (uploadedVideoPreviewUrl) {
+      URL.revokeObjectURL(uploadedVideoPreviewUrl);
+    }
+    const localUrl = URL.createObjectURL(file);
+    setUploadedVideoPreviewUrl(localUrl);
+    setUploadedVideoFileName(file.name);
+    setUploadedVideoSizeMb(sizeMb);
+    setMuxedVideoDownloadUrl(null);
+
+    setIsUploadingVideo(true);
+    setDialogueNotice(
+      autoExtractFromVideo
+        ? `Загрузка видео "${file.name}" (${sizeMb} МБ) и автоматическое создание раскадровки через Gemini Files API...`
+        : `Загрузка видео "${file.name}" (${sizeMb} МБ) на сервер для синхронного дубляжа и склейки MP4...`
+    );
+
+    try {
+      const formData = new FormData();
+      formData.append('video', file);
+      formData.append('generateStoryboardViaGemini', autoExtractFromVideo ? 'true' : 'false');
+      formData.append('userClonedVoiceId', userClonedVoiceId || 'voice_17raj9ewke3g');
+
+      const res = await authFetch('/api/podcast/upload-dubbing-video', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Ошибка загрузки видео');
+      }
+
+      const data = await res.json();
+      setUploadedVideoFileId(data.fileId || data.videoSessionId);
+
+      const sb = data.parsedStoryboard || data.storyboardResult;
+      if (sb && Array.isArray(sb.turns) && sb.turns.length > 0) {
+        const parsedCost =
+          typeof sb.estimatedCostUsd === 'number'
+            ? sb.estimatedCostUsd
+            : Number(sb.estimatedCostUsd?.totalUsd ?? 0.05);
+        setTurns(sb.turns);
+        setNoSpeechIntervals(sb.noSpeechIntervals || []);
+        setEstimatedCostUsd(Number.isFinite(parsedCost) ? parsedCost : 0.05);
+        if (data.generatedStoryboardText || data.generatedRawStoryboard) {
+          setStoryboardTextRu(data.generatedStoryboardText || data.generatedRawStoryboard);
+        }
+        setDialogueNotice(
+          `✅ Видео "${file.name}" (${sizeMb} МБ) загружено и раскадровка автоматически переведена 1:1 (${sb.turns.length} реплик)!`
+        );
+      } else {
+        setDialogueNotice(
+          `✅ Видео "${file.name}" (${sizeMb} МБ) загружено! Теперь оно синхронизировано с таблицей таймкодов и готово к экспорту MP4 с узбекским дубляжом.`
+        );
+      }
+    } catch (err: any) {
+      setDialogueNotice(`Ошибка загрузки видео: ${err.message}`);
+    } finally {
+      setIsUploadingVideo(false);
+    }
+  };
+
+  // Re-synthesize a SINGLE turn and re-stitch master audio
+  const handleResynthesizeSingleTurn = async (turn: DialogueTurn) => {
+    if (!turn.text.trim()) return;
+    setResynthesizingTurnId(turn.id);
+    try {
+      const host1VoicePayload = {
+        voiceId: speaker1Profile?.voiceId || speaker1Profile?.id || 'aziza',
+        name: speaker1Name,
+        speakerName: speaker1Name,
+        baseVoice: speaker1Profile?.baseVoice || 'Kore',
+        gender: speaker1Profile?.gender || 'female',
+        tempo: speaker1Tempo,
+      };
+      const host2VoicePayload = {
+        voiceId: speaker2Profile?.voiceId || speaker2Profile?.id || 'voice_17raj9ewke3g',
+        name: speaker2Name,
+        speakerName: speaker2Name,
+        baseVoice: speaker2Profile?.baseVoice || (speaker2Gender === 'female' ? 'Kore' : 'Charon'),
+        gender: speaker2Gender,
+        tempo: speaker2Tempo,
+        timbre: speaker2Timbre || speaker2Profile?.timbre,
+      };
+
+      const res = await authFetch('/api/podcast/synthesize-single-turn', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          turn,
+          host1Voice: host1VoicePayload,
+          host2Voice: host2VoicePayload,
+          speakers: extraSpeakers,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Ошибка переозвучки реплики');
+      }
+
+      const data = await res.json();
+      if (data.turn) {
+        const updatedSynthesized =
+          synthesizedTurns.length > 0
+            ? synthesizedTurns.map((st) => (st.id === turn.id ? { ...st, ...data.turn } : st))
+            : turns.map((t) => (t.id === turn.id ? { ...t, ...data.turn } : t));
+
+        setSynthesizedTurns(updatedSynthesized);
+        setTurns((prev) =>
+          prev.map((t) =>
+            t.id === turn.id
+              ? {
+                  ...t,
+                  text: data.turn.text || t.text,
+                  fitStepApplied: data.turn.fitStepApplied,
+                }
+              : t
+          )
+        );
+
+        // Play the newly synthesized turn immediately
+        if (data.turn.audioBase64) {
+          playSingleTurn(turn.id, data.turn.audioBase64);
+        }
+
+        // If all turns already have audioBase64, re-stitch master audio automatically
+        const allHaveAudio = updatedSynthesized.every((st) => Boolean(st.audioBase64));
+        if (allHaveAudio) {
+          const stitchRes = await authFetch('/api/podcast/stitch-dialogue-turns', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              turns: updatedSynthesized,
+              masterAudioMode,
+              totalVideoDurationSec,
+            }),
+          });
+          if (stitchRes.ok) {
+            const stitchData = await stitchRes.json();
+            setMasterAudioBase64(stitchData.masterAudioBase64);
+            setTotalDuration(stitchData.totalDurationSeconds || 0);
+            if (stitchData.srtSubtitles) setSrtSubtitles(stitchData.srtSubtitles);
+          }
+        }
+      }
+    } catch (e: any) {
+      setDialogueNotice(`Ошибка переозвучки: ${e.message}`);
+    } finally {
+      setResynthesizingTurnId(null);
+    }
+  };
+
+  // Mux Dubbed Master Audio with Uploaded Video into MP4 via FFmpeg
+  const handleMuxDubbedVideoMp4 = async () => {
+    if (!uploadedVideoFileId || !masterAudioBase64) {
+      setDialogueNotice('Сначала загрузите видеофайл в Шаге 01 и синтезируйте озвучку!');
+      return;
+    }
+
+    setIsMuxingVideo(true);
+    setDialogueNotice('Сборка финального видео MP4 с узбекским дубляжом и приглушением фона (FFmpeg)...');
+    try {
+      const speechIntervals = (synthesizedTurns.length > 0 ? synthesizedTurns : turns)
+        .filter((t) => typeof t.startSec === 'number' && typeof t.endSec === 'number')
+        .map((t) => ({
+          startSec: Number(t.startSec),
+          endSec: Number(t.endSec),
+        }));
+
+      const res = await authFetch('/api/podcast/mux-dubbed-video', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileId: uploadedVideoFileId,
+          masterAudioBase64,
+          duckingMode,
+          speechIntervals,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Ошибка сборки видео MP4');
+      }
+
+      const data = await res.json();
+      if (data.downloadUrl) {
+        setMuxedVideoDownloadUrl(data.downloadUrl);
+        const a = document.createElement('a');
+        a.href = data.downloadUrl;
+        a.download = `uzbek-dubbing-${Date.now()}.mp4`;
+        a.click();
+        setDialogueNotice('✅ Готовое видео MP4 с узбекским дубляжом успешно собрано и скачивается!');
+      }
+    } catch (e: any) {
+      setDialogueNotice(`Ошибка сборки MP4: ${e.message}`);
+    } finally {
+      setIsMuxingVideo(false);
+    }
+  };
+
+  // Download .SRT Subtitles
+  const handleDownloadSrt = () => {
+    let srtContent = srtSubtitles;
+    if (!srtContent) {
+      const fmtSrt = (sec: number) => {
+        const h = Math.floor(sec / 3600);
+        const m = Math.floor((sec % 3600) / 60);
+        const s = Math.floor(sec % 60);
+        const ms = Math.round((sec - Math.floor(sec)) * 1000);
+        return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
+      };
+      srtContent = turns
+        .map((t, i) => {
+          const st = typeof t.startSec === 'number' ? t.startSec : i * 4;
+          const et = typeof t.endSec === 'number' ? t.endSec : st + 3.5;
+          const clean = t.text.replace(/<\/?[a-zA-Z_\s-]+>/g, '').trim();
+          return `${i + 1}\n${fmtSrt(st)} --> ${fmtSrt(et)}\n[${t.speakerName}]: ${clean}\n`;
+        })
+        .join('\n');
+    }
+
+    const blob = new Blob([srtContent], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `uzbek-dubbing-subtitles-${Date.now()}.srt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Generate AI dialogue script by topic (up to 10 min)
   const handleGenerateInterview = async () => {
     if (
       !requireAuth(
         () => {},
         lang === 'uz'
-          ? "2 kishilik intervyu ssenariysini yaratish faqat ro'yxatdan o'tgan foydalanuvchilar uchun ochiq. Avval tizimga kiring!"
-          : "Генерация диалога доступна только для зарегистрированных пользователей."
+          ? "2 kishilik intervyu ssenariysini yaratish faqat ro'yxatdan o'tgan foydalanuvchilar uchun ochiq."
+          : 'Генерация диалога доступна только для зарегистрированных пользователей.'
       )
     )
       return;
@@ -464,24 +1371,30 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       if (!res.ok) throw new Error('Intervyu yaratishda xatolik');
       const data = await res.json();
       if (Array.isArray(data.turns) && data.turns.length > 0) {
-        setTurns(
-          data.turns.map((t: any, idx: number) => ({
-            id: `turn-${idx + 1}-${Date.now()}`,
-            speakerId: t.speakerId === 'HOST_2' ? 'HOST_2' : 'HOST_1',
-            speakerName: t.speakerName || (t.speakerId === 'HOST_2' ? speaker2Name : speaker1Name),
-            text: t.text,
-            emotion: t.emotion || 'neutral',
-          }))
-        );
+        setMasterAudioMode('continuous');
+        setNoSpeechIntervals([]);
+        const mappedTurns = data.turns.map((t: any, idx: number) => ({
+          id: `turn-${idx + 1}-${Date.now()}`,
+          speakerId: t.speakerId === 'HOST_2' ? 'HOST_2' : 'HOST_1',
+          speakerName: t.speakerName || (t.speakerId === 'HOST_2' ? speaker2Name : speaker1Name),
+          text: t.text,
+          emotion: t.emotion || 'neutral',
+        }));
+        setTurns(mappedTurns);
+        saveProjectToUserHistory({
+          title: topic || 'ИИ-Интервью',
+          storyboardTextRu: '',
+          turns: mappedTurns,
+          noSpeechIntervals: [],
+        });
       }
     } catch (e: any) {
-      alert(`Xatolik: ${e.message}`);
+      setDialogueNotice(`Xatolik: ${e.message}`);
     } finally {
       setIsGeneratingScript(false);
     }
   };
 
-  // Expand interview with +8 new deep turns (+15 minutes)
   const handleExpandInterview = async () => {
     setIsExpandingDialogue(true);
     try {
@@ -510,17 +1423,18 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         setTurns((prev) => [...prev, ...added]);
       }
     } catch (e: any) {
-      alert(`Xatolik: ${e.message}`);
+      setDialogueNotice(`Xatolik: ${e.message}`);
     } finally {
       setIsExpandingDialogue(false);
     }
   };
 
-  // Add empty turn
   const addTurn = () => {
-    const lastSpeaker = turns[turns.length - 1]?.speakerId;
-    const nextSpeaker = lastSpeaker === 'HOST_1' ? 'HOST_2' : 'HOST_1';
+    const lastTurn = turns[turns.length - 1];
+    const nextSpeaker = lastTurn?.speakerId === 'HOST_1' ? 'HOST_2' : 'HOST_1';
     const nextName = nextSpeaker === 'HOST_1' ? speaker1Name : speaker2Name;
+    const nextStart = typeof lastTurn?.endSec === 'number' ? lastTurn.endSec + 1 : undefined;
+    const nextEnd = typeof nextStart === 'number' ? nextStart + 4 : undefined;
 
     setTurns([
       ...turns,
@@ -530,25 +1444,25 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         speakerName: nextName,
         text: '',
         emotion: 'neutral',
+        startSec: nextStart,
+        endSec: nextEnd,
+        durationSec: nextStart !== undefined && nextEnd !== undefined ? nextEnd - nextStart : undefined,
       },
     ]);
   };
 
-  // Remove turn
   const removeTurn = (id: string) => {
-    if (turns.length <= 2) {
-      alert('Kamida 2 ta replika bo\'lishi kerak!');
+    if (turns.length <= 1) {
+      setDialogueNotice('Должна остаться хотя бы 1 реплика!');
       return;
     }
     setTurns(turns.filter((t) => t.id !== id));
   };
 
-  // Update turn text
   const updateTurnText = (id: string, text: string) => {
     setTurns(turns.map((t) => (t.id === id ? { ...t, text } : t)));
   };
 
-  // Toggle speaker for turn
   const toggleTurnSpeaker = (id: string) => {
     setTurns(
       turns.map((t) => {
@@ -563,7 +1477,6 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     );
   };
 
-  // Smart Diarize all turns into Host 1 (Artur Yugay) vs Host 2 (Oybek Burxanov)
   const handleSmartDiarizeTurns = async () => {
     if (turns.length === 0) return;
     setIsDiarizing(true);
@@ -573,32 +1486,26 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           turns,
-          host1Name: speaker1Name || 'Artur Yugay',
-          host2Name: speaker2Name || 'Oybek Burxanov',
+          host1Name: speaker1Name || 'Спикер 1',
+          host2Name: speaker2Name || 'Спикер 2',
         }),
       });
 
-      if (!res.ok) {
-        throw new Error('Diarizatsiyada xatolik yuz berdi');
-      }
-
+      if (!res.ok) throw new Error('Diarizatsiyada xatolik yuz berdi');
       const data = await res.json();
       if (Array.isArray(data.turns)) {
         setTurns(data.turns);
-        alert(
-          lang === 'uz'
-            ? `✅ Barcha ${data.turns.length} ta replika Artur Yugay va Oybek Burxanov o'rtasida muvaffaqiyatli taqsimlandi!`
-            : `✅ Все ${data.turns.length} реплик успешно распределены между Артуром Югаем и Ойбеком Бурхановым!`
+        setDialogueNotice(
+          `✅ Все ${data.turns.length} реплик успешно распределены между спикерами!`
         );
       }
     } catch (e: any) {
-      alert(`Xatolik: ${e.message}`);
+      setDialogueNotice(`Xatolik: ${e.message}`);
     } finally {
       setIsDiarizing(false);
     }
   };
 
-  // Invert all speaker roles across turns (HOST_1 <-> HOST_2)
   const handleInvertAllSpeakers = () => {
     setTurns((prev) =>
       prev.map((t) => {
@@ -612,7 +1519,6 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     );
   };
 
-  // Load the full 73-turn Arthur Yugay & Ayubxon Burkhanov interview preset
   const handleLoadYugayBurkhanovPreset = () => {
     setTopic(YUGAY_BURKHANOV_METADATA.title);
     setSpeaker1Name(YUGAY_BURKHANOV_METADATA.host1Name);
@@ -622,22 +1528,20 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     setSpeaker2Role(YUGAY_BURKHANOV_METADATA.host2Role);
     setSpeaker2VoiceId(YUGAY_BURKHANOV_METADATA.host2VoiceId);
     setSpeaker2Gender('male');
-    setSpeaker2GenderFilter('male');
+    setSpeaker2GenderFilter('all');
     setTurns(YUGAY_BURKHANOV_TURNS);
+    setNoSpeechIntervals([]);
     setYoutubeVideoTitle(YUGAY_BURKHANOV_METADATA.title);
-    setYoutubeAuthorName("Arthur Yugay");
+    setYoutubeAuthorName('Arthur Yugay');
     setYoutubeVideoId(YUGAY_BURKHANOV_METADATA.videoId);
     setYoutubeEmbedUrl(YUGAY_BURKHANOV_METADATA.embedUrl);
     setMasterAudioBase64(null);
     setSynthesizedTurns([]);
-    setYoutubeImportNotice(
-      lang === 'uz'
-        ? `✅ "Artur Yugay & Ayubxon Burxanov" intervyusi yuklandi: 73 ta replika, 4 ta bob, aniq vaqtli tarjima va 2 ta mustaqil erkak ovozi!`
-        : `✅ Загружено интервью «Артур Югай и Аюбхон Бурханов»: 73 реплики, 4 главы, точный перевод по хронометражу и 2 независимых мужских голоса!`
+    setDialogueNotice(
+      '✅ Загружено интервью «Артур Югай и Аюбхон Бурханов»: 73 реплики, 4 главы, точный перевод по хронометражу!'
     );
   };
 
-  // Clean all turns from bracketed conditions and timing tags
   const handleCleanAllTurns = () => {
     setTurns((prev) =>
       prev.map((t) => ({
@@ -647,7 +1551,6 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     );
   };
 
-  // Clean single turn
   const handleCleanSingleTurn = (turnId: string) => {
     setTurns((prev) =>
       prev.map((t) =>
@@ -656,7 +1559,6 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     );
   };
 
-  // Insert vocal tag or Uzbek backchannel into turn text
   const handleInsertTagToTurn = (turnId: string, tag: string) => {
     setTurns((prev) =>
       prev.map((t) => {
@@ -668,16 +1570,13 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     );
   };
 
-  // Import & Translate YouTube Interview (supports long videos up to 1.5 hours)
   const handleImportYouTubeInterview = async () => {
     const hasUrl = Boolean(youtubeImportUrl.trim());
     const hasManual = Boolean(manualTranscriptText.trim());
 
     if (!hasUrl && !hasManual) {
       setYoutubeImportError(
-        lang === 'uz'
-          ? "Iltimos, YouTube video havolasini kiriting yoki quyidagi matn maydoniga transkript/mavzuni yozing!"
-          : "Пожалуйста, введите ссылку на YouTube видео или вставьте текст/тему ниже!"
+        'Пожалуйста, вставьте субтитры (.SRT / .VTT / текст) или ссылку ниже!'
       );
       return;
     }
@@ -685,20 +1584,27 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     if (
       !requireAuth(
         () => {},
-        lang === 'uz'
-          ? "YouTube videoni 2 kishilik intervyuga o'girish faqat tizim foydalanuvchilari uchun."
-          : "Импорт YouTube видео доступен только авторизованным пользователям."
+        'Импорт субтитров доступен только авторизованным пользователям.'
       )
     ) {
+      return;
+    }
+
+    // If user pasted a Russian storyboard with Видеоряд:/Интонация:/Текст:, route directly to Verbatim 1:1 parser!
+    if (
+      hasManual &&
+      /(?:Видеоряд:|Интонация:|Текст:|\d{1,2}:\d{2}\s*[–—-]\s*\d{1,2}:\d{2}\s*\|)/i.test(manualTranscriptText)
+    ) {
+      setStoryboardTextRu(manualTranscriptText);
+      setStudioSourceMode('verbatim');
+      await handleParseVerbatimStoryboard();
       return;
     }
 
     setIsImportingYoutube(true);
     setYoutubeImportError(null);
     setYoutubeImportNotice(
-      lang === 'uz'
-        ? "YouTube ma'lumotlari tahlil qilinmoqda va Gemini 3.8 Flash orqali 2 kishilik adabiy dialogga tarjima qilinmoqda..."
-        : "Обработка данных YouTube и перевод через Gemini 3.8 Flash в двухголосый диалог..."
+      'Обработка субтитров и перевод в двухголосый диалог...'
     );
 
     try {
@@ -716,10 +1622,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       });
 
       if (!res.ok) {
-        let msg = lang === 'uz' ? 'YouTube intervyusini import qilishda xatolik' : 'Ошибка импорта YouTube видео';
+        let msg = 'Ошибка импорта субтитров';
         try {
           const errData = await res.json();
-          msg = (lang === 'ru' && errData.message_ru) ? errData.message_ru : (errData.error || errData.message || msg);
+          msg = errData.message_ru || errData.error || errData.message || msg;
         } catch {}
         throw new Error(msg);
       }
@@ -745,39 +1651,13 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         if (data.embedUrl) setYoutubeEmbedUrl(data.embedUrl);
         if (data.videoTitle) setYoutubeVideoTitle(data.videoTitle);
         if (data.authorName) setYoutubeAuthorName(data.authorName);
-        if (data.turns[0]?.speakerName) {
-          const h1 = data.turns.find((t: any) => t.speakerId === 'HOST_1');
-          const h2 = data.turns.find((t: any) => t.speakerId === 'HOST_2');
-          if (h1?.speakerName) setSpeaker1Name(h1.speakerName);
-          if (h2?.speakerName) {
-            setSpeaker2Name(h2.speakerName);
-            const isH2Male = /oybek|ayubxon|burxonov|yugay|artur|jasur|farrux|muzaffar|rustam|alisher|nodir|sherzod|erkak|boshlovchi|mehmon/i.test(
-              h2.speakerName
-            );
-            if (isH2Male) {
-              setSpeaker2Gender('male');
-              setSpeaker2GenderFilter('male');
-              const maleVoice = voices.find(
-                (v) =>
-                  !v.isReplicatedVoice &&
-                  !v.id.includes('17raj9') &&
-                  (v.gender === 'male' || v.baseVoice === 'Fenrir' || v.baseVoice === 'Puck')
-              );
-              if (maleVoice) {
-                setSpeaker2VoiceId(maleVoice.id);
-              }
-            }
-          }
-        }
-        setTopic(data.title || data.videoTitle || 'YouTube Intervyu');
+        setTopic(data.title || data.videoTitle || 'Импорт субтитров');
         setYoutubeImportError(null);
         setYoutubeImportNotice(
-          lang === 'uz'
-            ? `✅ "${data.videoTitle || 'Video'}" dan ${data.turns.length} ta replika lipsynk vaqtiga sig'dirilib to'ch-v-to'ch tarjima qilindi (~${data.estimatedDurationMinutes || 15} daqiqa)! Endi quyida video bilan tekshirishingiz yoki sintez qilishingiz mumkin.`
-            : `✅ Успешно импортировано и переведено точь-в-точь ${data.turns.length} реплик из "${data.videoTitle || 'Видео'}" (~${data.estimatedDurationMinutes || 15} мин) с привязкой к липсинк-таймкодам! Вы можете проверить реплики ниже или запустить озвучку.`
+          `✅ Успешно импортировано и переведено ${data.turns.length} реплик по таймкодам!`
         );
       } else {
-        throw new Error(lang === 'uz' ? 'Videodan replikalar ajratib olinmadi' : 'Не удалось получить реплики из видео');
+        throw new Error('Не удалось извлечь реплики');
       }
     } catch (e: any) {
       setYoutubeImportNotice(null);
@@ -788,7 +1668,6 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     }
   };
 
-  // Stop Progressive Synthesis and stitch whatever has been synthesized so far
   const handleStopSynthesis = async () => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -799,22 +1678,24 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           prev
             ? {
                 ...prev,
-                statusText:
-                  lang === 'uz'
-                    ? "To'xtatildi. Tayyor bo'lgan replikalar birlashtirilmoqda..."
-                    : 'Остановлено. Склейка уже готовых реплик...',
+                statusText: 'Остановлено. Склейка уже готовых реплик по таймкодам...',
               }
             : null
         );
         const stitchRes = await authFetch('/api/podcast/stitch-dialogue-turns', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ turns: synthesizedTurns }),
+          body: JSON.stringify({
+            turns: synthesizedTurns,
+            masterAudioMode,
+            totalVideoDurationSec,
+          }),
         });
         if (stitchRes.ok) {
           const stitchData = await stitchRes.json();
           setMasterAudioBase64(stitchData.masterAudioBase64);
           setTotalDuration(stitchData.totalDurationSeconds || 0);
+          if (stitchData.srtSubtitles) setSrtSubtitles(stitchData.srtSubtitles);
         }
       } catch (err) {
         console.warn('Stitch on stop error:', err);
@@ -824,40 +1705,39 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     setBatchProgress(null);
   };
 
-  // Progressive Batch Dialogue Synthesis (handles 10 min to 1.5 hours without HTTP timeouts)
+  // Synthesize Full Dialogue (with 4-step duration cascade & strict timecode sync)
   const handleSynthesizeDialogue = async () => {
     if (
       !requireAuth(
         () => {},
-        lang === 'uz'
-          ? "2 kishilik intervyu ovozini yaratish faqat ro'yxatdan o'tgan foydalanuvchilar uchun ochiq. Begonalar bepul API limitlarini sarflay olmaydi. Avval kiring!"
-          : "Синтез диалога доступен только для зарегистрированных пользователей."
+        'Синтез диалога доступен только для зарегистрированных пользователей.'
       )
     )
       return;
 
     const invalidTurn = turns.find((t) => !t.text.trim());
     if (invalidTurn) {
-      alert(lang === 'uz' ? 'Barcha replikalar uchun matn kiritilishi lozim!' : 'Все реплики должны содержать текст!');
+      setDialogueNotice('Все реплики должны содержать текст!');
       return;
     }
 
     setIsSynthesizing(true);
+    setMuxedVideoDownloadUrl(null);
     abortControllerRef.current = new AbortController();
 
     const host1VoicePayload = {
-      voiceId: speaker1Profile?.voiceId || speaker1Profile?.id || 'voice_17raj9ewke3g',
+      voiceId: speaker1Profile?.voiceId || speaker1Profile?.id || 'aziza',
       name: speaker1Name,
       speakerName: speaker1Name,
-      baseVoice: speaker1Profile?.baseVoice || 'Charon',
-      gender: 'male',
+      baseVoice: speaker1Profile?.baseVoice || 'Kore',
+      gender: speaker1Profile?.gender || 'female',
       tempo: speaker1Tempo,
     };
     const host2VoicePayload = {
-      voiceId: speaker2Profile?.voiceId || speaker2Profile?.id,
+      voiceId: speaker2Profile?.voiceId || speaker2Profile?.id || 'voice_17raj9ewke3g',
       name: speaker2Name,
       speakerName: speaker2Name,
-      baseVoice: speaker2Profile?.baseVoice || (speaker2Gender === 'female' ? 'Kore' : 'Fenrir'),
+      baseVoice: speaker2Profile?.baseVoice || (speaker2Gender === 'female' ? 'Kore' : 'Charon'),
       gender: speaker2Gender,
       tempo: speaker2Tempo,
       timbre: speaker2Timbre || speaker2Profile?.timbre,
@@ -865,8 +1745,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       role: speaker2Role,
     };
 
-    // If dialogue has up to 10 turns, run single-shot via native multiSpeakerVoiceConfig
-    if (turns.length <= 10) {
+    if (turns.length <= 12) {
       try {
         const res = await authFetch('/api/podcast/synthesize-dialogue', {
           method: 'POST',
@@ -876,22 +1755,21 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
             turns,
             host1Voice: host1VoicePayload,
             host2Voice: host2VoicePayload,
+            speakers: extraSpeakers,
             masterAudioMode,
+            totalVideoDurationSec,
           }),
         });
 
         if (!res.ok) {
-          let errMessage = lang === 'uz' ? 'Muloqot sintezida xatolik yuz berdi' : 'Ошибка при синтезе диалога';
+          let errMessage = 'Ошибка при синтезе диалога';
           try {
             const err = await res.json();
             if (err.code === 'API_KEY_EXPIRED' || err.isApiKeyExpired || (err.error && err.error.includes('API key expired'))) {
               window.dispatchEvent(new CustomEvent('open-api-key-modal'));
             }
-            errMessage = (lang === 'ru' && err.message_ru) ? err.message_ru : (err.message || err.error || errMessage);
-          } catch {
-            const raw = await res.text().catch(() => '');
-            if (raw) errMessage = raw;
-          }
+            errMessage = err.message_ru || err.message || err.error || errMessage;
+          } catch {}
           throw new Error(errMessage);
         }
 
@@ -899,6 +1777,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         setMasterAudioBase64(data.masterAudioBase64);
         setTotalDuration(data.totalDurationSeconds || 0);
         setSynthesizedTurns(data.turns || []);
+        if (data.srtSubtitles) setSrtSubtitles(data.srtSubtitles);
         setIsPlaying(false);
         setActiveTurnIndex(-1);
 
@@ -907,10 +1786,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         } else {
           await useCredit(1);
         }
-        await logGeneration('podcast', topic || '2 Ovozli Intervyu', 1);
+        await logGeneration('podcast', topic || '2 Ovozli Dublyaj', 1);
       } catch (e: any) {
         if (e.name !== 'AbortError') {
-          alert(`Xatolik: ${e.message}`);
+          setDialogueNotice(`Ошибка: ${e.message}`);
         }
       } finally {
         setIsSynthesizing(false);
@@ -919,8 +1798,6 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       return;
     }
 
-    // Long dialogue (11 to 100+ turns, up to 1.5 hours):
-    // Execute progressive 8-turn batches to eliminate HTTP gateway timeouts (504)
     const BATCH_SIZE = 8;
     const totalBatches = Math.ceil(turns.length / BATCH_SIZE);
     const accumulatedTurns: any[] = [];
@@ -931,17 +1808,12 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       completedTurns: 0,
       totalTurns: turns.length,
       percent: 0,
-      statusText:
-        lang === 'uz'
-          ? `1.5 soatlik intervyu boshlanmoqda (1/${totalBatches}-paket)...`
-          : `Запуск генерации (пакет 1/${totalBatches})...`,
+      statusText: `Запуск генерации по таймкодам (пакет 1/${totalBatches})...`,
     });
 
     try {
       for (let b = 0; b < totalBatches; b++) {
-        if (abortControllerRef.current?.signal.aborted) {
-          break;
-        }
+        if (abortControllerRef.current?.signal.aborted) break;
 
         const startIdx = b * BATCH_SIZE;
         const endIdx = Math.min(turns.length, (b + 1) * BATCH_SIZE);
@@ -953,13 +1825,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           completedTurns: accumulatedTurns.length,
           totalTurns: turns.length,
           percent: Math.round((accumulatedTurns.length / turns.length) * 100),
-          statusText:
-            lang === 'uz'
-              ? `Paket ${b + 1}/${totalBatches} generatsiya qilinmoqda (${startIdx + 1}–${endIdx}-replikalar)...`
-              : `Генерация пакета ${b + 1}/${totalBatches} (реплики ${startIdx + 1}–${endIdx})...`,
+          statusText: `Озвучка пакета ${b + 1}/${totalBatches} (реплики ${startIdx + 1}–${endIdx})...`,
         });
 
-        // Retry loop for each batch (up to 2 attempts)
         let batchData: any = null;
         let lastErr: any = null;
 
@@ -974,6 +1842,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 skipMasterStitch: true,
                 host1Voice: host1VoicePayload,
                 host2Voice: host2VoicePayload,
+                speakers: extraSpeakers,
                 masterAudioMode,
               }),
             });
@@ -988,18 +1857,12 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           } catch (err: any) {
             lastErr = err;
             if (abortControllerRef.current?.signal.aborted) break;
-            if (attempt < 2) {
-              await new Promise((r) => setTimeout(r, 2000));
-            }
+            if (attempt < 2) await new Promise((r) => setTimeout(r, 2000));
           }
         }
 
         if (!batchData) {
-          throw new Error(
-            lang === 'uz'
-              ? `${b + 1}-paketda xatolik: ${lastErr?.message || 'aloqa uzildi'}`
-              : `Ошибка в пакете ${b + 1}: ${lastErr?.message || 'сбой сети'}`
-          );
+          throw new Error(`Ошибка в пакете ${b + 1}: ${lastErr?.message || 'сбой сети'}`);
         }
 
         if (typeof batchData.creditsRemaining === 'number') {
@@ -1012,7 +1875,6 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         }
       }
 
-      // Stitch all accumulated batch audio into ONE unified master podcast track
       if (accumulatedTurns.length > 0) {
         setBatchProgress({
           currentBatch: totalBatches,
@@ -1020,16 +1882,17 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           completedTurns: accumulatedTurns.length,
           totalTurns: turns.length,
           percent: 98,
-          statusText:
-            lang === 'uz'
-              ? `Barcha ${accumulatedTurns.length} ta replika birlashtirilmoqda (Master audio montaj)...`
-              : `Склейка всех ${accumulatedTurns.length} реплик в единый мастер-трек...`,
+          statusText: `Сборка всех ${accumulatedTurns.length} реплик строго по таймкодам...`,
         });
 
         const stitchRes = await authFetch('/api/podcast/stitch-dialogue-turns', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ turns: accumulatedTurns, masterAudioMode }),
+          body: JSON.stringify({
+            turns: accumulatedTurns,
+            masterAudioMode,
+            totalVideoDurationSec,
+          }),
         });
 
         if (stitchRes.ok) {
@@ -1037,18 +1900,21 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           setMasterAudioBase64(stitchData.masterAudioBase64);
           setTotalDuration(stitchData.totalDurationSeconds || 0);
           setSynthesizedTurns(accumulatedTurns);
+          if (stitchData.srtSubtitles) setSrtSubtitles(stitchData.srtSubtitles);
           setIsPlaying(false);
           setActiveTurnIndex(-1);
-          await logGeneration('podcast', topic || '2 Ovozli Intervyu', 1);
+          if (typeof stitchData.creditsRemaining === 'number') {
+            syncCredits(stitchData.creditsRemaining);
+          }
+          await logGeneration('podcast', topic || '2 Ovozli Dublyaj', 1);
         } else {
-          throw new Error(
-            lang === 'uz' ? 'Replikalarni birlashtirishda xatolik yuz berdi' : 'Ошибка склейки реплик в мастер-трек'
-          );
+          const errData = await stitchRes.json().catch(() => ({}));
+          throw new Error(errData.error || 'Ошибка склейки реплик в мастер-трек');
         }
       }
     } catch (e: any) {
       if (e.name !== 'AbortError') {
-        alert(`Xatolik: ${e.message}`);
+        setDialogueNotice(`Ошибка: ${e.message}`);
       }
     } finally {
       setIsSynthesizing(false);
@@ -1056,16 +1922,21 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     }
   };
 
-  // Master audio playback tracking
+  // Master audio playback & synchronized video preview
   const [masterCurrentTime, setMasterCurrentTime] = useState(0);
 
   const toggleMasterPlay = () => {
     if (!audioRef.current) return;
     if (isPlaying) {
       audioRef.current.pause();
+      dubVideoRef.current?.pause();
       ambientAudioRef.current?.pause();
       setIsPlaying(false);
     } else {
+      if (dubVideoRef.current) {
+        dubVideoRef.current.currentTime = audioRef.current.currentTime;
+        dubVideoRef.current.play().catch(() => {});
+      }
       audioRef.current.play();
       if (ambientEnabled && ambientSound !== 'none') {
         ambientAudioRef.current?.play().catch(console.warn);
@@ -1074,7 +1945,6 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     }
   };
 
-  // Play individual turn with auto-advance to next turn
   const playSingleTurn = (turnId: string, audioBase64?: string) => {
     if (!audioBase64) return;
     if (playingTurnId === turnId) {
@@ -1090,92 +1960,18 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     singleAudioRef.current = audio;
     setPlayingTurnId(turnId);
 
+    // Seek video preview to this turn's startSec if uploaded
+    const foundTurn = turns.find((t) => t.id === turnId);
+    if (dubVideoRef.current && typeof foundTurn?.startSec === 'number') {
+      dubVideoRef.current.currentTime = foundTurn.startSec;
+    }
+
     audio.onended = () => {
       setPlayingTurnId(null);
-      // Auto-advance to next turn
-      const currentIdx = turns.findIndex((t) => t.id === turnId);
-      if (currentIdx !== -1 && currentIdx < turns.length - 1) {
-        const nextTurn = turns[currentIdx + 1];
-        const nextAudio = synthesizedTurns.find((st) => st.id === nextTurn.id)?.audioBase64;
-        if (nextAudio) {
-          playSingleTurn(nextTurn.id, nextAudio);
-        }
-      }
     };
     audio.play().catch(console.warn);
   };
 
-  // Sound Director AI Planner
-  const handlePlanSoundDirector = async () => {
-    setIsPlanningSound(true);
-    try {
-      const res = await authFetch('/api/podcast/sound-director', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          turns,
-          topic,
-          category: 'Intervyu & Muloqot',
-          preferredSoundscape: ambientSound,
-        }),
-      });
-
-      if (!res.ok) throw new Error('Sound director request failed');
-      const data = await res.json();
-      if (data.strategyUz) {
-        setSoundDirectorStrategy({
-          strategyUz: data.strategyUz,
-          strategyRu: data.strategyRu,
-        });
-      }
-
-      if (Array.isArray(data.cues) && data.cues.length > 0) {
-        setTurns((prev) =>
-          prev.map((turn, idx) => {
-            const cue = data.cues.find((c: any) => c.turnIndex === idx) || data.cues[idx];
-            if (!cue) return turn;
-            return {
-              ...turn,
-              musicCue: {
-                enabled: cue.cueType !== 'silence' && cue.volumePercent > 0,
-                cueType: cue.cueType,
-                soundscape: cue.soundscape,
-                volumePercent: cue.volumePercent,
-                labelUz: cue.labelUz,
-                labelRu: cue.labelRu,
-                reasoning: cue.reasoning,
-              },
-            };
-          })
-        );
-      }
-    } catch (err) {
-      console.warn('Fallback to local sound director:', err);
-      const localCues = autoPlanPodcastCues(totalDuration || 60, turns.length, ambientSound);
-      setTurns((prev) =>
-        prev.map((turn, idx) => {
-          const cue = localCues[idx];
-          if (!cue) return turn;
-          return {
-            ...turn,
-            musicCue: {
-              enabled: cue.cueType !== 'silence' && cue.volumePercent > 0,
-              cueType: cue.cueType,
-              soundscape: cue.soundscape,
-              volumePercent: cue.volumePercent,
-              labelUz: cue.labelUz,
-              labelRu: cue.labelRu,
-              reasoning: cue.reasoning,
-            },
-          };
-        })
-      );
-    } finally {
-      setIsPlanningSound(false);
-    }
-  };
-
-  // Turn Cue Updater
   const handleUpdateTurnCue = (turnId: string, cueType: SoundCueType, soundscape?: AmbientSoundscape) => {
     setTurns((prev) =>
       prev.map((t) => {
@@ -1189,54 +1985,47 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
             cueType,
             soundscape: snd,
             volumePercent: isSilence ? 0 : cueType === 'intro' || cueType === 'outro' ? 35 : cueType === 'stinger' ? 25 : 14,
-            labelUz: isSilence
-              ? 'Toza ovoz (Musiqasiz)'
-              : cueType === 'intro'
-              ? 'Kirish Jingle'
-              : cueType === 'stinger'
-              ? "O'tish Stingeri"
-              : cueType === 'emotional'
-              ? 'Mayin Fon (Bed)'
-              : cueType === 'outro'
-              ? 'Xulosa Outro'
-              : 'Fon Musiqasi',
-            labelRu: isSilence
-              ? 'Чистый голос (без музыки)'
-              : cueType === 'intro'
-              ? 'Вступительный джингл'
-              : cueType === 'stinger'
-              ? 'Переходной акцент'
-              : cueType === 'emotional'
-              ? 'Эмоциональный эмбиент'
-              : cueType === 'outro'
-              ? 'Финал и аутро'
-              : 'Фоновая музыка',
-            reasoning: isSilence
-              ? 'Sukunat: nutqning maksimal tiniqligi uchun musiqasiz.'
-              : `${snd} musiqasi tanlandi.`,
+            labelUz: isSilence ? 'Toza ovoz' : 'Fon Musiqasi',
+            labelRu: isSilence ? 'Чистый голос' : 'Фоновая музыка',
+            reasoning: isSilence ? 'Чистый голос без музыки.' : `${snd} выбрана.`,
           },
         };
       })
     );
   };
 
-  // Sync turn highlight with audio currentTime and apply dynamic cue ducking
+  // Sync turn highlight + live video volume ducking (100% during Без слов, 15%/0% during speech)
   const handleTimeUpdate = () => {
     if (!audioRef.current || synthesizedTurns.length === 0) return;
     const curr = audioRef.current.currentTime;
     setMasterCurrentTime(curr);
     const activeIdx = synthesizedTurns.findIndex(
-      (t) => curr >= (t.startTime || 0) && curr <= (t.endTime || 0) + 0.3
+      (t) => curr >= (t.startTime ?? t.startSec ?? 0) && curr <= (t.endTime ?? t.endSec ?? 0) + 0.25
     );
     setActiveTurnIndex(activeIdx);
 
-    // Dynamic Sound Design Ducking during playback:
+    // Synchronize local video player time & apply smart ducking on original video track
+    if (dubVideoRef.current) {
+      if (Math.abs(dubVideoRef.current.currentTime - curr) > 0.35) {
+        dubVideoRef.current.currentTime = curr;
+      }
+      if (duckingMode === 'voice_only') {
+        dubVideoRef.current.volume = 0;
+      } else if (activeIdx >= 0) {
+        // Speech is currently playing -> duck original video audio
+        dubVideoRef.current.volume = duckingMode === 'smart_ducking' ? 0.15 : 0.0;
+      } else {
+        // «Без слов» musical interval -> restore original video music to 100%!
+        dubVideoRef.current.volume = 1.0;
+      }
+    }
+
     if (dynamicDuckingEnabled && ambientAudioRef.current && activeIdx >= 0) {
       const activeTurn = turns[activeIdx];
       const cue = activeTurn?.musicCue;
       if (cue) {
         if (!cue.enabled || cue.cueType === 'silence' || cue.soundscape === 'none' || cue.volumePercent <= 0) {
-          ambientAudioRef.current.volume = 0; // Pure dry silence!
+          ambientAudioRef.current.volume = 0;
         } else {
           const factor = (cue.volumePercent / 100) * 0.65;
           ambientAudioRef.current.volume = Math.max(0, Math.min(1, factor));
@@ -1245,19 +2034,15 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     }
   };
 
-  // Save Dialogue to CMS
   const handleSaveToCMS = () => {
     if (!onSaveToCMS) return;
-
-    const fullScript = turns
-      .map((t) => `[${t.speakerName}]: ${t.text}`)
-      .join('\n\n');
+    const fullScript = turns.map((t) => `[${t.speakerName}]: ${t.text}`).join('\n\n');
 
     onSaveToCMS({
-      title: `Intervyu: ${topic.slice(0, 45)}`,
-      category: 'Intervyu & Muloqot',
-      description: `${speaker1Name} va ${speaker2Name} o'rtasidagi 2 kishilik podkast intervyusi.`,
-      tags: ['Intervyu', 'MultiSpeaker', 'Dialog', 'NeuralStudio'],
+      title: `Dublyaj: ${topic.slice(0, 45)}`,
+      category: 'Intervyu & Dublyaj',
+      description: `${speaker1Name} va ${speaker2Name} ishtirokidagi 1:1 dublyaj / intervyu.`,
+      tags: ['Dublyaj', 'MultiSpeaker', '1:1', 'NeuralStudio'],
       script: fullScript,
       voiceName: `${speaker1Name} & ${speaker2Name}`,
       durationSeconds: totalDuration || 60,
@@ -1284,9 +2069,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
             turnIndex: i,
             startTime: st.startTime || 0,
             endTime: st.endTime || totalDuration,
-            cueType: mc?.cueType || (i === 0 ? 'intro' : i === synthesizedTurns.length - 1 ? 'outro' : 'silence'),
-            soundscape: mc?.soundscape || (mc?.cueType === 'silence' ? 'none' : ambientSound),
-            volumePercent: mc?.volumePercent ?? (mc?.cueType === 'silence' ? 0 : 20),
+            cueType: mc?.cueType || 'silence',
+            soundscape: mc?.soundscape || 'none',
+            volumePercent: mc?.volumePercent ?? 0,
             labelUz: mc?.labelUz || '',
             labelRu: mc?.labelRu || '',
           };
@@ -1300,7 +2085,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       const url = URL.createObjectURL(downloadBlob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `intervyu-dialog-${Date.now()}.wav`;
+      a.download = `uzbek-dubbing-audio-${Date.now()}.wav`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
@@ -1310,60 +2095,57 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Banner: Warm Paper & Glass Card */}
+      {/* Clean Header Banner (without duplicated speaker controls) */}
       <div className="border border-[rgba(22,21,17,0.14)] rounded-[22px] bg-[rgba(255,255,255,0.52)] backdrop-blur-md p-6 sm:p-7 relative overflow-hidden shadow-[0_30px_50px_-30px_rgba(22,21,17,0.15)]">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-5 relative z-10">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 relative z-10">
           <div>
-            <div className="flex flex-wrap items-center gap-2 mb-2.5">
+            <div className="flex flex-wrap items-center gap-2 mb-2">
               <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-[#0A5A62] border border-[rgba(14,124,134,0.35)] rounded-full px-3 py-1 bg-white/60 flex items-center gap-1.5">
                 <Users2 className="w-3.5 h-3.5 text-[#0E7C86]" />
-                {lang === 'uz' ? 'Multi-Speaker Studiyasi' : 'Мультиспикер Студия'}
+                {lang === 'uz' ? '2 Ovozli Intervyu & Dublyaj 1:1' : 'Студия Дубляжа 1:1 и Двухголосых Интервью'}
               </span>
               <span className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-[#C4552D] border border-[rgba(196,85,45,0.35)] rounded-full px-2.5 py-0.5 bg-[#C4552D]/5">
-                Dual-Voice Studio · Neural HD
+                Gemini 4 Hydrogen · Gemini 3.8 TTS
               </span>
             </div>
-            <h1 className="font-serif text-3xl sm:text-4xl text-[#161511] font-normal tracking-tight leading-tight">
+            <h1 className="font-serif text-2xl sm:text-3xl text-[#161511] font-normal tracking-tight leading-tight">
               {lang === 'uz' ? (
-                <>2 Boshlovchi va Mehmon <em>Dialogi</em></>
+                <>Aniq Taymkodli <em>Video Dublyaj 1:1</em> va Intervyu</>
               ) : (
-                <>Диалог 2-х Ведущих и <em>Экспертов</em></>
+                <>Точный <em>Дубляж Видео 1:1</em> по Раскадровке и Интервью</>
               )}
             </h1>
-            <p className="text-[#5D594E] text-sm mt-1.5 max-w-2xl leading-relaxed">
+            <p className="text-[#5D594E] text-xs sm:text-sm mt-1 max-w-3xl leading-relaxed">
               {lang === 'uz'
-                ? 'Oʻz ovozingizni (SHOKHRUKH) boshlovchi sifatida, ikkinchi taklif qilingan ovozni esa mehmon sifatida ulab, toʻliq ketma-ketlikda jonli dialog yarating.'
-                : 'Используйте свой голос как ведущего и выберите второй голос для гостя, создавая живой многоголосый диалог.'}
+                ? "Ruscha taymkodli raskadrovka va videoni (15 daqiqagacha) yuklang: 'Видеоряд:' ovozdan yashiriladi, 'Интонация:' hissiyotni boshqaradi, 'Без слов' musiqasi saqlanadi va 'Текст:' 1:1 o'zbekchaga o'giriladi."
+                : 'Загрузите видео до 15 мин и русскую раскадровку: «Видеоряд:» скрывается из речи, «Интонация:» настраивает эмоции голоса, вставки «Без слов» сохраняют музыку, а «Текст:» переводится 1:1 в секунды таймкода.'}
             </p>
-          </div>
-
-          {/* Speakers summary pill */}
-          <div className="flex items-center gap-2 bg-white/90 border border-[rgba(22,21,17,0.14)] p-2.5 rounded-2xl shadow-xs shrink-0">
-            <div className="px-3 py-1.5 bg-[#F4F1EA] rounded-xl border border-[rgba(22,21,17,0.1)] text-xs">
-              <span className="text-[10px] text-[#5D594E] block font-mono uppercase tracking-wider">1-Spiker (Siz):</span>
-              <span className="font-bold text-[#0A5A62] flex items-center gap-1">
-                {speaker1Profile?.name}
-                <CheckCircle2 className="w-3 h-3 text-[#0E7C86]" />
-              </span>
-            </div>
-            <span className="text-[#161511]/30 font-bold">&</span>
-            <div className="px-3 py-1.5 bg-[#FAF8F3] rounded-xl border border-[rgba(196,85,45,0.25)] text-xs">
-              <span className="text-[10px] text-[#5D594E] block font-mono uppercase tracking-wider">2-Spiker (Mehmon):</span>
-              <span className="font-bold text-[#C4552D]">{speaker2Profile?.name}</span>
-            </div>
           </div>
         </div>
       </div>
 
+      {dialogueNotice && (
+        <div className="px-4 py-3 rounded-xl bg-[rgba(14,124,134,0.08)] border border-[#0E7C86]/30 text-[#161511] text-xs font-medium flex items-center justify-between gap-3">
+          <span>{dialogueNotice}</span>
+          <button
+            type="button"
+            onClick={() => setDialogueNotice(null)}
+            className="text-[#5D594E] hover:text-[#161511] font-mono text-xs cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Main Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left: Speaker Configuration & Script Builder (8 cols) */}
+        {/* Left: Step 01, Step 02, Step 03 (8 cols) */}
         <div className="lg:col-span-8 space-y-6">
-          {/* STEP 1: Dialogue Topic & AI Script Generator + YouTube Dubbing + Document Upload */}
+          {/* STEP 01: Unified 3-Mode Source & Video Upload */}
           <div className="border border-[rgba(22,21,17,0.14)] rounded-[20px] bg-[rgba(255,255,255,0.52)] backdrop-blur-sm p-6 space-y-4 shadow-[0_30px_50px_-30px_rgba(22,21,17,0.15)]">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.14em] text-[#0A5A62] flex-1">
-                <span>01 — Dialog manbasi va ssenariy</span>
+                <span>01 — {lang === 'uz' ? 'Manba va Ish Rejimi' : 'Источник и Режим работы'}</span>
                 <span className="h-[1px] flex-1 bg-[rgba(22,21,17,0.14)] mr-3" />
               </div>
 
@@ -1374,46 +2156,262 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   className="btn-pill btn-ghost text-xs px-3.5 py-1.5 flex items-center gap-1.5 shrink-0"
                 >
                   <Upload className="w-3.5 h-3.5 text-[#0E7C86]" />
-                  <span>{lang === 'uz' ? 'PDF / Maqoladan' : 'Из PDF/Статьи'}</span>
+                  <span>{lang === 'uz' ? 'PDF / Hujjatdan' : 'Импорт из PDF / Файла'}</span>
                 </button>
               )}
             </div>
 
-            {/* Mode Switcher: AI Script Generator vs YouTube Dubbing (up to 1.5 hours) */}
-            <div className="flex items-center gap-2 border-b border-[rgba(22,21,17,0.1)] pb-3">
+            {/* Clean 3-Mode Switcher */}
+            <div className="flex flex-wrap items-center gap-2 border-b border-[rgba(22,21,17,0.1)] pb-3">
+              <button
+                type="button"
+                onClick={() => setStudioSourceMode('verbatim')}
+                className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                  studioSourceMode === 'verbatim'
+                    ? 'bg-[#0E7C86] text-white shadow-xs'
+                    : 'text-[#5D594E] hover:text-[#0E7C86] hover:bg-[#0E7C86]/10'
+                }`}
+              >
+                <Film className="w-3.5 h-3.5" />
+                <span>
+                  {lang === 'uz'
+                    ? '🎯 Aniq Dublyaj 1:1 (Raskadrovka + Video 15 daq)'
+                    : '🎯 Точный дубляж 1:1 (Раскадровка + Видео до 15 мин)'}
+                </span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => setStudioSourceMode('prompt')}
-                className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
                   studioSourceMode === 'prompt'
                     ? 'bg-[#161511] text-[#F4F1EA] shadow-xs'
                     : 'text-[#5D594E] hover:text-[#161511] hover:bg-black/5'
                 }`}
               >
                 <Sparkles className="w-3.5 h-3.5 text-[#5CC8CF]" />
-                <span>{lang === 'uz' ? 'Mavzu bo‘yicha ssenariy' : 'Сценарий по теме'}</span>
+                <span>
+                  {lang === 'uz'
+                    ? '✨ AI-Dialog Mavzu bo‘yicha (10 daqiqagacha)'
+                    : '✨ ИИ-Диалог по теме / PDF (до 10 мин)'}
+                </span>
               </button>
+
               <button
                 type="button"
                 onClick={() => setStudioSourceMode('youtube')}
-                className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
                   studioSourceMode === 'youtube'
                     ? 'bg-[#C4552D] text-white shadow-xs'
                     : 'text-[#5D594E] hover:text-[#C4552D] hover:bg-[#C4552D]/10'
                 }`}
               >
-                <Youtube className="w-3.5 h-3.5 text-white" />
-                <span>{lang === 'uz' ? 'YouTube Dublyaj (1.5 soatgacha)' : 'YouTube Дубляж (до 1.5 ч)'}</span>
+                <Subtitles className="w-3.5 h-3.5" />
+                <span>
+                  {lang === 'uz'
+                    ? '📝 Subtitrlar Importi (.SRT / .VTT / Matn)'
+                    : '📝 Импорт субтитров (.SRT / .VTT / Текст)'}
+                </span>
               </button>
             </div>
 
-            {studioSourceMode === 'youtube' ? (
-              /* YouTube Interview Import & Translation UI */
+            {studioSourceMode === 'verbatim' ? (
+              /* MODE 1: Verbatim 1:1 Storyboard + Video Upload up to 15 min */
+              <div className="space-y-4">
+                {/* Video Upload Card (up to 15 min / 600 MB) */}
+                <div className="p-4 rounded-2xl bg-white border border-[rgba(14,124,134,0.28)] space-y-3 shadow-2xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Video className="w-4 h-4 text-[#0E7C86]" />
+                      <span className="text-xs font-bold text-[#161511]">
+                        {lang === 'uz'
+                          ? '1. Original Videoni Yuklash (MP4 / WebM / MOV, 15 daqiqagacha / 600 MB):'
+                          : '1. Загрузите оригинал видео (MP4 / WebM / MOV, до 15 мин / 600 МБ):'}
+                      </span>
+                    </div>
+                    <label className="flex items-center gap-1.5 text-[11px] text-[#5D594E] cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={autoExtractFromVideo}
+                        onChange={(e) => setAutoExtractFromVideo(e.target.checked)}
+                        className="accent-[#0E7C86] rounded"
+                      />
+                      <span>
+                        {lang === 'uz'
+                          ? 'Videodan avtomatik raskadrovka olish (Gemini Files API)'
+                          : 'Авто-создать раскадровку из видео (если нет текста)'}
+                      </span>
+                    </label>
+                  </div>
+
+                  <input
+                    type="file"
+                    ref={videoInputRef}
+                    onChange={handleVideoFileUpload}
+                    accept="video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov"
+                    className="hidden"
+                  />
+
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 p-3.5 rounded-xl bg-[#FAF8F3] border border-dashed border-[rgba(22,21,17,0.2)]">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-9 h-9 rounded-xl bg-[#0E7C86]/10 text-[#0E7C86] flex items-center justify-center shrink-0">
+                        <Film className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-[#161511] truncate">
+                          {uploadedVideoFileName
+                            ? `${uploadedVideoFileName} (${uploadedVideoSizeMb} МБ)`
+                            : lang === 'uz'
+                            ? 'Video tanlanmagan (ixtiyoriy — MP4 eksport va sinxron pleyer uchun)'
+                            : 'Видео не выбрано (загрузите MP4 для синхронного плеера и склейки дубляжа)'}
+                        </p>
+                        <p className="text-[11px] text-[#5D594E]">
+                          {uploadedVideoFileId
+                            ? '✅ Загружено на сервер · Готово к сборке MP4 с узбекской дорожкой'
+                            : 'Поддерживаются ролики 3 мин, 10 мин, 15 мин (прямая потоковая загрузка без лимита 35 МБ)'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => videoInputRef.current?.click()}
+                      disabled={isUploadingVideo}
+                      className="btn-pill btn-solid text-xs py-2 px-4 flex items-center justify-center gap-1.5 shrink-0 bg-[#0E7C86] hover:bg-[#0A5A62] text-white border-none cursor-pointer"
+                    >
+                      <Upload className={`w-3.5 h-3.5 ${isUploadingVideo ? 'animate-bounce' : ''}`} />
+                      <span>
+                        {isUploadingVideo
+                          ? 'Загрузка видео...'
+                          : uploadedVideoFileName
+                          ? 'Заменить видео'
+                          : 'Выбрать видео (до 15 мин)'}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Per-User Saved Dubbing Projects History (Visible ONLY to the user who created them) */}
+                {userHistory.length > 0 && (
+                  <div className="p-3.5 rounded-2xl bg-[#FAF8F3] border border-[rgba(14,124,134,0.25)] space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-mono uppercase tracking-wider text-[#0A5A62] font-bold">
+                        📂 Ваша личная история дубляжа ({user?.email || 'ваш аккаунт'}):
+                      </span>
+                      <span className="text-[10.5px] text-[#5D594E]">
+                        Видна только на вашем аккаунте
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {userHistory.map((item) => (
+                        <div
+                          key={item.id}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border border-[rgba(22,21,17,0.14)] text-xs shadow-2xs"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => handleLoadHistoryItem(item)}
+                            className="font-semibold text-[#161511] hover:text-[#0E7C86] truncate max-w-[240px] cursor-pointer text-left"
+                            title={`Загрузить «${item.title}» (${item.turns.length} реплик)`}
+                          >
+                            {item.title} ({item.turns.length})
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteHistoryItem(item.id)}
+                            className="text-[#5D594E] hover:text-[#C4552D] px-1 cursor-pointer"
+                            title="Удалить из вашей истории"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Storyboard Textarea + 1:1 Parser Controls */}
+                <div className="p-4 rounded-2xl bg-white border border-[rgba(22,21,17,0.14)] space-y-3 shadow-2xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <span className="text-xs font-bold text-[#161511] block">
+                        {lang === 'uz'
+                          ? '2. Ruscha Taymkodli Raskadrovka (Видеоряд / Интонация / Текст):'
+                          : '2. Русская раскадровка с таймкодами (Видеоряд / Интонация / Текст):'}
+                      </span>
+                      <span className="text-[11px] text-[#5D594E]">
+                        Описания «Видеоряд:» не читаются вслух; «Интонация:» передаётся в эмоции голоса; «Без слов» оставляет паузу для музыки видео.
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      {(storyboardTextRu.trim().length > 0 || turns.length > 0) && (
+                        <button
+                          type="button"
+                          onClick={handleClearWorkspace}
+                          className="text-[11px] px-3 py-1.5 rounded-full bg-[#F4F1EA] hover:bg-[#C4552D]/10 text-[#5D594E] hover:text-[#C4552D] border border-[rgba(22,21,17,0.14)] font-semibold transition-all cursor-pointer flex items-center gap-1"
+                        >
+                          <Eraser className="w-3 h-3" />
+                          <span>Очистить</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handleLoadCarReviewPreset}
+                        className="text-[11px] px-3 py-1.5 rounded-full bg-[#0E7C86]/10 hover:bg-[#0E7C86]/20 text-[#0A5A62] border border-[#0E7C86]/30 font-semibold transition-all cursor-pointer"
+                      >
+                        📋 Вставить пример раскадровки (Тест-драйв 00:00–01:07)
+                      </button>
+                    </div>
+                  </div>
+
+                  <textarea
+                    rows={7}
+                    value={storyboardTextRu}
+                    onChange={(e) => setStoryboardTextRu(e.target.value)}
+                    placeholder={`Спикер 1 (Ж) — Девушка...\nСпикер 2 (М) — Мужчина...\n\n00:00 – 00:02 | Девушка (Ж):\nВидеоряд: ...\nИнтонация: С интересом, вопросительно.\nТекст: «Ну как она на ходу? Машина-то крупная».`}
+                    className="w-full bg-[#FAF8F3] border border-[rgba(22,21,17,0.14)] rounded-xl p-3.5 text-xs text-[#161511] font-mono leading-relaxed focus:outline-none focus:border-[#0E7C86] resize-y"
+                  />
+
+                  <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                    {/* Pre-launch Cost & Timeline Summary */}
+                    <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono text-[#5D594E]">
+                      <span className="px-2.5 py-1 rounded-lg bg-[#F4F1EA] border border-[rgba(22,21,17,0.1)] text-[#161511] font-semibold">
+                        🗣️ {turns.length} реплик
+                      </span>
+                      <span className="px-2.5 py-1 rounded-lg bg-[#F4F1EA] border border-[rgba(22,21,17,0.1)] text-[#0A5A62] font-semibold">
+                        🎵 {noSpeechIntervals.length} вставок «Без слов»
+                      </span>
+                      <span className="px-2.5 py-1 rounded-lg bg-[#0E7C86]/10 border border-[#0E7C86]/25 text-[#0A5A62] font-bold flex items-center gap-1">
+                        <DollarSign className="w-3 h-3" /> ~${(Number(typeof estimatedCostUsd === 'object' ? (estimatedCostUsd as any)?.totalUsd : estimatedCostUsd) || 0.03).toFixed(3)} за весь ролик
+                      </span>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleParseVerbatimStoryboard}
+                      disabled={isParsingStoryboard || !storyboardTextRu.trim()}
+                      className="btn-pill btn-solid text-xs py-2.5 px-5 flex items-center gap-2 bg-[#161511] hover:bg-[#0A5A62] text-white cursor-pointer shadow-xs"
+                    >
+                      <Wand2 className={`w-3.5 h-3.5 text-[#5CC8CF] ${isParsingStoryboard ? 'animate-spin' : ''}`} />
+                      <span>
+                        {isParsingStoryboard
+                          ? 'Разбор и точный перевод 1:1...'
+                          : '🎯 Разобрать и перевести 1:1 (Без отсебятины)'}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : studioSourceMode === 'youtube' ? (
+              /* MODE 3: Subtitle Import (.SRT / .VTT / Text) */
               <div className="p-4 bg-white border border-[rgba(196,85,45,0.25)] rounded-xl space-y-3.5 shadow-2xs">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-[#161511] flex items-center gap-1.5">
-                    <Youtube className="w-4 h-4 text-[#C4552D]" />
-                    {lang === 'uz' ? 'YouTube Video Havolasi (1.5 soatgacha):' : 'Ссылка на YouTube видео (до 1.5 часов):'}
+                    <Subtitles className="w-4 h-4 text-[#C4552D]" />
+                    {lang === 'uz'
+                      ? 'Subtitrlar (.SRT / .VTT) yoki YouTube Transkript:'
+                      : 'Импорт субтитров (.SRT / .VTT / Текст) или ссылки:'}
                   </span>
                   <div className="flex items-center gap-1.5 text-xs">
                     <span className="text-[10px] uppercase font-mono text-[#5D594E]">
@@ -1444,6 +2442,17 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   </div>
                 </div>
 
+                <textarea
+                  rows={4}
+                  value={manualTranscriptText}
+                  onChange={(e) => {
+                    setManualTranscriptText(e.target.value);
+                    if (youtubeImportError) setYoutubeImportError(null);
+                  }}
+                  placeholder="Вставьте сюда .SRT / .VTT субтитры или текст диалога с таймкодами..."
+                  className="w-full bg-[#FAF8F3] border border-[rgba(22,21,17,0.14)] rounded-xl p-3 text-xs text-[#161511] placeholder:text-[#5D594E]/60 focus:outline-none focus:border-[#C4552D] leading-relaxed resize-y font-sans"
+                />
+
                 <div className="flex flex-col sm:flex-row gap-2">
                   <input
                     type="url"
@@ -1452,142 +2461,68 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                       setYoutubeImportUrl(e.target.value);
                       if (youtubeImportError) setYoutubeImportError(null);
                     }}
-                    placeholder="https://www.youtube.com/watch?v=... yoki youtu.be/..."
-                    className="flex-1 bg-[#FAF8F3] border border-[rgba(22,21,17,0.14)] rounded-xl px-4 py-2.5 text-xs sm:text-sm text-[#161511] placeholder:text-[#5D594E]/60 focus:outline-none focus:border-[#C4552D]"
+                    placeholder="Необязательно: ссылка на видео (если открыты публичные субтитры)..."
+                    className="flex-1 bg-[#FAF8F3] border border-[rgba(22,21,17,0.14)] rounded-xl px-4 py-2 text-xs text-[#161511] placeholder:text-[#5D594E]/60 focus:outline-none focus:border-[#C4552D]"
                   />
                   <button
                     onClick={handleImportYouTubeInterview}
                     disabled={isImportingYoutube || (!youtubeImportUrl.trim() && !manualTranscriptText.trim())}
-                    className="btn-pill btn-solid text-xs py-2.5 px-4 flex items-center justify-center gap-1.5 shrink-0 bg-[#C4552D] hover:bg-[#A9431E] border-none text-white cursor-pointer"
+                    className="btn-pill btn-solid text-xs py-2 px-4 flex items-center justify-center gap-1.5 shrink-0 bg-[#C4552D] hover:bg-[#A9431E] border-none text-white cursor-pointer"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${isImportingYoutube ? 'animate-spin' : ''}`} />
                     <span>
-                      {isImportingYoutube
-                        ? (lang === 'uz' ? 'Tahlil qilinmoqda...' : 'Обработка...')
-                        : (lang === 'uz' ? 'Yuklash & Tarjima Qilish' : 'Импорт и перевод')}
+                      {isImportingYoutube ? 'Обработка...' : 'Импортировать и перевести'}
                     </span>
                   </button>
                 </div>
 
-                {/* Error Banner (Visible in UI instead of suppressed alert) */}
                 {youtubeImportError && (
-                  <div className="p-3.5 bg-[#FEF2F2] border border-[#FCA5A5] rounded-xl text-xs text-[#991B1B] space-y-2">
-                    <div className="flex items-start gap-2 font-semibold">
-                      <AlertCircle className="w-4 h-4 text-[#DC2626] shrink-0 mt-0.5" />
-                      <span>{youtubeImportError}</span>
-                    </div>
-                    <p className="text-[11px] text-[#B91C1C] pl-6">
-                      {lang === 'uz'
-                        ? "Agar video YouTube'da o'chirilgan yoki maxfiy bo'lsa, quyidagi matn maydoniga intervyu matni, tezislari yoki subtitrlarini nusxalab qo'ying — tizim uni 2 ovozli to'liq intervyuga aylantirib beradi!"
-                        : "Если видео закрыто или удалено на YouTube, скопируйте текст, субтитры или тезисы в поле ниже — AI озвучит их двумя голосами!"}
-                    </p>
+                  <div className="p-3 bg-[#FEF2F2] border border-[#FCA5A5] rounded-xl text-xs text-[#991B1B] flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 text-[#DC2626] shrink-0" />
+                    <span>{youtubeImportError}</span>
                   </div>
                 )}
 
-                {/* Success Notice Banner */}
                 {youtubeImportNotice && (
-                  <div className="p-3.5 bg-[rgba(14,124,134,0.08)] border border-[rgba(14,124,134,0.25)] rounded-xl text-xs text-[#0A5A62] leading-relaxed flex items-center gap-2">
+                  <div className="p-3 bg-[rgba(14,124,134,0.08)] border border-[rgba(14,124,134,0.25)] rounded-xl text-xs text-[#0A5A62] flex items-center gap-2">
                     <CheckCircle2 className="w-4 h-4 text-[#0E7C86] shrink-0" />
                     <span>{youtubeImportNotice}</span>
                   </div>
                 )}
-
-                {/* Manual Text Fallback Toggle & Textarea */}
-                <div className="pt-1 border-t border-[rgba(22,21,17,0.08)]">
-                  <div className="flex items-center justify-between">
-                    <button
-                      type="button"
-                      onClick={() => setShowManualTranscriptInput(!showManualTranscriptInput)}
-                      className="text-xs text-[#0E7C86] hover:underline flex items-center gap-1.5 font-medium cursor-pointer"
-                    >
-                      <FileText className="w-3.5 h-3.5" />
-                      <span>
-                        {lang === 'uz'
-                          ? (showManualTranscriptInput ? "▲ Matn maydonini yashirish" : "▼ Matn / transkriptni qo'lda kiritish (Nusxalash)")
-                          : (showManualTranscriptInput ? "▲ Скрыть поле ввода текста" : "▼ Вставить текст / субтитры вручную (если видео закрыто)")}
-                      </span>
-                    </button>
-                    {manualTranscriptText.trim() && (
-                      <span className="text-[10px] font-mono text-[#5D594E]">
-                        {manualTranscriptText.trim().split(/\s+/).length} {lang === 'uz' ? "so'z" : 'слов'}
-                      </span>
-                    )}
-                  </div>
-
-                  {showManualTranscriptInput && (
-                    <div className="mt-2.5 space-y-2">
-                      <textarea
-                        rows={4}
-                        value={manualTranscriptText}
-                        onChange={(e) => {
-                          setManualTranscriptText(e.target.value);
-                          if (youtubeImportError) setYoutubeImportError(null);
-                        }}
-                        placeholder={
-                          lang === 'uz'
-                            ? "Videodan nusxalangan subtitrlar, maqola yoki intervyu matnini bu yerga tashlang...\nAI uni avtomatik ravishda 2 kishilik dialogga ajratadi, Toshkent o'zbekchasiga o'giradi va jonli vokal teglari bilan to'ldiradi."
-                            : "Вставьте сюда текст субтитров, статью или тезисы...\nAI автоматически распределит реплики между ведущим и гостем, переведет и озвучит двумя голосами."
-                        }
-                        className="w-full bg-[#FAF8F3] border border-[rgba(22,21,17,0.14)] rounded-xl p-3 text-xs text-[#161511] placeholder:text-[#5D594E]/60 focus:outline-none focus:border-[#C4552D] leading-relaxed resize-y font-sans"
-                      />
-                      <div className="flex justify-end">
-                        <button
-                          type="button"
-                          onClick={handleImportYouTubeInterview}
-                          disabled={isImportingYoutube || !manualTranscriptText.trim()}
-                          className="btn-pill btn-solid text-xs py-2 px-4 flex items-center gap-1.5 bg-[#0E7C86] hover:bg-[#0A5A62] text-white border-none cursor-pointer"
-                        >
-                          <Sparkles className="w-3.5 h-3.5 text-[#5CC8CF]" />
-                          <span>
-                            {lang === 'uz' ? "Ushbu matndan 2 ovozli intervyu yaratish" : "Сгенерировать диалог из этого текста"}
-                          </span>
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <div className="text-[11px] text-[#5D594E] flex items-center gap-2">
-                  <span className="font-mono text-[#C4552D] font-bold">INFO:</span>
-                  <span>
-                    {lang === 'uz'
-                      ? "Avtomatik subtitrlar orqali ikki kishilik intervyu ajratiladi, o'zbek/rus tiliga tarjima qilinadi va jonli vokal teglari (<breath>, <laugh>, |ha|, |mhm|) kiritiladi."
-                      : 'Субтитры автоматически разбиваются на 2 спикера, переводятся на узбекский/русский и снабжаются живыми вокальными тегами (<breath>, <laugh>, |ha|, |mhm|).'}
-                  </span>
-                </div>
               </div>
             ) : (
-              /* Topic Duration Selector & Timing Info */
+              /* MODE 2: AI Topic Dialogue Generator (strictly capped up to 10 minutes) */
               <div className="space-y-4">
                 <div className="p-3.5 bg-white border border-[rgba(22,21,17,0.14)] rounded-xl space-y-2.5 shadow-xs">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-semibold text-[#161511] flex items-center gap-1.5">
                       <Clock className="w-3.5 h-3.5 text-[#0E7C86]" />
-                      {lang === 'uz' ? 'Intervyu Davomiyligi:' : 'Длительность интервью:'}
+                      {lang === 'uz'
+                        ? 'AI Intervyu Davomiyligi (10 daqiqagacha):'
+                        : 'Длительность ИИ-интервью (до 10 минут):'}
                     </span>
                     <span className="text-[11px] font-mono text-[#5D594E]">
-                      {turns.length} {lang === 'uz' ? 'replika' : 'реплик'} · ~{Math.max(1, Math.round(turns.reduce((acc, t) => acc + t.text.trim().split(/\s+/).filter(Boolean).length, 0) / 125))} {lang === 'uz' ? 'daqiqa' : 'мин'}
+                      {turns.length} {lang === 'uz' ? 'replika' : 'реплик'}
                     </span>
                   </div>
-                  <div className="flex flex-wrap gap-1.5">
+                  <div className="flex flex-wrap gap-2">
                     {[
-                      { id: '15 daqiqa', label: '15 daq', desc: '18 ta replika' },
-                      { id: '30 daqiqa', label: '30 daqiqa', desc: '26 ta replika' },
-                      { id: '45 daqiqa', label: '45 daqiqa', desc: '36 ta replika' },
-                      { id: '60 daqiqa (1 soat)', label: '60 daqiqa (1 soat)', desc: 'Katta intervyu' },
-                      { id: '90 daqiqa (1.5 soat)', label: '90 daqiqa (1.5 soat)', desc: 'Katta intervyu-shou' },
+                      { id: '1 daqiqa', label: lang === 'uz' ? '1 daqiqa' : '1 минута' },
+                      { id: '3 daqiqa', label: lang === 'uz' ? '3 daqiqa' : '3 минуты' },
+                      { id: '5 daqiqa', label: lang === 'uz' ? '5 daqiqa' : '5 минут' },
+                      { id: '10 daqiqa', label: lang === 'uz' ? '10 daqiqa' : '10 минут' },
                     ].map((d) => (
                       <button
                         key={d.id}
                         type="button"
                         onClick={() => setTargetDuration(d.id)}
-                        className={`btn-pill text-xs py-1.5 px-3.5 transition-all cursor-pointer ${
+                        className={`btn-pill text-xs py-1.5 px-4 transition-all cursor-pointer ${
                           targetDuration === d.id
                             ? 'bg-[#161511] text-[#F4F1EA] font-semibold border-[#161511]'
                             : 'bg-transparent border-[rgba(22,21,17,0.14)] text-[#5D594E] hover:border-[#161511] hover:text-[#161511]'
                         }`}
                       >
-                        <div>{d.label}</div>
+                        {d.label}
                       </button>
                     ))}
                     {!isGeneratingScript && !isExpandingDialogue && (
@@ -1605,7 +2540,11 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                     type="text"
                     value={topic}
                     onChange={(e) => setTopic(e.target.value)}
-                    placeholder={lang === 'uz' ? "Intervyu mavzusi (masalan: Sun'iy intellekt kelajagi va O'zbekiston)..." : "Тема интервью..."}
+                    placeholder={
+                      lang === 'uz'
+                        ? "Intervyu mavzusi (masalan: Sun'iy intellekt kelajagi va O'zbekiston)..."
+                        : 'Тема интервью...'
+                    }
                     className="flex-1 bg-white border border-[rgba(22,21,17,0.14)] rounded-xl px-4 py-2.5 text-xs sm:text-sm text-[#161511] placeholder:text-[#5D594E]/60 focus:outline-none focus:border-[#0E7C86]"
                   />
                   <button
@@ -1615,74 +2554,55 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   >
                     <Sparkles className={`w-3.5 h-3.5 text-[#5CC8CF] ${isGeneratingScript ? 'animate-spin' : ''}`} />
                     {isGeneratingScript ? (
-                      <>
-                        <span>{lang === 'uz' ? `Yozilmoqda: ~${interviewScriptCountdown.formattedRemaining}` : `Генерация: ~${interviewScriptCountdown.formattedRemaining}`}</span>
-                        <span className="font-mono text-[10px] bg-white/20 px-1.5 py-0.5 rounded-full">{interviewScriptCountdown.progressPercent}%</span>
-                      </>
+                      <span>{`Генерация: ~${interviewScriptCountdown.formattedRemaining}`}</span>
                     ) : (
-                      lang === 'uz' ? `AI Intervyu Matni (${targetDuration})` : `AI Диалог (${targetDuration})`
-                    )}
-                  </button>
-                  <button
-                    onClick={handleExpandInterview}
-                    disabled={isExpandingDialogue || turns.length === 0}
-                    className="btn-pill btn-ghost text-xs py-2.5 px-3.5 flex items-center justify-center gap-1.5 shrink-0 text-[#C4552D] border-[rgba(196,85,45,0.4)]"
-                    title="Suhbatni yana 15 daqiqaga kengaytirish"
-                  >
-                    <Sparkles className={`w-3.5 h-3.5 ${isExpandingDialogue ? 'animate-spin' : ''}`} />
-                    {isExpandingDialogue ? (
-                      <>
-                        <span>{lang === 'uz' ? `+15 daq: ~${interviewScriptCountdown.formattedRemaining}` : `+15 мин: ~${interviewScriptCountdown.formattedRemaining}`}</span>
-                        <span className="font-mono text-[10px] bg-white/20 px-1.5 py-0.5 rounded-full">{interviewScriptCountdown.progressPercent}%</span>
-                      </>
-                    ) : (
-                      lang === 'uz' ? '+15 daq' : '+15 мин'
+                      `Создать ИИ-Диалог (${targetDuration})`
                     )}
                   </button>
                 </div>
               </div>
             )}
 
-            {/* Live Countdown HUD when generating script */}
             {(isGeneratingScript || isExpandingDialogue) && (
               <div className="pt-2">
                 <GenerationCountdownHUD
                   countdown={interviewScriptCountdown}
                   isActive={isGeneratingScript || isExpandingDialogue}
                   lang={lang}
-                  title={
-                    isExpandingDialogue
-                      ? (lang === 'uz' ? "Intervyu yangi replikalar bilan kengaytirilmoqda" : "Расширение интервью новыми репликами")
-                      : (lang === 'uz' ? "2 Kishilik Intervyu Ssenariysi Yaratilmoqda" : "Создание сценария интервью")
-                  }
-                  subtitle={lang === 'uz' ? interviewScriptCountdown.phaseNameUz : interviewScriptCountdown.phaseNameRu}
+                  title="Создание сценария интервью"
+                  subtitle={interviewScriptCountdown.phaseNameRu}
                 />
               </div>
             )}
           </div>
 
-          {/* STEP 2: Speakers Selector Card */}
+          {/* STEP 02: Speakers Selector Card (Single Source of Truth, Cloned Voice allowed on ANY speaker) */}
           <div className="border border-[rgba(22,21,17,0.14)] rounded-[20px] bg-[rgba(255,255,255,0.52)] backdrop-blur-sm p-6 space-y-4 shadow-[0_30px_50px_-30px_rgba(22,21,17,0.15)]">
-            <div className="flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.14em] text-[#0A5A62]">
-              <span>02 — Ishtirokchilar va ularning ovozlari</span>
-              <span className="h-[1px] flex-1 bg-[rgba(22,21,17,0.14)]" />
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.14em] text-[#0A5A62] flex-1">
+                <span>02 — {lang === 'uz' ? 'Ishtirokchilar va Ovozlar' : 'Участники и Голоса (Единая настройка)'}</span>
+                <span className="h-[1px] flex-1 bg-[rgba(22,21,17,0.14)] mr-3" />
+              </div>
+              <span className="text-[11px] font-mono text-[#0E7C86]">
+                {2 + extraSpeakers.length} {lang === 'uz' ? 'spiker' : 'спикера'}
+              </span>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {/* Speaker 1 (Host - User's Voice) */}
+              {/* Speaker 1 */}
               <div className="p-4 rounded-2xl bg-white border border-[rgba(22,21,17,0.14)] space-y-3 shadow-xs">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold text-[#0A5A62] flex items-center gap-1.5">
-                    <User className="w-3.5 h-3.5" /> 1-Boshlovchi (Oʻzingiz)
+                    <User className="w-3.5 h-3.5" /> Спикер 1 (HOST_1)
                   </span>
                   <span className="text-[10px] font-mono text-[#0E7C86] border border-[#0E7C86]/30 px-2 py-0.5 rounded-full bg-[#0E7C86]/5">
-                    Haqiqiy Klon Ovoz
+                    {speaker1Profile?.gender === 'female' || speaker1Profile?.baseVoice === 'Kore' ? '♀ Женский' : '♂ Мужской'}
                   </span>
                 </div>
 
                 <div>
                   <label className="text-[10px] uppercase font-mono text-[#5D594E] block mb-1">
-                    {lang === 'uz' ? 'Spiker Ismi:' : 'Имя спикера:'}
+                    Имя спикера в раскадровке:
                   </label>
                   <input
                     type="text"
@@ -1695,30 +2615,29 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                       );
                     }}
                     className="w-full bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-1.5 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86]"
-                    placeholder="Masalan: Shokhrukh"
+                    placeholder="Девушка (Ж)"
                   />
                 </div>
 
                 <div>
                   <div className="flex items-center justify-between mb-1">
                     <label className="text-[10px] uppercase font-mono text-[#5D594E]">
-                      {lang === 'uz' ? 'Tanlangan Ovoz:' : 'Выбранный голос:'}
+                      Голос Спикера 1:
                     </label>
                     <button
                       type="button"
                       onClick={() => handleTestSpeakerVoice('host1')}
-                      className="text-[11px] text-[#0E7C86] hover:underline flex items-center gap-1 cursor-pointer transition-colors"
-                      title={lang === 'uz' ? 'Ovoz namunasini tinglash (0s kutish, tekin)' : 'Прослушать голос'}
+                      className="text-[11px] text-[#0E7C86] hover:underline flex items-center gap-1 cursor-pointer"
                     >
                       {previewingSpeaker === 'host1' ? (
                         <>
                           <Pause className="w-3 h-3 animate-spin" />
-                          <span>{lang === 'uz' ? "To'xtatish" : 'Стоп'}</span>
+                          <span>Стоп</span>
                         </>
                       ) : (
                         <>
                           <Play className="w-3 h-3 fill-current" />
-                          <span>{lang === 'uz' ? 'Namuna (0s)' : 'Прослушать'}</span>
+                          <span>Прослушать</span>
                         </>
                       )}
                     </button>
@@ -1728,21 +2647,26 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                     onChange={(e) => handleSelectSpeaker1Voice(e.target.value)}
                     className="w-full bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-1.5 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86] cursor-pointer"
                   >
-                    {voices.map((v) => (
-                      <option key={v.id} value={v.id}>
-                        {v.name} {v.isReplicatedVoice || v.id.includes('17raj9') ? '★ (Ovoz Nusxam)' : ''}
-                      </option>
-                    ))}
+                    {voices.map((v) => {
+                      const isFem =
+                        v.gender === 'female' ||
+                        ['Kore', 'Aoede', 'Zephyr'].includes(v.baseVoice);
+                      return (
+                        <option key={v.id} value={v.id}>
+                          {isFem ? '♀ ' : '♂ '}
+                          {v.name} {v.isReplicatedVoice || v.id.includes('17raj9') ? '★ (Ваш Клон Голоса)' : ''}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
 
-                {/* Speaker 1 Tempo */}
                 <div>
-                  <label className="text-[10px] uppercase font-mono text-[#5D594E] block mb-1.5">
-                    {lang === 'uz' ? 'Nutq Tempi (Tezligi):' : 'Темп речи:'}
+                  <label className="text-[10px] uppercase font-mono text-[#5D594E] block mb-1">
+                    Базовый темп:
                   </label>
                   <div className="grid grid-cols-4 gap-1">
-                    {['0.85x', '1.0x', '1.1x', '1.2x'].map((tVal) => (
+                    {['0.85x', '1.0x', '1.1x', '1.15x'].map((tVal) => (
                       <button
                         key={tVal}
                         type="button"
@@ -1760,11 +2684,11 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 </div>
               </div>
 
-              {/* Speaker 2 (Guest / Expert) */}
+              {/* Speaker 2 (Now supports selecting Shohrux's Cloned Voice!) */}
               <div className="p-4 rounded-2xl bg-white border border-[rgba(196,85,45,0.3)] space-y-3 shadow-xs">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold text-[#C4552D] flex items-center gap-1.5">
-                    <Bot className="w-3.5 h-3.5" /> {lang === 'uz' ? '2-Mehmon / Ekspert' : '2-Гость / Эксперт'}
+                    <Bot className="w-3.5 h-3.5" /> Спикер 2 (HOST_2)
                   </span>
                   <div className="flex items-center gap-1 bg-[#F4F1EA] p-0.5 rounded-lg border border-[rgba(22,21,17,0.1)]">
                     <button
@@ -1776,7 +2700,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           : 'text-[#5D594E] hover:text-[#161511]'
                       }`}
                     >
-                      {lang === 'uz' ? 'Barchasi' : 'Все'}
+                      Все
                     </button>
                     <button
                       type="button"
@@ -1787,7 +2711,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           : 'text-[#5D594E] hover:text-[#161511]'
                       }`}
                     >
-                      {lang === 'uz' ? 'Ayollar' : 'Женские'}
+                      Жен
                     </button>
                     <button
                       type="button"
@@ -1798,65 +2722,49 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           : 'text-[#5D594E] hover:text-[#161511]'
                       }`}
                     >
-                      {lang === 'uz' ? 'Erkaklar' : 'Мужские'}
+                      Муж
                     </button>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="text-[10px] uppercase font-mono text-[#5D594E] block mb-1">
-                      {lang === 'uz' ? 'Ismi:' : 'Имя:'}
-                    </label>
-                    <input
-                      type="text"
-                      value={speaker2Name}
-                      onChange={(e) => {
-                        const newName = e.target.value;
-                        setSpeaker2Name(newName);
-                        setTurns((prev) =>
-                          prev.map((t) => (t.speakerId === 'HOST_2' ? { ...t, speakerName: newName } : t))
-                        );
-                      }}
-                      className="w-full bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-xl px-2.5 py-1.5 text-xs text-[#161511] focus:outline-none focus:border-[#C4552D]"
-                      placeholder="Aziza"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase font-mono text-[#5D594E] block mb-1">
-                      {lang === 'uz' ? 'Roli / Kasbi:' : 'Роль / Профессия:'}
-                    </label>
-                    <input
-                      type="text"
-                      value={speaker2Role}
-                      onChange={(e) => setSpeaker2Role(e.target.value)}
-                      className="w-full bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-xl px-2.5 py-1.5 text-xs text-[#161511] focus:outline-none focus:border-[#C4552D]"
-                      placeholder="AI & Fan Eksperti"
-                    />
-                  </div>
+                <div>
+                  <label className="text-[10px] uppercase font-mono text-[#5D594E] block mb-1">
+                    Имя спикера в раскадровке:
+                  </label>
+                  <input
+                    type="text"
+                    value={speaker2Name}
+                    onChange={(e) => {
+                      const newName = e.target.value;
+                      setSpeaker2Name(newName);
+                      setTurns((prev) =>
+                        prev.map((t) => (t.speakerId === 'HOST_2' ? { ...t, speakerName: newName } : t))
+                      );
+                    }}
+                    className="w-full bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-1.5 text-xs text-[#161511] focus:outline-none focus:border-[#C4552D]"
+                    placeholder="Мужчина (М)"
+                  />
                 </div>
 
-                {/* Speaker 2 Voice Select & Preview Button */}
                 <div>
                   <div className="flex items-center justify-between mb-1">
                     <label className="text-[10px] uppercase font-mono text-[#5D594E]">
-                      {lang === 'uz' ? "Mehmon Ovozi (O'zbekcha):" : 'Голос гостя:'}
+                      Голос Спикера 2 (Доступен ваш Клон Голоса):
                     </label>
                     <button
                       type="button"
                       onClick={() => handleTestSpeakerVoice('host2')}
-                      className="text-[11px] text-[#FACC15] hover:underline flex items-center gap-1 cursor-pointer transition-colors"
-                      title={lang === 'uz' ? 'Ovoz namunasini tinglash (0s kutish, tekin)' : 'Прослушать голос (встроено)'}
+                      className="text-[11px] text-[#C4552D] hover:underline flex items-center gap-1 cursor-pointer"
                     >
                       {previewingSpeaker === 'host2' ? (
                         <>
                           <Pause className="w-3 h-3 animate-spin" />
-                          <span>{lang === 'uz' ? "To'xtatish" : 'Стоп'}</span>
+                          <span>Стоп</span>
                         </>
                       ) : (
                         <>
                           <Play className="w-3 h-3 fill-current" />
-                          <span>{lang === 'uz' ? 'Namuna (0s)' : 'Прослушать'}</span>
+                          <span>Прослушать</span>
                         </>
                       )}
                     </button>
@@ -1868,16 +2776,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   >
                     {voices
                       .filter((v) => {
-                        // Exclude the user's custom replicated voice from being selected as the second guest speaker
-                        if (v.isReplicatedVoice || v.id.includes('17raj9')) return false;
                         const isFemale =
                           v.gender === 'female' ||
-                          ['Kore', 'Aoede', 'Zephyr'].includes(v.baseVoice) ||
-                          /aziza|madina|dilnoza|zarina|nodira|malika|sevara|shahnoza|rayhon|gulzoda|umida|nigora|feruza|ayol/i.test(v.name || v.id);
-                        const isMale =
-                          v.gender === 'male' ||
-                          ['Charon', 'Puck', 'Fenrir'].includes(v.baseVoice) ||
-                          /jasur|otabek|ulugbek|farrux|bobur|javohir|sanjar|sherzod|eldor|bekzod|alisher|rustam|erkak/i.test(v.name || v.id);
+                          ['Kore', 'Aoede', 'Zephyr'].includes(v.baseVoice);
+                        const isMale = !isFemale;
                         if (speaker2GenderFilter === 'female') return isFemale;
                         if (speaker2GenderFilter === 'male') return isMale;
                         return true;
@@ -1885,243 +2787,229 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                       .map((v) => {
                         const isFemale =
                           v.gender === 'female' ||
-                          ['Kore', 'Aoede', 'Zephyr'].includes(v.baseVoice) ||
-                          /aziza|madina|dilnoza|zarina|nodira|malika|sevara|shahnoza|rayhon|gulzoda|umida|nigora|feruza|ayol/i.test(v.name || v.id);
+                          ['Kore', 'Aoede', 'Zephyr'].includes(v.baseVoice);
                         return (
                           <option key={v.id} value={v.id}>
                             {isFemale ? '♀ ' : '♂ '}
-                            {v.name}
+                            {v.name} {v.isReplicatedVoice || v.id.includes('17raj9') ? '★ (Ваш Клон Голоса)' : ''}
                           </option>
                         );
                       })}
                   </select>
                 </div>
 
-                {/* Speaker 2 Tempo & Timbre Controls */}
-                <div className="grid grid-cols-2 gap-2 pt-1 border-t border-[rgba(22,21,17,0.08)]">
-                  <div>
-                    <label className="text-[10px] uppercase font-mono text-[#5D594E] block mb-1">
-                      {lang === 'uz' ? 'Tempi (Tezlik):' : 'Темп речи:'}
-                    </label>
-                    <div className="grid grid-cols-4 gap-1">
-                      {['0.85x', '1.0x', '1.1x', '1.2x'].map((tVal) => (
-                        <button
-                          key={tVal}
-                          type="button"
-                          onClick={() => setSpeaker2Tempo(tVal)}
-                          className={`py-1 text-[10px] rounded-lg font-mono transition-all text-center cursor-pointer ${
-                            speaker2Tempo === tVal
-                              ? 'bg-[#161511] text-[#F4F1EA] font-bold'
-                              : 'bg-[#F4F1EA]/60 text-[#5D594E] hover:text-[#161511] border border-[rgba(22,21,17,0.1)]'
-                          }`}
-                        >
-                          {tVal}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="text-[10px] uppercase font-mono text-[#5D594E] block mb-1">
-                      {lang === 'uz' ? 'Tembr & Ohang:' : 'Тембр / Интонация:'}
-                    </label>
-                    <select
-                      value={speaker2Timbre}
-                      onChange={(e) => setSpeaker2Timbre(e.target.value)}
-                      className="w-full bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-lg px-2 py-1 text-[11px] text-[#161511] focus:outline-none focus:border-[#C4552D] cursor-pointer"
-                    >
-                      <option value="Mayin & Intellektual">Mayin & Intellektual (Aziza)</option>
-                      <option value="Yorqin & Jurnalistik">Yorqin & Jurnalistik (Madina)</option>
-                      <option value="Tinchlantiruvchi & Psixologik">Tinchlantiruvchi & Mehrli (Dilnoza)</option>
-                      <option value="Nafis & Badiiy Adabiyot">Nafis & Adabiy (Zarina)</option>
-                      <option value="Salobatli & Ishbilarmon">Salobatli & Rasmiy (Jasur)</option>
-                      <option value="Quvnoq & Hazilomuz">Quvnoq & Dinamik (Otabek)</option>
-                      <option value="Epik & Tarixiy Vazmin">Epik & Vazmin (Ulug'bek)</option>
-                    </select>
+                <div>
+                  <label className="text-[10px] uppercase font-mono text-[#5D594E] block mb-1">
+                    Базовый темп:
+                  </label>
+                  <div className="grid grid-cols-4 gap-1">
+                    {['0.85x', '1.0x', '1.1x', '1.15x'].map((tVal) => (
+                      <button
+                        key={tVal}
+                        type="button"
+                        onClick={() => setSpeaker2Tempo(tVal)}
+                        className={`py-1 px-1.5 text-[11px] rounded-lg font-mono transition-all text-center cursor-pointer ${
+                          speaker2Tempo === tVal
+                            ? 'bg-[#161511] text-[#F4F1EA] font-bold'
+                            : 'bg-[#F4F1EA]/60 text-[#5D594E] hover:text-[#161511] border border-[rgba(22,21,17,0.1)]'
+                        }`}
+                      >
+                        {tVal}
+                      </button>
+                    ))}
                   </div>
                 </div>
               </div>
             </div>
+
+            {/* Extra Speakers (HOST_3+) when detected in storyboard */}
+            {extraSpeakers.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-[rgba(22,21,17,0.1)]">
+                {extraSpeakers.map((sp, idx) => (
+                  <div key={sp.speakerId} className="p-3 rounded-xl bg-white border border-[rgba(22,21,17,0.14)] flex items-center justify-between gap-2 text-xs">
+                    <div>
+                      <span className="font-mono text-[10px] text-[#0E7C86] uppercase block">{sp.speakerId}</span>
+                      <span className="font-bold text-[#161511]">{sp.name}</span>
+                    </div>
+                    <select
+                      value={sp.voiceId}
+                      onChange={(e) => {
+                        const chosen = voices.find((v) => v.id === e.target.value);
+                        setExtraSpeakers((prev) =>
+                          prev.map((item, i) =>
+                            i === idx
+                              ? { ...item, voiceId: e.target.value, baseVoice: chosen?.baseVoice || item.baseVoice }
+                              : item
+                          )
+                        );
+                      }}
+                      className="bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] rounded-lg px-2.5 py-1 text-xs"
+                    >
+                      {voices.map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {v.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
-          {/* STEP 3: Dialogue Turns & AI Sound Director */}
+          {/* STEP 03: Synchronized Video Player & 1:1 Timecode Turn Table */}
           <div className="border border-[rgba(22,21,17,0.14)] rounded-[20px] bg-[rgba(255,255,255,0.52)] backdrop-blur-sm p-6 space-y-4 shadow-[0_30px_50px_-30px_rgba(22,21,17,0.15)]">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.14em] text-[#0A5A62] flex-1">
-                <span>03 — Suhbat replikalari va ovoz rejissyori</span>
+                <span>03 — {lang === 'uz' ? 'Taymkodlar Jadvali va Video Sinxronizatsiya' : 'Таблица реплик 1:1 по таймкодам и видеоплеер'}</span>
                 <span className="h-[1px] flex-1 bg-[rgba(22,21,17,0.14)] mr-3" />
               </div>
               <span className="text-xs font-mono text-[#5D594E]">
-                {turns.length} {lang === 'uz' ? 'ta replika' : 'реплик'}
+                {turns.length} реплик · {noSpeechIntervals.length} вставок «Без слов»
               </span>
             </div>
 
-            {/* YouTube Dubbing Video Player Card (when YouTube video is imported) */}
-            {youtubeVideoId && (
-              <div className="p-4 bg-white border border-[#C4552D]/30 rounded-2xl space-y-3.5 shadow-sm">
+            {/* Uploaded Local Video Synchronized Player & Background Audio Ducking Selector */}
+            {uploadedVideoPreviewUrl && (
+              <div className="p-4 bg-white border border-[#0E7C86]/30 rounded-2xl space-y-3.5 shadow-sm">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
-                    <span className="px-2 py-0.5 rounded-full bg-[#C4552D] text-white font-mono text-[10px] font-bold uppercase tracking-wider flex items-center gap-1">
-                      <Youtube className="w-3 h-3" /> YouTube Dublyaj
+                    <span className="px-2.5 py-0.5 rounded-full bg-[#0E7C86] text-white font-mono text-[10px] font-bold uppercase tracking-wider flex items-center gap-1">
+                      <Film className="w-3 h-3" /> Синхронный Видео-Превью
                     </span>
-                    <h4 className="text-xs font-bold text-[#161511] line-clamp-1 max-w-md">
-                      {youtubeVideoTitle || topic || 'YouTube Video'}
+                    <h4 className="text-xs font-bold text-[#161511] truncate max-w-md">
+                      {uploadedVideoFileName}
                     </h4>
                   </div>
-                  {youtubeAuthorName && (
-                    <span className="text-[11px] font-mono text-[#5D594E]">
-                      Kanal: <span className="font-semibold text-[#161511]">{youtubeAuthorName}</span>
-                    </span>
-                  )}
+
+                  {/* Background Audio Ducking Selector */}
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <span className="text-[10px] font-mono uppercase text-[#5D594E]">Фон видео:</span>
+                    <select
+                      value={duckingMode}
+                      onChange={(e) => setDuckingMode(e.target.value as any)}
+                      className="bg-[#FAF8F3] border border-[rgba(22,21,17,0.14)] rounded-lg px-2.5 py-1 text-[11px] font-medium text-[#161511] focus:outline-none focus:border-[#0E7C86]"
+                    >
+                      <option value="smart_ducking">🔉 Приглушать русскую речь до 15%, музыка «Без слов» 100%</option>
+                      <option value="mute_speech_keep_music">🔇 Убрать русскую речь (0%), оставить музыку «Без слов» (100%)</option>
+                      <option value="voice_only">🎙️ Только узбекские голоса (оригинал видео 0%)</option>
+                    </select>
+                  </div>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-center">
-                  <div className="aspect-video w-full rounded-xl overflow-hidden border border-[rgba(22,21,17,0.15)] bg-black shadow-xs">
-                    <iframe
-                      src={`https://www.youtube.com/embed/${youtubeVideoId}?enablejsapi=1`}
-                      title="YouTube Video"
-                      className="w-full h-full border-none"
-                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                      allowFullScreen
-                    />
-                  </div>
-                  <div className="space-y-3 text-xs">
-                    <div className="p-3 bg-[#FAF8F3] rounded-xl border border-[rgba(22,21,17,0.1)] space-y-2">
-                      <div className="font-semibold text-[#161511] flex items-center justify-between">
-                        <span>Aktiv Spikerlar:</span>
-                        <span className="font-mono text-[11px] text-[#0E7C86]">{speaker1Name} & {speaker2Name}</span>
-                      </div>
-                      <div className="text-[11px] text-[#5D594E] leading-relaxed">
-                        {lang === 'uz'
-                          ? "Barcha replikalar sekundiga to'ch-v-to'ch sig'dirilgan. Generatsiyadan so'ng video va o'zbekcha ovoz 100% sinxron o'ynaladi."
-                          : 'Реплики уложены точь-в-точь по хронометражу. После озвучки дорожка синхронизируется секунда в секунду.'}
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setShowOriginalTranscript(!showOriginalTranscript)}
-                        className="btn-pill btn-ghost text-[11px] py-1 px-3 flex items-center gap-1.5 cursor-pointer border border-[rgba(22,21,17,0.14)]"
-                      >
-                        <FileText className="w-3 h-3 text-[#0E7C86]" />
-                        <span>{showOriginalTranscript ? 'Asl matnni berkitish' : 'Asl matnni koʻrsatish'}</span>
-                      </button>
-                    </div>
-                  </div>
+                <div className="aspect-video w-full max-h-[340px] rounded-xl overflow-hidden border border-[rgba(22,21,17,0.15)] bg-black flex items-center justify-center">
+                  <video
+                    ref={dubVideoRef}
+                    src={uploadedVideoPreviewUrl}
+                    controls
+                    className="w-full h-full object-contain"
+                  />
                 </div>
               </div>
             )}
 
-            {/* Featured Interview Quick-Load Banner */}
-            <div className="p-3.5 bg-gradient-to-r from-[#0E7C86]/10 via-[#FAF8F3] to-[#C4552D]/10 rounded-2xl border border-[rgba(22,21,17,0.14)] flex flex-wrap items-center justify-between gap-3 shadow-2xs">
-              <div className="flex items-center gap-2.5">
-                <span className="w-8 h-8 rounded-xl bg-[#161511] text-[#FACC15] flex items-center justify-center shrink-0 shadow-xs font-bold text-sm">
-                  ⚡
-                </span>
-                <div>
-                  <h4 className="text-xs font-bold text-[#161511]">
-                    {lang === 'uz'
-                      ? "Tayyor Intervyu: Artur Yugay & Ayubxon Burxanov"
-                      : "Готовое интервью: Артур Югай и Аюбхон Бурханов"}
-                  </h4>
-                  <p className="text-[11px] text-[#5D594E]">
-                    {lang === 'uz'
-                      ? "73 ta replika, 4 ta bob (Tizir, Kirish, Toshkent eng qimmat shahar, Ko'chmas mulk narxlari). 100% to'ch-v-to'ch tarjima va 2 ta mustaqil erkak ovozi!"
-                      : "73 реплики, 4 главы (Тизер, Вступление, Ташкент, Рост цен на жилье). Точный перевод по хронометражу и 2 мужских голоса!"}
-                  </p>
+            {/* Musical / Graphic Intervals («Без слов») Badge Strip */}
+            {noSpeechIntervals.length > 0 && (
+              <div className="p-3.5 rounded-2xl bg-[#FAF8F3] border border-[rgba(14,124,134,0.25)] space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-mono uppercase tracking-wider text-[#0A5A62] font-bold flex items-center gap-1.5">
+                    <Music className="w-3.5 h-3.5 text-[#0E7C86]" />
+                    Музыкальные и графические паузы «Без слов» (Голос молчит, играет оригинал видео 100%):
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {noSpeechIntervals.map((interval, idx) => (
+                    <div
+                      key={idx}
+                      className="px-3 py-1.5 rounded-xl bg-white border border-[rgba(22,21,17,0.12)] text-xs flex items-center gap-2 shadow-2xs"
+                    >
+                      <span className="font-mono text-[10.5px] font-bold px-2 py-0.5 rounded bg-[#0E7C86] text-white">
+                        🎵 {interval.timecode} ({interval.durationSec}s)
+                      </span>
+                      <span className="text-[11px] text-[#5D594E] line-clamp-1 max-w-xs" title={interval.description}>
+                        {interval.description}
+                      </span>
+                    </div>
+                  ))}
                 </div>
               </div>
+            )}
 
-              <button
-                type="button"
-                onClick={handleLoadYugayBurkhanovPreset}
-                className="btn-pill btn-solid text-xs py-1.5 px-3.5 flex items-center gap-1.5 cursor-pointer font-bold shadow-xs hover:scale-105 transition-transform"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-[#5CC8CF]" />
-                <span>{lang === 'uz' ? "Intervyuni bir zumda yuklash (73 replika)" : "Загрузить интервью (73 реплики)"}</span>
-              </button>
-            </div>
-
-            {/* Dialogue Diarization & Audio Tools Toolbar */}
+            {/* Toolbar: Invert Speakers, Clean Conditions, Master Audio Mode */}
             <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-white border border-[rgba(22,21,17,0.14)] rounded-xl shadow-xs">
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  onClick={handleSmartDiarizeTurns}
-                  disabled={isDiarizing || turns.length === 0}
-                  className="btn-pill btn-solid text-xs py-1.5 px-3 flex items-center gap-1.5 cursor-pointer font-semibold shadow-xs"
-                  title={lang === 'uz' ? "AI orqali barcha replikalarni Artur Yugay (Boshlovchi) va Ayubxon Burxanov (Mehmon) o'rtasida aniq taqsimlash" : "Умное распределение реплик между ведущим и гостем (Артур Югай и Аюбхон Бурханов)"}
-                >
-                  <Wand2 className={`w-3.5 h-3.5 text-[#5CC8CF] ${isDiarizing ? 'animate-spin' : ''}`} />
-                  <span>
-                    {isDiarizing
-                      ? (lang === 'uz' ? "Taqsimlanmoqda..." : "Распределение...")
-                      : (lang === 'uz' ? "Smart Diarize (Spikerlarni taqsimlash)" : "Smart Diarize (Распределить)")}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
                   onClick={handleInvertAllSpeakers}
                   className="btn-pill btn-ghost text-xs py-1.5 px-3 flex items-center gap-1.5 cursor-pointer border border-[rgba(22,21,17,0.14)]"
-                  title="Artur va Ayubxon o'rinlarini almashtirish"
                 >
                   <ArrowLeftRight className="w-3.5 h-3.5 text-[#5D594E]" />
-                  <span>{lang === 'uz' ? "Spikerlarni almashtirish (⇄)" : "Поменять местами (⇄)"}</span>
+                  <span>Поменять спикеров местами (⇄)</span>
                 </button>
 
                 <button
                   type="button"
-                  onClick={handleCleanAllTurns}
-                  className="btn-pill btn-ghost text-xs py-1.5 px-3 flex items-center gap-1.5 cursor-pointer"
-                  title="Barcha replikalardan skobkalar va ovoz shartlarini tozalash"
+                  onClick={() => setShowOriginalTranscript(!showOriginalTranscript)}
+                  className="btn-pill btn-ghost text-xs py-1.5 px-3 flex items-center gap-1.5 cursor-pointer border border-[rgba(22,21,17,0.14)]"
                 >
-                  <Eraser className="w-3.5 h-3.5 text-[#5D594E]" />
-                  <span>{lang === 'uz' ? 'Shartlarni tozalash' : 'Очистить условия'}</span>
+                  <FileText className="w-3.5 h-3.5 text-[#0E7C86]" />
+                  <span>{showOriginalTranscript ? 'Скрыть оригинал (RU) / Видеоряд' : 'Показать оригинал (RU) / Видеоряд'}</span>
                 </button>
               </div>
 
               {/* Master Audio Mode Toggle */}
               <div className="flex items-center gap-1.5 bg-[#FAF8F3] p-1 rounded-xl border border-[rgba(22,21,17,0.1)] text-xs">
                 <span className="text-[10px] uppercase font-mono text-[#5D594E] px-1 font-semibold">
-                  {lang === 'uz' ? 'Ovoz Rejimi:' : 'Режим:'}
+                  Сборка:
                 </span>
-                <button
-                  type="button"
-                  onClick={() => setMasterAudioMode('continuous')}
-                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer ${
-                    masterAudioMode === 'continuous'
-                      ? 'bg-[#0E7C86] text-white shadow-xs'
-                      : 'text-[#5D594E] hover:text-[#161511]'
-                  }`}
-                  title={lang === 'uz' ? "Uzviy jonli podkast: har bir replika orasida 0.35s tabiiy suhbat pauzasi, hech qanday bo'sh vaqt yo'q" : "Бесшовный подкаст без пустых пауз"}
-                >
-                  🎙️ {lang === 'uz' ? 'Uzviy podkast (Tavsiya)' : 'Слитный подкаст'}
-                </button>
                 <button
                   type="button"
                   onClick={() => setMasterAudioMode('time_aligned')}
                   className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer ${
                     masterAudioMode === 'time_aligned'
+                      ? 'bg-[#0E7C86] text-white shadow-xs'
+                      : 'text-[#5D594E] hover:text-[#161511]'
+                  }`}
+                  title="Строго по секундам таймкодов раскадровки (с сохранением пауз Без слов)"
+                >
+                  ⏱️ Строго по таймкодам (1:1)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMasterAudioMode('continuous')}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer ${
+                    masterAudioMode === 'continuous'
                       ? 'bg-[#161511] text-[#F4F1EA] shadow-xs'
                       : 'text-[#5D594E] hover:text-[#161511]'
                   }`}
-                  title={lang === 'uz' ? "Video xronometrajiga bog'langan: oraliq pauza maksimal 2 soniya bilan cheklanadi" : "По хронометражу (макс пауза 2с)"}
+                  title="Слитный подкаст с паузой 0.35с между репликами"
                 >
-                  ⏱️ {lang === 'uz' ? 'Xronometraj' : 'Хронометраж'}
+                  🎙️ Слитный подкаст
                 </button>
               </div>
             </div>
 
             {/* Turn by turn list */}
-            <div className="space-y-3 pt-2">
+            {turns.length === 0 ? (
+              <div className="p-8 rounded-2xl bg-white border border-dashed border-[rgba(22,21,17,0.2)] text-center space-y-3">
+                <FileText className="w-8 h-8 text-[#0E7C86] mx-auto opacity-80" />
+                <p className="text-xs sm:text-sm font-semibold text-[#161511]">
+                  Таблица реплик пуста (новый или чистый проект)
+                </p>
+                <p className="text-xs text-[#5D594E] max-w-xl mx-auto leading-relaxed">
+                  Вставьте свою русскую раскадровку с таймкодами в Шаге 01 и нажмите{' '}
+                  <strong>«🎯 Разобрать и перевести 1:1»</strong>, либо добавьте реплику вручную. История и черновики сохраняются строго индивидуально для каждого аккаунта.
+                </p>
+              </div>
+            ) : null}
+            <div className="space-y-3 pt-1">
               {turns.map((turn, index) => {
                 const isHost1 = turn.speakerId === 'HOST_1';
                 const isCurrentlyActive = activeTurnIndex === index;
-                const turnAudio = synthesizedTurns[index]?.audioBase64;
+                const synthTurn = synthesizedTurns.find((st) => st.id === turn.id) || synthesizedTurns[index];
+                const turnAudio = synthTurn?.audioBase64;
                 const isTurnPlaying = playingTurnId === turn.id;
-                const turnConditions = detectScriptConditions(turn.text);
+                const isResynthesizingThis = resynthesizingTurnId === turn.id;
 
                 return (
                   <div
@@ -2138,70 +3026,67 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                       <div className="flex flex-wrap items-center gap-2">
                         <button
                           onClick={() => toggleTurnSpeaker(turn.id)}
-                          className={`btn-pill text-xs py-1 px-3 flex items-center gap-1.5 cursor-pointer font-bold transition-all shadow-xs hover:scale-105 ${
+                          className={`btn-pill text-xs py-1 px-3 flex items-center gap-1.5 cursor-pointer font-bold transition-all shadow-xs ${
                             isHost1
                               ? 'bg-[#0E7C86]/10 text-[#0A5A62] border border-[#0E7C86]/40 hover:bg-[#0E7C86] hover:text-white'
                               : 'bg-[#C4552D]/10 text-[#C4552D] border border-[#C4552D]/40 hover:bg-[#C4552D] hover:text-white'
                           }`}
-                          title={lang === 'uz' ? "Boshqa spikerga o'tkazish uchun bosing (Artur ⇄ Ayubxon)" : "Нажмите для переключения (Артур ⇄ Аюбхон)"}
+                          title="Нажмите для смены спикера (Спикер 1 ⇄ Спикер 2)"
                         >
                           {isHost1 ? <User className="w-3.5 h-3.5" /> : <Bot className="w-3.5 h-3.5" />}
                           <span>{turn.speakerName || (isHost1 ? speaker1Name : speaker2Name)}</span>
-                          <span className="text-[10px] font-mono opacity-80">
-                            ({isHost1 ? (lang === 'uz' ? '1-Boshlovchi' : '1-Ведущий') : (lang === 'uz' ? '2-Mehmon' : '2-Гость')}) ⇄
-                          </span>
+                          <span className="text-[10px] font-mono opacity-80">⇄</span>
                         </button>
 
                         {turn.timecode && (
-                          <span className="font-mono text-[10.5px] font-bold px-2 py-0.5 rounded-lg bg-[#161511] text-[#FACC15] flex items-center gap-1 shadow-2xs">
+                          <span className="font-mono text-[10.5px] font-bold px-2.5 py-0.5 rounded-lg bg-[#161511] text-[#FACC15] flex items-center gap-1 shadow-2xs">
                             ⏱ {turn.timecode} {turn.durationSec ? `(${turn.durationSec}s)` : ''}
                           </span>
                         )}
 
-                        {turn.chapter && (
-                          <span className="text-[10px] text-[#5D594E] font-medium hidden sm:inline-block">
-                            · {turn.chapter}
+                        {turn.intonationRu && (
+                          <span
+                            className="text-[10.5px] px-2.5 py-0.5 rounded-full bg-[#C4552D]/10 text-[#C4552D] border border-[#C4552D]/30 font-medium"
+                            title="Интонация из раскадровки (управляет стилем Gemini 3.8 TTS)"
+                          >
+                            🎭 {turn.intonationRu}
                           </span>
                         )}
 
-                        {turnConditions.hasConditions && (
-                          <div className="flex items-center gap-1.5">
-                            <span
-                              className="font-mono text-[10.5px] border border-[rgba(196,85,45,0.4)] text-[#C4552D] rounded-full px-2.5 py-0.5 flex items-center gap-1 bg-white"
-                              title="Bu shart ovoz modulatsiyasi uchun ishlatiladi"
-                            >
-                              <ShieldCheck className="w-3 h-3 text-[#0E7C86]" />
-                              <span>{turnConditions.conditions.slice(0, 2).join(' ')}</span>
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => handleCleanSingleTurn(turn.id)}
-                              className="p-1 rounded-full hover:bg-[rgba(22,21,17,0.06)] text-[#5D594E] hover:text-[#C4552D] text-[10px] transition-colors cursor-pointer"
-                              title="Replikadagi shart va belgilarni olib tashlash"
-                            >
-                              <Eraser className="w-3 h-3" />
-                            </button>
-                          </div>
+                        {(turn.fitStepApplied || synthTurn?.fitStepApplied) && (
+                          <span
+                            className="font-mono text-[10px] px-2 py-0.5 rounded-full bg-[#0E7C86]/10 text-[#0A5A62] border border-[#0E7C86]/30"
+                            title="Статус укладки в хронометраж таймкода"
+                          >
+                            ✓ {synthTurn?.fitStepApplied || turn.fitStepApplied}
+                          </span>
                         )}
                       </div>
 
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1.5">
                         {turnAudio && (
                           <button
                             type="button"
                             onClick={() => playSingleTurn(turn.id, turnAudio)}
-                            className="btn-pill btn-ghost text-[10.5px] py-0.5 px-2.5 flex items-center gap-1 cursor-pointer"
-                            title="Faqat shu replikani eshitish"
+                            className="btn-pill btn-ghost text-[10.5px] py-1 px-2.5 flex items-center gap-1 cursor-pointer border border-[rgba(22,21,17,0.14)]"
                           >
-                            {isTurnPlaying ? <Pause className="w-2.5 h-2.5" /> : <Play className="w-2.5 h-2.5" />}
-                            <span>{isTurnPlaying ? 'Pauza' : 'Eshittirish'}</span>
+                            {isTurnPlaying ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+                            <span>{isTurnPlaying ? 'Пауза' : 'Слушать'}</span>
                           </button>
                         )}
-                        {turn.emotion && (
-                          <span className="font-mono text-[10px] uppercase px-2 py-0.5 rounded-full border border-[rgba(22,21,17,0.14)] text-[#5D594E]">
-                            {turn.emotion}
-                          </span>
-                        )}
+
+                        {/* Single-Turn Re-Synthesis Button */}
+                        <button
+                          type="button"
+                          onClick={() => handleResynthesizeSingleTurn(turn)}
+                          disabled={isResynthesizingThis || isSynthesizing}
+                          className="btn-pill btn-ghost text-[10.5px] py-1 px-2.5 flex items-center gap-1 cursor-pointer border border-[#0E7C86]/35 text-[#0A5A62] hover:bg-[#0E7C86] hover:text-white transition-all"
+                          title="Переозвучить только эту реплику и обновить мастер-дорожку"
+                        >
+                          <RefreshCw className={`w-3 h-3 ${isResynthesizingThis ? 'animate-spin' : ''}`} />
+                          <span>{isResynthesizingThis ? 'Озвучка...' : 'Переозвучить'}</span>
+                        </button>
+
                         <button
                           onClick={() => removeTurn(turn.id)}
                           className="p-1.5 text-[#5D594E] hover:text-[#C4552D] rounded-full hover:bg-[rgba(196,85,45,0.08)] transition-colors cursor-pointer"
@@ -2211,20 +3096,26 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                       </div>
                     </div>
 
-                    {/* Original English Text Display (for Dubbing verification) */}
-                    {showOriginalTranscript && turn.originalText && (
-                      <div className="mb-2 p-2.5 rounded-xl bg-[#FAF8F3] border border-[rgba(22,21,17,0.08)] text-xs text-[#5D594E] leading-relaxed">
-                        <div className="flex items-center justify-between mb-0.5">
-                          <span className="text-[10px] font-mono uppercase text-[#0E7C86] font-bold">
-                            Asl Inglizcha Matn (EN):
-                          </span>
-                          {turn.durationSec && (
-                            <span className="text-[10px] font-mono text-[#5D594E]">
-                              Lip-sync xronometraj: <span className="font-bold text-[#161511]">{turn.durationSec}s</span>
+                    {/* Visual Context (Видеоряд - hidden from TTS) & Original Russian Speech (Текст) */}
+                    {showOriginalTranscript && (turn.originalTextRu || turn.originalText || turn.visualContext) && (
+                      <div className="mb-2.5 p-2.5 rounded-xl bg-[#FAF8F3] border border-[rgba(22,21,17,0.08)] text-xs space-y-1">
+                        {turn.visualContext && (
+                          <div className="flex items-start gap-1.5 text-[11px] text-[#5D594E]">
+                            <EyeOff className="w-3.5 h-3.5 text-[#0E7C86] shrink-0 mt-0.5" />
+                            <span>
+                              <strong className="font-mono uppercase text-[10px] text-[#0A5A62]">Видеоряд (не озвучивается):</strong>{' '}
+                              {turn.visualContext}
                             </span>
-                          )}
-                        </div>
-                        <p className="font-serif italic text-[#161511] text-[12.5px]">{turn.originalText}</p>
+                          </div>
+                        )}
+                        {(turn.originalTextRu || turn.originalText) && (
+                          <div className="text-[12px] text-[#161511]">
+                            <span className="font-mono uppercase text-[10px] text-[#C4552D] font-bold mr-1.5">
+                              Текст (RU):
+                            </span>
+                            <span className="font-serif italic">«{turn.originalTextRu || turn.originalText}»</span>
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -2233,159 +3124,31 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                       value={turn.text}
                       onChange={(e) => updateTurnText(turn.id, e.target.value)}
                       className="w-full bg-white border border-[rgba(22,21,17,0.14)] rounded-xl p-3 text-xs sm:text-sm text-[#161511] focus:outline-none focus:border-[#0E7C86] resize-none font-sans leading-relaxed shadow-2xs"
-                      placeholder="Ushbu spikerning replikasi..."
+                      placeholder="Перевод реплики 1:1 на узбекском языке..."
                     />
 
-                    {/* Quick Uzbek Vocal Tags & Natural Emotions Strip */}
+                    {/* Strictly Documented Gemini 3.8 TTS Tags ONLY (<laugh>, <sigh>, <short pause>, <breath>, <cough>) */}
                     <div className="flex flex-wrap items-center gap-1.5 mt-2 pt-1 text-[11px]">
                       <span className="font-mono text-[10px] text-[#5D594E] uppercase tracking-wider">
-                        {lang === 'uz' ? 'Jonli Teglar:' : 'Живые Теги:'}
+                        Теги Gemini 3.8 TTS:
                       </span>
-                      <button
-                        type="button"
-                        onClick={() => handleInsertTagToTurn(turn.id, '<breath>')}
-                        className="px-2 py-0.5 rounded-full border border-[#0E7C86]/40 bg-[#0E7C86]/5 text-[#0A5A62] hover:bg-[#0E7C86] hover:text-white transition-all text-[10.5px] font-mono cursor-pointer"
-                        title="Tabiiy nafas olish tovushi"
-                      >
-                        🌬️ &lt;breath&gt;
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleInsertTagToTurn(turn.id, '<chuqur_nafas>')}
-                        className="px-2 py-0.5 rounded-full border border-[#0E7C86]/30 bg-white text-[#0A5A62] hover:bg-[#0E7C86]/10 transition-all text-[10.5px] font-mono cursor-pointer"
-                        title="Chuqur nafas olish"
-                      >
-                        💨 &lt;chuqur_nafas&gt;
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleInsertTagToTurn(turn.id, '<laugh>')}
-                        className="px-2 py-0.5 rounded-full border border-[#C98A12]/40 bg-[#C98A12]/5 text-[#C98A12] hover:bg-[#C98A12] hover:text-white transition-all text-[10.5px] font-mono cursor-pointer"
-                        title="Tabiiy kulgi tovushi (Gemini 3.8 Flash TTS)"
-                      >
-                        😄 &lt;laugh&gt;
-                      </button>
-                      {['|ha|', '|mhm|', '|rostanam|', '|albatta|', '|aha|'].map((tag) => (
+                      {[
+                        { tag: '<laugh>', label: '😄 <laugh>', title: 'Смех / усмешка (документированный тег)' },
+                        { tag: '<short pause>', label: '⏱️ <short pause>', title: 'Короткая пауза в речи' },
+                        { tag: '<sigh>', label: '😮‍💨 <sigh>', title: 'Вздох облегчения или удивления' },
+                        { tag: '<breath>', label: '🌬️ <breath>', title: 'Живой вдох перед фразой' },
+                        { tag: '<cough>', label: '🤧 <cough>', title: 'Покашливание' },
+                      ].map((item) => (
                         <button
-                          key={tag}
+                          key={item.tag}
                           type="button"
-                          onClick={() => handleInsertTagToTurn(turn.id, tag)}
-                          className="px-2 py-0.5 rounded-full border border-[rgba(14,124,134,0.3)] bg-white text-[#0A5A62] hover:bg-[rgba(14,124,134,0.1)] transition-all text-[10.5px] font-mono cursor-pointer"
-                          title="Toshkent jonli tasdiq belgisi"
+                          onClick={() => handleInsertTagToTurn(turn.id, item.tag)}
+                          className="px-2.5 py-0.5 rounded-full border border-[#0E7C86]/35 bg-[#0E7C86]/5 text-[#0A5A62] hover:bg-[#0E7C86] hover:text-white transition-all text-[10.5px] font-mono cursor-pointer"
+                          title={item.title}
                         >
-                          {tag}
+                          {item.label}
                         </button>
                       ))}
-                      <button
-                        type="button"
-                        onClick={() => handleInsertTagToTurn(turn.id, '[Doston]')}
-                        className="px-2 py-0.5 rounded-full border border-[#8B5CF6]/30 bg-white text-[#7C3AED] hover:bg-[#8B5CF6]/10 transition-all text-[10.5px] font-mono cursor-pointer"
-                        title="Doston va hikoya uslubidagi ohang"
-                      >
-                        📜 [Doston]
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleInsertTagToTurn(turn.id, '[Jonli]')}
-                        className="px-2 py-0.5 rounded-full border border-[#EC4899]/30 bg-white text-[#DB2777] hover:bg-[#EC4899]/10 transition-all text-[10.5px] font-mono cursor-pointer"
-                        title="Jonli va qizg'in intonatsiya"
-                      >
-                        ⚡ [Jonli]
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleInsertTagToTurn(turn.id, '[Sokin]')}
-                        className="px-2 py-0.5 rounded-full border border-[rgba(22,21,17,0.15)] bg-white text-[#5D594E] hover:bg-black/5 transition-all text-[10.5px] font-mono cursor-pointer"
-                        title="Sokin mulohazali ohang"
-                      >
-                        😌 [Sokin]
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleInsertTagToTurn(turn.id, '[Pauza 1s]')}
-                        className="px-2 py-0.5 rounded-full border border-[rgba(22,21,17,0.15)] bg-white text-[#5D594E] hover:bg-black/5 transition-all text-[10.5px] font-mono cursor-pointer"
-                      >
-                        ⏱️ [Pauza 1s]
-                      </button>
-                    </div>
-
-                    {/* Turn Music Cue Selector Strip */}
-                    <div className="mt-2.5 pt-2 border-t border-[rgba(22,21,17,0.08)] flex flex-wrap items-center justify-between gap-2 text-xs">
-                      <div className="flex items-center gap-2">
-                        <span className="text-[11px] text-[#5D594E] flex items-center gap-1 font-mono uppercase tracking-wider">
-                          <Music className="w-3 h-3 text-[#0E7C86]" />
-                          {lang === 'uz' ? 'Fon:' : 'Саунд:'}
-                        </span>
-
-                        <div className="flex items-center gap-1 bg-[#F4F1EA] p-0.5 rounded-full border border-[rgba(22,21,17,0.1)]">
-                          <button
-                            type="button"
-                            onClick={() => handleUpdateTurnCue(turn.id, 'silence')}
-                            className={`px-2.5 py-0.5 rounded-full text-[10.5px] font-semibold transition-all cursor-pointer ${
-                              turn.musicCue?.cueType === 'silence' || !turn.musicCue?.enabled
-                                ? 'bg-[#161511] text-[#F4F1EA]'
-                                : 'text-[#5D594E] hover:text-[#161511]'
-                            }`}
-                            title="Toza studiya nutqi, musiqasiz"
-                          >
-                            🔇 {lang === 'uz' ? 'Toza' : 'Без музыки'}
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => handleUpdateTurnCue(turn.id, 'intro')}
-                            className={`px-2.5 py-0.5 rounded-full text-[10.5px] font-semibold transition-all cursor-pointer ${
-                              turn.musicCue?.cueType === 'intro' && turn.musicCue?.enabled
-                                ? 'bg-[#0E7C86] text-white'
-                                : 'text-[#5D594E] hover:text-[#161511]'
-                            }`}
-                          >
-                            🎵 Intro
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => handleUpdateTurnCue(turn.id, 'emotional', 'calm-piano')}
-                            className={`px-2.5 py-0.5 rounded-full text-[10.5px] font-semibold transition-all cursor-pointer ${
-                              turn.musicCue?.cueType === 'emotional' && turn.musicCue?.enabled
-                                ? 'bg-[#0E7C86] text-white'
-                                : 'text-[#5D594E] hover:text-[#161511]'
-                            }`}
-                          >
-                            🎹 {lang === 'uz' ? 'Pianino' : 'Пианино'}
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => handleUpdateTurnCue(turn.id, 'stinger', 'tech-ambient')}
-                            className={`px-2.5 py-0.5 rounded-full text-[10.5px] font-semibold transition-all cursor-pointer ${
-                              turn.musicCue?.cueType === 'stinger' && turn.musicCue?.enabled
-                                ? 'bg-[#C4552D] text-white'
-                                : 'text-[#5D594E] hover:text-[#161511]'
-                            }`}
-                          >
-                            ⚡ Stinger
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => handleUpdateTurnCue(turn.id, 'outro')}
-                            className={`px-2.5 py-0.5 rounded-full text-[10.5px] font-semibold transition-all cursor-pointer ${
-                              turn.musicCue?.cueType === 'outro' && turn.musicCue?.enabled
-                                ? 'bg-[#161511] text-[#F4F1EA]'
-                                : 'text-[#5D594E] hover:text-[#161511]'
-                            }`}
-                          >
-                            🎬 Outro
-                          </button>
-                        </div>
-                      </div>
-
-                      {turn.musicCue?.reasoning && (
-                        <span className="text-[10px] text-[#5D594E] italic max-w-[280px] truncate" title={turn.musicCue.reasoning}>
-                          💡 {turn.musicCue.reasoning}
-                        </span>
-                      )}
                     </div>
                   </div>
                 );
@@ -2416,10 +3179,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                     type="button"
                     onClick={handleStopSynthesis}
                     className="btn-pill btn-ghost text-xs py-2.5 px-3.5 text-[#C4552D] border-[rgba(196,85,45,0.4)] hover:bg-[#C4552D]/10 flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
-                    title={lang === 'uz' ? "Sintezni to'xtatish va tayyor replikalarni birlashtirish" : 'Остановить и склеить готовое'}
                   >
                     <StopCircle className="w-4 h-4 text-[#C4552D]" />
-                    <span>{lang === 'uz' ? "To'xtatish" : 'Стоп'}</span>
+                    <span>Стоп</span>
                   </button>
                 )}
 
@@ -2431,15 +3193,13 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   <Volume2 className={`w-4 h-4 text-[#5CC8CF] ${isSynthesizing ? 'animate-pulse' : ''}`} />
                   {isSynthesizing ? (
                     <>
-                      <span>
-                        {lang === 'uz'
-                          ? `Sintez: ${dialogueCountdown.remainingDigits} (~${dialogueCountdown.formattedRemaining})`
-                          : `Синтез: ${dialogueCountdown.remainingDigits} (~${dialogueCountdown.formattedRemaining})`}
+                      <span>{`Синтез: ${dialogueCountdown.remainingDigits} (~${dialogueCountdown.formattedRemaining})`}</span>
+                      <span className="font-mono text-[10px] bg-white/20 px-1.5 py-0.5 rounded-full">
+                        {dialogueCountdown.progressPercent}%
                       </span>
-                      <span className="font-mono text-[10px] bg-white/20 px-1.5 py-0.5 rounded-full">{dialogueCountdown.progressPercent}%</span>
                     </>
                   ) : (
-                    lang === 'uz' ? 'Toʻliq Dialog Podkastni Yaratish (Dual TTS)' : 'Синтезировать Диалог (Dual TTS)'
+                    '🎯 Озвучить Дубляж 1:1 по Таймкодам'
                   )}
                 </button>
               </div>
@@ -2447,11 +3207,11 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           </div>
         </div>
 
-        {/* Right: Master Audio Player & Karaoke Turns (4 cols) */}
+        {/* Right: Step 04 — Master Audio & Export MP4 / WAV / SRT (4 cols) */}
         <div className="lg:col-span-4 space-y-6">
           <div className="border border-[rgba(22,21,17,0.14)] rounded-[20px] bg-[rgba(255,255,255,0.52)] backdrop-blur-sm p-5 space-y-4 shadow-[0_30px_50px_-30px_rgba(22,21,17,0.15)]">
             <div className="flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.14em] text-[#0A5A62]">
-              <span>04 — Master audio</span>
+              <span>04 — Мастер-аудио и Скачивание (MP4 / WAV / SRT)</span>
               <span className="h-[1px] flex-1 bg-[rgba(22,21,17,0.14)]" />
             </div>
 
@@ -2464,12 +3224,13 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   onEnded={() => {
                     setIsPlaying(false);
                     setActiveTurnIndex(-1);
+                    dubVideoRef.current?.pause();
                     ambientAudioRef.current?.pause();
                     if (ambientAudioRef.current) ambientAudioRef.current.currentTime = 0;
                   }}
                 />
 
-                {/* Bounded Dark Studio Screen Panel for Master Console */}
+                {/* Dark Studio Master Console */}
                 <div className="p-4 sm:p-5 rounded-2xl bg-[#141414] border border-[#2B2B27] text-[#EDEAE2] space-y-4 shadow-[0_30px_50px_-20px_rgba(20,20,20,0.45)]">
                   <div className="flex items-center gap-4">
                     <button
@@ -2481,9 +3242,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between text-xs text-[#7D7A70]">
-                        <span className="font-mono uppercase text-[10px] tracking-wider">{lang === 'uz' ? 'Efir vaqti' : 'Время'}:</span>
+                        <span className="font-mono uppercase text-[10px] tracking-wider">Таймкод:</span>
                         <span className="font-mono text-[#5CC8CF] font-bold">
-                          {masterCurrentTime.toFixed(1)}s / {totalDuration}s
+                          {(Number(masterCurrentTime) || 0).toFixed(1)}s / {totalDuration}s
                         </span>
                       </div>
                       <div className="flex items-center gap-1 mt-2 h-6">
@@ -2517,8 +3278,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                       const newTime = clickPos * totalDuration;
                       audioRef.current.currentTime = newTime;
                       setMasterCurrentTime(newTime);
-                      if (ambientAudioRef.current && ambientAudioRef.current.duration) {
-                        ambientAudioRef.current.currentTime = newTime % ambientAudioRef.current.duration;
+                      if (dubVideoRef.current) {
+                        dubVideoRef.current.currentTime = newTime;
                       }
                     }}
                     className="relative h-2 bg-[#2B2B27] rounded-full overflow-hidden cursor-pointer"
@@ -2528,126 +3289,14 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                       style={{ width: `${totalDuration > 0 ? (masterCurrentTime / totalDuration) * 100 : 0}%` }}
                     />
                   </div>
-
-                  {/* Dynamic Sound Design Map & Ducking Mode */}
-                  <div className="p-3 bg-[#1D1D1B] rounded-xl border border-[#2B2B27] space-y-2">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-mono text-[10.5px] uppercase tracking-wider text-[#EDEAE2] flex items-center gap-1.5">
-                        <Music className="w-3.5 h-3.5 text-[#5CC8CF]" />
-                        {lang === 'uz' ? 'Ovoz Rejissurasi:' : 'Саунд-дизайн:'}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => setDynamicDuckingEnabled(!dynamicDuckingEnabled)}
-                        className={`px-2 py-0.5 rounded-full text-[10px] font-mono uppercase tracking-wider transition-all cursor-pointer ${
-                          dynamicDuckingEnabled
-                            ? 'bg-[#0E7C86] text-white'
-                            : 'bg-[#2B2B27] text-[#7D7A70]'
-                        }`}
-                      >
-                        {dynamicDuckingEnabled
-                          ? (lang === 'uz' ? 'Dinamik Cues' : 'Активны Cues')
-                          : (lang === 'uz' ? 'Statik Loop' : 'Статичный')}
-                      </button>
-                    </div>
-
-                    {/* Visual Cue Track blocks */}
-                    <div className="flex items-center gap-1 overflow-x-auto py-1 scrollbar-thin">
-                      {turns.map((t, idx) => {
-                        const isCur = activeTurnIndex === idx;
-                        const cueType = t.musicCue?.cueType || 'silence';
-                        const isSil = cueType === 'silence' || !t.musicCue?.enabled;
-
-                        return (
-                          <div
-                            key={t.id}
-                            className={`px-2 py-1 rounded-md text-[10px] whitespace-nowrap font-mono transition-all border ${
-                              isCur
-                                ? 'border-[#5CC8CF] bg-[#0E7C86]/30 text-white font-bold'
-                                : isSil
-                                ? 'bg-[#141414] border-[#2B2B27] text-[#7D7A70]'
-                                : cueType === 'intro'
-                                ? 'bg-[#0E7C86]/20 border-[#0E7C86]/50 text-[#5CC8CF]'
-                                : cueType === 'stinger'
-                                ? 'bg-[#C4552D]/20 border-[#C4552D]/50 text-[#C4552D]'
-                                : cueType === 'emotional'
-                                ? 'bg-[#C98A12]/20 border-[#C98A12]/50 text-[#C98A12]'
-                                : 'bg-[#1D1D1B] border-[#2B2B27] text-[#EDEAE2]'
-                            }`}
-                            title={`${t.speakerName}: ${t.musicCue?.labelUz || cueType}`}
-                          >
-                            {isSil ? '🔇 Toza' : cueType === 'intro' ? '🎵 Intro' : cueType === 'stinger' ? '⚡ Stinger' : cueType === 'emotional' ? '🎹 Fon' : '🎬 Outro'}
-                            <span className="text-[9px] opacity-60 ml-1">#{idx + 1}</span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  {/* Ambient Music Controls for Dialogue */}
-                  <div className="pt-2 border-t border-[#2B2B27] flex flex-wrap items-center justify-between gap-2 text-xs">
-                    <div className="flex items-center gap-1.5 text-[#EDEAE2]">
-                      <Music className={`w-3.5 h-3.5 ${isPlaying && ambientEnabled && ambientSound !== 'none' ? 'text-[#5CC8CF] animate-spin' : 'text-[#5CC8CF]'}`} />
-                      <span className="font-mono text-[10.5px] uppercase tracking-wider">{lang === 'uz' ? 'Asosiy fon:' : 'Фон:'}</span>
-                    </div>
-
-                    <select
-                      value={ambientSound}
-                      onChange={(e) => setAmbientSound(e.target.value as AmbientSoundscape)}
-                      className="bg-[#1D1D1B] border border-[#2B2B27] text-[#EDEAE2] text-xs rounded-lg px-2 py-1 font-medium focus:outline-none focus:border-[#0E7C86] cursor-pointer max-w-[150px] truncate"
-                    >
-                      {AMBIENT_SOUNDSCAPES.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.icon} {lang === 'uz' ? s.labelUz : s.labelRu}
-                        </option>
-                      ))}
-                    </select>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const next = !ambientEnabled;
-                        setAmbientEnabled(next);
-                        if (!next) {
-                          ambientAudioRef.current?.pause();
-                        } else if (isPlaying && ambientSound !== 'none') {
-                          ambientAudioRef.current?.play().catch(console.warn);
-                        }
-                      }}
-                      className={`px-2.5 py-0.5 rounded-full font-mono text-[10px] uppercase tracking-wider transition-all cursor-pointer ${
-                        ambientEnabled && ambientSound !== 'none'
-                          ? 'bg-[#0E7C86] text-white'
-                          : 'bg-[#2B2B27] text-[#7D7A70]'
-                      }`}
-                    >
-                      {ambientEnabled && ambientSound !== 'none'
-                        ? (lang === 'uz' ? 'Yoqilgan' : 'Вкл')
-                        : (lang === 'uz' ? "O'chirilgan" : 'Выкл')}
-                    </button>
-
-                    {ambientEnabled && ambientSound !== 'none' && (
-                      <div className="flex items-center gap-1">
-                        <span className="text-[10px] text-[#7D7A70] font-mono">{ambientVolume}%</span>
-                        <input
-                          type="range"
-                          min="5"
-                          max="40"
-                          step="5"
-                          value={ambientVolume}
-                          onChange={(e) => setAmbientVolume(parseInt(e.target.value))}
-                          className="w-14 accent-[#0E7C86] h-1 bg-[#2B2B27] rounded-lg cursor-pointer"
-                        />
-                      </div>
-                    )}
-                  </div>
                 </div>
 
-                {/* Live Transcript / Subtitle Sync Feed */}
+                {/* Live Synced Transcript Feed */}
                 <div className="space-y-2">
                   <p className="font-mono text-[10.5px] uppercase tracking-wider text-[#5D594E]">
-                    {lang === 'uz' ? 'Ketma-ket Yangrayotgan Replikalar:' : 'Живой эфирный текст:'}
+                    Синхронный эфир по секундам:
                   </p>
-                  <div className="max-h-64 overflow-y-auto space-y-2 pr-1">
+                  <div className="max-h-60 overflow-y-auto space-y-2 pr-1">
                     {synthesizedTurns.map((turn, i) => {
                       const isActive = activeTurnIndex === i;
                       const isHost1 = turn.speakerId === 'HOST_1';
@@ -2665,7 +3314,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                               {turn.speakerName}
                             </span>
                             <span className="font-mono text-[#5D594E]">
-                              {turn.startTime?.toFixed(1)}s - {turn.endTime?.toFixed(1)}s
+                              {(Number(turn.startTime ?? turn.startSec) || 0).toFixed(1)}s – {(Number(turn.endTime ?? turn.endSec) || 0).toFixed(1)}s
                             </span>
                           </div>
                           <p className="leading-snug">{turn.text}</p>
@@ -2675,25 +3324,63 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   </div>
                 </div>
 
-                {/* Action Buttons: Save to CMS & Download */}
-                <div className="space-y-2 pt-1">
+                {/* 3 Export Buttons: MP4 Video Dubbing, WAV Master Track, SRT Subtitles */}
+                <div className="space-y-2.5 pt-2 border-t border-[rgba(22,21,17,0.1)]">
+                  {/* 1. Download MP4 Video with Uzbek Dubbing */}
+                  <button
+                    type="button"
+                    onClick={handleMuxDubbedVideoMp4}
+                    disabled={isMuxingVideo || !uploadedVideoFileId}
+                    className={`btn-pill w-full py-3 flex items-center justify-center gap-2 text-xs font-bold transition-all cursor-pointer ${
+                      uploadedVideoFileId
+                        ? 'bg-[#0E7C86] hover:bg-[#0A5A62] text-white shadow-sm'
+                        : 'bg-[#ECE7DB] text-[#7D7A70] cursor-not-allowed'
+                    }`}
+                    title={
+                      uploadedVideoFileId
+                        ? 'Склеить видео MP4 с узбекским дубляжом через FFmpeg'
+                        : 'Загрузите видеофайл в Шаге 01, чтобы скачать готовый MP4'
+                    }
+                  >
+                    <Film className={`w-4 h-4 ${isMuxingVideo ? 'animate-spin' : ''}`} />
+                    <span>
+                      {isMuxingVideo
+                        ? 'Сборка видео MP4 (FFmpeg)...'
+                        : uploadedVideoFileId
+                        ? '🎬 Скачать Видео MP4 с Узбекским Дубляжом'
+                        : '🎬 Скачать Видео MP4 (Сначала загрузите видео в 01)'}
+                    </span>
+                  </button>
+
+                  {/* 2. Download WAV Audio Track */}
+                  <button
+                    type="button"
+                    onClick={downloadMasterAudio}
+                    className="btn-pill btn-solid w-full py-2.5 flex items-center justify-center gap-2 text-xs font-bold cursor-pointer"
+                  >
+                    <Download className="w-4 h-4 text-[#5CC8CF]" />
+                    <span>🎵 Скачать Аудиодорожку WAV (По таймкодам)</span>
+                  </button>
+
+                  {/* 3. Download .SRT Subtitles */}
+                  <button
+                    type="button"
+                    onClick={handleDownloadSrt}
+                    className="btn-pill btn-ghost w-full py-2.5 flex items-center justify-center gap-2 text-xs font-semibold border border-[rgba(22,21,17,0.16)] cursor-pointer"
+                  >
+                    <Subtitles className="w-4 h-4 text-[#0E7C86]" />
+                    <span>📝 Скачать Субтитры .SRT</span>
+                  </button>
+
                   {onSaveToCMS && (
                     <button
                       onClick={handleSaveToCMS}
-                      className="btn-pill btn-ghost w-full py-2.5 flex items-center justify-center gap-2 text-xs font-semibold"
+                      className="btn-pill btn-ghost w-full py-2 flex items-center justify-center gap-2 text-xs font-medium"
                     >
                       {isSaved ? <Check className="w-4 h-4 text-[#0E7C86]" /> : <Save className="w-4 h-4 text-[#0E7C86]" />}
-                      <span>{isSaved ? 'CMS Kutubxonasiga Saqlandi!' : 'CMS Kutubxonasiga Saqlash'}</span>
+                      <span>{isSaved ? 'Сохранено в библиотеку!' : 'Сохранить в библиотеку'}</span>
                     </button>
                   )}
-
-                  <button
-                    onClick={downloadMasterAudio}
-                    className="btn-pill btn-solid w-full py-2.5 flex items-center justify-center gap-2 text-xs font-bold"
-                  >
-                    <Download className="w-4 h-4 text-[#5CC8CF]" />
-                    {lang === 'uz' ? "To'liq Master WAV Audioni Yuklash" : 'Скачать мастер-трек WAV'}
-                  </button>
                 </div>
               </div>
             ) : isSynthesizing ? (
@@ -2703,12 +3390,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                     <div className="flex items-center justify-between text-xs">
                       <span className="font-semibold text-[#0A5A62] flex items-center gap-1.5">
                         <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#0E7C86]" />
-                        {lang === 'uz'
-                          ? `Paket ${batchProgress.currentBatch} / ${batchProgress.totalBatches}`
-                          : `Пакет ${batchProgress.currentBatch} / ${batchProgress.totalBatches}`}
+                        {`Пакет ${batchProgress.currentBatch} / ${batchProgress.totalBatches}`}
                       </span>
                       <span className="font-mono text-[11px] font-bold text-[#0E7C86]">
-                        {batchProgress.completedTurns} / {batchProgress.totalTurns} {lang === 'uz' ? 'replika' : 'реплик'} ({batchProgress.percent}%)
+                        {batchProgress.completedTurns} / {batchProgress.totalTurns} реплик ({batchProgress.percent}%)
                       </span>
                     </div>
 
@@ -2722,15 +3407,6 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                     <p className="text-[11px] text-[#5D594E] leading-snug">
                       {batchProgress.statusText}
                     </p>
-
-                    <button
-                      onClick={handleStopSynthesis}
-                      type="button"
-                      className="w-full btn-pill btn-ghost text-xs py-1.5 text-[#C4552D] border-[rgba(196,85,45,0.3)] hover:bg-[#C4552D]/10 flex items-center justify-center gap-1.5 cursor-pointer"
-                    >
-                      <StopCircle className="w-3.5 h-3.5" />
-                      <span>{lang === 'uz' ? "To'xtatish va tayyor qismini birlashtirish" : 'Остановить и склеить готовое'}</span>
-                    </button>
                   </div>
                 )}
 
@@ -2738,21 +3414,29 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   countdown={dialogueCountdown}
                   isActive={isSynthesizing}
                   lang={lang}
-                  title={lang === 'uz' ? `Dual TTS Intervyu (${turns.length} replika)` : `Синтез Интервью (${turns.length} реплик)`}
-                  subtitle={batchProgress?.statusText || (lang === 'uz' ? dialogueCountdown.phaseNameUz : dialogueCountdown.phaseNameRu)}
+                  title={`Синтез Дубляжа 1:1 (${turns.length} реплик)`}
+                  subtitle={batchProgress?.statusText || dialogueCountdown.phaseNameRu}
                 />
               </div>
             ) : (
-              <div className="p-8 rounded-2xl bg-white border border-dashed border-[rgba(22,21,17,0.2)] text-center space-y-2">
-                <Users2 className="w-8 h-8 text-[#5D594E]/50 mx-auto" />
-                <p className="text-xs text-[#161511] font-medium">
-                  {lang === 'uz' ? 'Dialog hali sintez qilinmadi' : 'Диалог еще не синтезирован'}
+              <div className="p-6 rounded-2xl bg-white border border-dashed border-[rgba(22,21,17,0.2)] text-center space-y-3">
+                <Film className="w-8 h-8 text-[#0E7C86] mx-auto" />
+                <p className="text-xs text-[#161511] font-semibold">
+                  Готово к озвучке 1:1 по таймкодам
                 </p>
-                <p className="text-[11px] text-[#5D594E]">
-                  {lang === 'uz'
-                    ? 'Chap tarafdagi "Toʻliq Dialog Podkastni Yaratish" tugmasini bosing. Barcha replikalar birlashtiriladi.'
-                    : 'Нажмите "Синтезировать Диалог" слева.'}
+                <p className="text-[11px] text-[#5D594E] leading-relaxed">
+                  1) В Шаге 01 загрузите видео (до 15 мин) и проверьте раскадровку.<br />
+                  2) В Шаге 02 выберите голоса (например, женский для Девушки и ваш клон голоса Shohrux для Мужчины).<br />
+                  3) Нажмите <strong>«🎯 Озвучить Дубляж 1:1 по Таймкодам»</strong> или скачайте .SRT субтитры уже сейчас.
                 </p>
+                <button
+                  type="button"
+                  onClick={handleDownloadSrt}
+                  className="btn-pill btn-ghost text-xs py-2 px-4 inline-flex items-center gap-1.5 border border-[rgba(22,21,17,0.14)] cursor-pointer"
+                >
+                  <Subtitles className="w-3.5 h-3.5 text-[#0E7C86]" />
+                  <span>Скачать .SRT субтитры перевода</span>
+                </button>
               </div>
             )}
           </div>

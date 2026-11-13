@@ -78,7 +78,7 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
   onOpenDocumentModal,
   lang,
 }) => {
-  const { isAuthenticated, requireAuth, useCredit, syncCredits, logGeneration } = useAuth();
+  const { user, isAuthenticated, requireAuth, useCredit, syncCredits, logGeneration } = useAuth();
 
   // Source Mode: File Upload vs URL vs Text Generator
   const [sourceMode, setSourceMode] = useState<VideoSourceMode>('file_upload');
@@ -86,7 +86,7 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
   // Format & Timing
   const [format, setFormat] = useState<VoiceoverFormat>('reels_shorts');
   const [targetDuration, setTargetDuration] = useState<string>('30s');
-  const [topic, setTopic] = useState<string>("Sun'iy intellekt va kelajak texnologiyalari");
+  const [topic, setTopic] = useState<string>('');
   const [stylePreset, setStylePreset] = useState<'cinematic' | 'energetic_sales' | 'storytelling' | 'documentary' | 'whisper'>('energetic_sales');
 
   // Media Source State
@@ -119,10 +119,69 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
   const [isTranslatingCustomSpeech, setIsTranslatingCustomSpeech] = useState<boolean>(false);
   const [showCustomSpeechInput, setShowCustomSpeechInput] = useState<boolean>(false);
 
-  // Script & Editing
-  const [script, setScript] = useState<string>(
-    `[00:00 - 00:05] [Dinamik]: Video uchun birinchi sahna dublyaji...\n[00:05 - 00:12] [Kinematik]: Ikkinchi sahna va voqealar rivoji...\n[00:12 - 00:20] [Jiddiy]: Asosiy xulosa va yakun.`
-  );
+  // Script & Editing (Scoped strictly per user.uid, starts empty for new/other accounts)
+  const [script, setScript] = useState<string>('');
+  const isHydratingVoiceoverRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    isHydratingVoiceoverRef.current = true;
+    try {
+      setResultAudio(null);
+      setUploadedMedia(null);
+      setEmbeddedVideoUrl(null);
+      setInputUrl('');
+      setUrlStatus(null);
+      setExtractedAudioBase64(null);
+      setPipelineCurrentStage('idle');
+
+      if (!user?.uid) {
+        setTopic('');
+        setScript('');
+        setTimelineSegments([]);
+        return;
+      }
+
+      const key = `ovozstudio_voiceover_draft_v2_${user.uid}`;
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.ownerUid === user.uid) {
+          setTopic(parsed.topic || '');
+          setScript(parsed.script || '');
+          setTimelineSegments(Array.isArray(parsed.timelineSegments) ? parsed.timelineSegments : []);
+          return;
+        }
+      }
+      setTopic('');
+      setScript('');
+      setTimelineSegments([]);
+    } catch {
+      setTopic('');
+      setScript('');
+      setTimelineSegments([]);
+    } finally {
+      setTimeout(() => {
+        isHydratingVoiceoverRef.current = false;
+      }, 0);
+    }
+  }, [user?.uid]);
+
+  useEffect(() => {
+    if (isHydratingVoiceoverRef.current || !user?.uid) return;
+    try {
+      const key = `ovozstudio_voiceover_draft_v2_${user.uid}`;
+      localStorage.setItem(
+        key,
+        JSON.stringify({
+          ownerUid: user.uid,
+          topic,
+          script,
+          timelineSegments,
+          updatedAt: new Date().toISOString(),
+        })
+      );
+    } catch {}
+  }, [user?.uid, topic, script, timelineSegments]);
 
   const [isGeneratingScript, setIsGeneratingScript] = useState(false);
   const [isGeneratingSubtitles, setIsGeneratingSubtitles] = useState(false);
@@ -313,7 +372,9 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
   // Analyze uploaded video/audio: Transcribe original speech & Translate to synchronized Uzbek
   const handleAnalyzeAndTranslateMedia = async () => {
     if (!uploadedMedia?.base64) {
-      alert(lang === 'uz' ? 'Iltimos, avval video yoki audio fayl yuklang' : 'Сначала загрузите видео или аудио файл');
+      setCleanNotice(
+        lang === 'uz' ? 'Iltimos, avval video yoki audio fayl yuklang' : 'Сначала загрузите видео или аудио файл'
+      );
       return;
     }
 
@@ -384,13 +445,13 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
         }
       } else {
         setPipelineCurrentStage('error');
-        alert(data.error || 'Pipeline jarayonida xatolik');
+        setCleanNotice(data.error || 'Pipeline jarayonida xatolik');
       }
     } catch (e: any) {
       clearTimeout(t1);
       clearTimeout(t2);
       setPipelineCurrentStage('error');
-      alert(`Xatolik: ${e.message}`);
+      setCleanNotice(`Xatolik: ${e.message}`);
     } finally {
       setIsAnalyzingMedia(false);
       setAnalysisProgressText('');
@@ -509,7 +570,7 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
       if (data.suggestedTopic) setTopic(data.suggestedTopic);
       setShowCustomSpeechInput(false);
     } catch (err: any) {
-      alert(`Xatolik: ${err.message}`);
+      setCleanNotice(`Xatolik: ${err.message}`);
     } finally {
       setIsTranslatingCustomSpeech(false);
     }
@@ -541,7 +602,7 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
       if (data.suggestedTopic) setTopic(data.suggestedTopic);
       if (data.detectedLanguage) setDetectedLanguage(data.detectedLanguage);
     } catch (err: any) {
-      alert(`Xatolik: ${err.message}`);
+      setCleanNotice(`Xatolik: ${err.message}`);
     } finally {
       setIsGeneratingSubtitles(false);
     }
@@ -621,7 +682,7 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
         setScript(data.script);
       }
     } catch (e: any) {
-      alert(`Xatolik: ${e.message}`);
+      setCleanNotice(`Xatolik: ${e.message}`);
     } finally {
       setIsGeneratingScript(false);
     }
@@ -707,7 +768,7 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
       }
       await logGeneration('dubbing', topic || 'Video Dublyaj', 1);
     } catch (e: any) {
-      alert(`Xatolik: ${e.message}`);
+      setCleanNotice(`Xatolik: ${e.message}`);
     } finally {
       setIsSynthesizing(false);
     }
@@ -805,6 +866,18 @@ export const VoiceoverStudio: React.FC<VoiceoverStudioProps> = ({
 
   return (
     <div className="space-y-6">
+      {cleanNotice && (
+        <div className="px-4 py-3 rounded-xl bg-[rgba(14,124,134,0.1)] border border-[#0E7C86]/30 text-[#161511] text-xs font-medium flex items-center justify-between gap-3">
+          <span>{cleanNotice}</span>
+          <button
+            type="button"
+            onClick={() => setCleanNotice(null)}
+            className="text-[#5D594E] hover:text-[#161511] font-mono text-xs cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
       {/* Header Banner */}
       <div className="border border-[rgba(22,21,17,0.14)] rounded-[22px] bg-[rgba(255,255,255,0.52)] backdrop-blur-md p-6 sm:p-7 relative overflow-hidden shadow-[0_30px_50px_-30px_rgba(22,21,17,0.15)]">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-5 relative z-10">

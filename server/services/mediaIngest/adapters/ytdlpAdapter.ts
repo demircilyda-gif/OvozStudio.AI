@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import { BaseMediaAdapter, AdapterResult } from "./baseAdapter.js";
-import { MediaPlatform, IngestJobState } from "../types.js";
-import { execAsync, sanitizeLogOutput } from "../audioVerifier.js";
+import { BaseMediaAdapter, type AdapterResult } from "./baseAdapter.ts";
+import type { MediaPlatform, IngestJobState } from "../types.ts";
+import { execAsync, sanitizeLogOutput } from "../audioVerifier.ts";
 
 export class YtDlpAdapter extends BaseMediaAdapter {
   readonly name = "YtDlpAdapter";

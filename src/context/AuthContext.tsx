@@ -32,7 +32,7 @@ interface AuthContextType {
   syncCredits: (remaining: number) => void;
   addCredits: (amount: number, newTier?: 'free' | 'pro' | 'unlimited') => Promise<void>;
   logGeneration: (
-    type: 'podcast' | 'voiceover' | 'tts' | 'dubbing' | 'agent_call',
+    type: 'podcast' | 'voiceover' | 'tts' | 'dubbing' | 'agent_call' | 'cover',
     title: string,
     cost?: number
   ) => Promise<void>;
@@ -229,7 +229,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const logGeneration = async (
-    type: 'podcast' | 'voiceover' | 'tts' | 'dubbing' | 'agent_call',
+    type: 'podcast' | 'voiceover' | 'tts' | 'dubbing' | 'agent_call' | 'cover',
     title: string,
     cost: number = 1
   ) => {

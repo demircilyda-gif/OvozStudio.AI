@@ -211,7 +211,11 @@ export const ScriptEditor: React.FC<ScriptEditorProps> = ({
   // Polish user's draft and calibrate timing
   const handlePolishAndTiming = async () => {
     if (!scriptText.trim()) {
-      alert(lang === 'uz' ? 'Iltimos, avval matn maydoniga qoralama yoki ssenariy matnini kiriting' : 'Сначала введите текст для анализа в поле ввода');
+      setCleanNotice(
+        lang === 'uz'
+          ? 'Iltimos, avval matn maydoniga qoralama yoki ssenariy matnini kiriting'
+          : 'Сначала введите текст для анализа в поле ввода'
+      );
       return;
     }
 
@@ -236,7 +240,7 @@ export const ScriptEditor: React.FC<ScriptEditorProps> = ({
       if (data.description && !description) onChangeDescription(data.description);
       if (data.script) onChangeScriptText(data.script);
     } catch (err: any) {
-      alert(`Xatolik: ${err.message}`);
+      setCleanNotice(`Xatolik: ${err.message}`);
     } finally {
       setIsPolishing(false);
     }
@@ -319,7 +323,7 @@ export const ScriptEditor: React.FC<ScriptEditorProps> = ({
     } catch (err: any) {
       // 4) If generation fails, show the error state as today — simulation just stops.
       setGenShowState(null);
-      alert(`Xatolik: ${err.message}`);
+      setCleanNotice(`Xatolik: ${err.message}`);
     } finally {
       setIsGeneratingScript(false);
     }
@@ -405,7 +409,7 @@ export const ScriptEditor: React.FC<ScriptEditorProps> = ({
     } catch (err: any) {
       // 4) If generation fails, show the error state as today — simulation just stops.
       setGenShowState(null);
-      alert(`Xatolik: ${err.message}`);
+      setCleanNotice(`Xatolik: ${err.message}`);
     } finally {
       setIsGeneratingHourScript(false);
     }
@@ -432,7 +436,7 @@ export const ScriptEditor: React.FC<ScriptEditorProps> = ({
         onChangeScriptText(scriptText + addition);
       }
     } catch (e: any) {
-      alert(`Xatolik: ${e.message}`);
+      setCleanNotice(`Xatolik: ${e.message}`);
     } finally {
       setIsExpandingChapter(false);
     }

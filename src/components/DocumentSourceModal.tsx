@@ -47,9 +47,9 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
 }) => {
   const { isAuthenticated, requireAuth } = useAuth();
   const [activeTab, setActiveTab] = useState<'upload' | 'text' | 'link'>('upload');
-  const [targetFormat, setTargetFormat] = useState<'podcast' | 'interview' | 'voiceover' | 'audiobook'>(defaultFormat);
-  const [targetDurationPreset, setTargetDurationPreset] = useState<string>('10 daqiqa');
-  const [customMinutes, setCustomMinutes] = useState<number>(15);
+  const [targetFormat, setTargetFormat] = useState<'podcast' | 'interview' | 'voiceover' | 'audiobook' | 'verbatim_dubbing'>(defaultFormat);
+  const [targetDurationPreset, setTargetDurationPreset] = useState<string>('5 daqiqa');
+  const [customMinutes, setCustomMinutes] = useState<number>(10);
   const [tone, setTone] = useState<string>('engaging');
   const [languageMode, setLanguageMode] = useState<'uzbek' | 'original'>('uzbek');
   const [userInstructions, setUserInstructions] = useState<string>('');
@@ -75,6 +75,12 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   if (!isOpen) return null;
+
+  const isStoryboardOrVideoSource =
+    targetFormat === 'verbatim_dubbing' ||
+    targetFormat === 'voiceover' ||
+    uploadedFile?.category === 'video' ||
+    /(?:Видеоряд:|Интонация:|Текст:|\d{1,2}:\d{2}\s*[–—-]\s*\d{1,2}:\d{2})/i.test(sourceText);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -111,8 +117,8 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
     if (sizeMb > 35) {
       setErrorMsg(
         lang === 'uz'
-          ? "Fayl hajmi 35MB dan oshmasligi kerak. Katta fayllar uchun YouTube havola yoki matn nusxasidan foydalaning."
-          : 'Размер файла не должен превышать 35МБ. Для больших файлов используйте ссылку на видео или текст.'
+          ? "Fayl hajmi 35MB dan oshmasligi kerak. 15 daqiqalik katta videolar (600 MB gacha) uchun '2 Ovozli Intervyu' -> 'Aniq Dublyaj 1:1' bo'limidan foydalaning."
+          : 'Для больших видео до 15 мин (до 600 МБ) используйте загрузку прямо в разделе «2 Ovozli Intervyu -> Точный дубляж 1:1».'
       );
       return;
     }
@@ -135,7 +141,7 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
 
   const finalTargetDuration =
     targetDurationPreset === 'custom'
-      ? `${customMinutes} daqiqa`
+      ? `${Math.min(10, customMinutes)} daqiqa`
       : targetDurationPreset;
 
   const handleAnalyze = async () => {
@@ -157,7 +163,7 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
       return;
     }
     if (activeTab === 'text' && !sourceText.trim()) {
-      setErrorMsg(lang === 'uz' ? 'Iltimos, maqola yoki qoralama matnini kiriting' : 'Введите текст статьи или черновика');
+      setErrorMsg(lang === 'uz' ? 'Iltimos, maqola yoki raskadrovka matnini kiriting' : 'Введите текст статьи или раскадровку');
       return;
     }
     if (activeTab === 'link' && !sourceUrl.trim()) {
@@ -198,7 +204,12 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
 
       const data = await res.json();
       onApply({
-        targetFormat: targetFormat === 'audiobook' ? 'podcast' : targetFormat,
+        targetFormat:
+          targetFormat === 'audiobook'
+            ? 'podcast'
+            : targetFormat === 'verbatim_dubbing'
+            ? 'interview'
+            : targetFormat,
         title: data.title,
         description: data.description,
         tags: data.tags,
@@ -235,29 +246,14 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
           </div>
           <h2 className="text-xl sm:text-2xl font-serif text-[#161511] tracking-tight">
             {lang === 'uz'
-              ? 'PDF, Video yoki Matndan Podkast Yaratish'
-              : 'Создание Подкаста из PDF, Видео или Текста'}
+              ? 'PDF, Raskadrovka yoki Matndan Yaratish'
+              : 'Импорт PDF, Раскадровки или Статьи'}
           </h2>
           <p className="text-xs text-[#5D594E] mt-1">
             {lang === 'uz'
-              ? 'NotebookLM konspekti, video, PDF yoki audio faylni yuboring. Eng kerakli mohiyat qisqa Reels yoki to\'liq o\'zbekcha podkastga aylanadi.'
-              : 'Загрузите заметки, видео, PDF или аудио для преобразования в готовый сценарий подкаста.'}
+              ? 'PDF maqola, NotebookLM konspekti yoki taymkodli ruscha raskadrovkani yuboring.'
+              : 'Загрузите PDF, статью или раскадровку с таймкодами для создания подкаста или точного дубляжа 1:1.'}
           </p>
-
-          {/* NotebookLM workflow helper banner */}
-          <div className="mt-3 p-3.5 rounded-2xl bg-white border border-[rgba(22,21,17,0.12)] flex items-start gap-2.5 text-[11px] text-[#5D594E] shadow-2xs">
-            <span className="p-1 rounded-lg bg-[#0E7C86]/10 text-[#0E7C86] shrink-0 font-bold font-mono">LM</span>
-            <div>
-              <p className="font-semibold text-[#161511]">
-                {lang === 'uz' ? 'NotebookLM bilan integratsiya qanday ishlaydi?' : 'Как интегрировать с NotebookLM?'}
-              </p>
-              <p className="text-[#5D594E] mt-0.5 leading-relaxed">
-                {lang === 'uz'
-                  ? '1) NotebookLM’dagi konspektni "Maqola Matni"ga qo\'ying yoki 2) Audio Overview (mp3) faylini yuklang — OvozStudio darhol o\'zbekcha ovozlarda tayyorlab beradi.'
-                  : '1) Скопируйте заметки из NotebookLM во вкладку "Текст" или 2) Загрузите MP3 файл — OvozStudio сразу создаст подкаст на чистом узбекском.'}
-              </p>
-            </div>
-          </div>
         </div>
 
         {/* Source Tabs */}
@@ -282,7 +278,7 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
             }`}
           >
             <FileText className="w-3.5 h-3.5" />
-            <span>{lang === 'uz' ? 'Maqola Matni' : 'Текст'}</span>
+            <span>{lang === 'uz' ? 'Matn / Raskadrovka' : 'Текст / Раскадровка'}</span>
           </button>
           <button
             onClick={() => setActiveTab('link')}
@@ -293,7 +289,7 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
             }`}
           >
             <Link className="w-3.5 h-3.5" />
-            <span>{lang === 'uz' ? 'Video Havola' : 'Ссылка'}</span>
+            <span>{lang === 'uz' ? 'Havola' : 'Ссылка'}</span>
           </button>
         </div>
 
@@ -322,49 +318,40 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
                 {uploadedFile
                   ? uploadedFile.name
                   : lang === 'uz'
-                  ? 'Fayl tanlash uchun bosing (PDF, Word, TXT, MP3, WAV, MP4)'
-                  : 'Нажмите для выбора файла (PDF, DOCX, TXT, MP3, WAV, MP4)'}
+                  ? 'Fayl tanlash uchun bosing (PDF, Word, TXT, MP3, WAV)'
+                  : 'Нажмите для выбора файла (PDF, DOCX, TXT, MP3, WAV)'}
               </p>
               <p className="font-mono text-xs text-[#7D7A70] mt-1">
                 {uploadedFile
                   ? `${uploadedFile.size} • ${uploadedFile.category.toUpperCase()} • Tayyor`
-                  : 'PDF hujjatlar, audio yozuvlar yoki maqolalar (Maksimal 35MB)'}
+                  : lang === 'uz'
+                  ? 'PDF hujjatlar, audio yozuvlar yoki maqolalar'
+                  : 'Документы PDF, аудио или текстовые файлы'}
               </p>
             </div>
           </div>
         )}
 
-        {/* Tab 2: Text / Article */}
+        {/* Tab 2: Text / Article / Storyboard */}
         {activeTab === 'text' && (
           <div className="space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <label className="font-mono text-xs text-[#5D594E] uppercase tracking-wider block">
                 {lang === 'uz'
-                  ? 'Maqola, NotebookLM konspekti yoki ma\'ruza matni:'
-                  : 'Вставьте текст статьи, заметки NotebookLM или черновик:'}
+                  ? 'Maqola matni yoki taymkodli ruscha raskadrovka:'
+                  : 'Вставьте текст статьи или раскадровку с таймкодами:'}
               </label>
               <div className="flex flex-wrap items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() =>
                     setSourceText(
-                      "O'zbekistonda sun'iy intellekt texnologiyalari bank, ta'lim, tibbiyot va davlat xizmatlarida keng joriy etilmoqda. 2026-yilga kelib mahalliy o'zbek tilidagi ovozli modellar va raqamli ekotizimlar biznes samaradorligini 40 foizga oshirdi. Asosiy yo'nalishlar: mijozlarga avtomatlashtirilgan ovozli xizmat ko'rsatish, podkast va media sanoatini rivojlantirish hamda yosh dasturchilar uchun yangi startap imkoniyatlari."
+                      "O'zbekistonda sun'iy intellekt texnologiyalari bank, ta'lim, tibbiyot va davlat xizmatlarida keng joriy etilmoqda. 2026-yilga kelib mahalliy o'zbek tilidagi ovozli modellar va raqamli ekotizimlar biznes samaradorligini 40 foizga oshirdi."
                     )
                   }
                   className="text-[10.5px] px-2.5 py-1 rounded-full bg-[#0E7C86]/10 hover:bg-[#0E7C86]/20 text-[#0A5A62] border border-[#0E7C86]/25 transition-colors cursor-pointer font-medium"
                 >
                   + {lang === 'uz' ? 'AI & Iqtisodiyot konspekti' : 'Шаблон: ИИ и экономика'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setSourceText(
-                      "Inson miyasi uyqu davomida kun bo'yi to'plangan toksinlardan tozalanadi va xotirani mustahkamlaydi. Tadqiqotlarga ko'ra, kechki soat 23:00 dan oldin uxlash melatonin gormoni ishlab chiqarilishini 2 barobar yaxshilaydi, diqqatni jamlashni kuchaytiradi va surunkali charchoqni bartaraf etadi."
-                    )
-                  }
-                  className="text-[10.5px] px-2.5 py-1 rounded-full bg-[#161511]/8 hover:bg-[#161511]/15 text-[#161511] border border-[rgba(22,21,17,0.15)] transition-colors cursor-pointer font-medium"
-                >
-                  + {lang === 'uz' ? 'Ilmiy Audio Overview namunasi' : 'Шаблон: Научный обзор'}
                 </button>
               </div>
             </div>
@@ -374,8 +361,8 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
               onChange={(e) => setSourceText(e.target.value)}
               placeholder={
                 lang === 'uz'
-                  ? 'Masalan: Maqola matni, intervyu tezislari, tahliliy yangiliklar...'
-                  : 'Например: текст статьи, заметки, тезисы...'
+                  ? 'Masalan: Maqola matni yoki 00:00 – 00:02 | Девушка (Ж): Текст: «...»'
+                  : 'Например: текст статьи или раскадровка 00:00 – 00:02 | Девушка (Ж): Текст: «...»'
               }
               className="w-full bg-white border border-[rgba(22,21,17,0.14)] rounded-2xl p-4 text-xs sm:text-sm text-[#161511] placeholder-[#7D7A70] focus:outline-none focus:border-[#0E7C86] resize-none font-sans leading-relaxed shadow-xs"
             />
@@ -386,48 +373,38 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
         {activeTab === 'link' && (
           <div className="space-y-2">
             <label className="font-mono text-xs text-[#5D594E] uppercase tracking-wider block">
-              {lang === 'uz' ? 'YouTube, TikTok yoki Veb-havola:' : 'Ссылка на YouTube, TikTok или статью:'}
+              {lang === 'uz' ? 'Veb-maqola yoki video havolasi:' : 'Ссылка на статью или видео:'}
             </label>
             <input
               type="text"
               value={sourceUrl}
               onChange={(e) => setSourceUrl(e.target.value)}
-              placeholder="https://www.youtube.com/watch?v=..."
+              placeholder="https://..."
               className="w-full bg-white border border-[rgba(22,21,17,0.14)] rounded-full px-4 py-3 text-xs sm:text-sm text-[#161511] placeholder-[#7D7A70] focus:outline-none focus:border-[#0E7C86] shadow-xs"
             />
-            <div className="p-3.5 bg-white border border-[rgba(22,21,17,0.12)] rounded-xl space-y-1.5 text-[11px] text-[#5D594E] shadow-2xs">
-              <div className="flex items-center gap-2 text-[#161511] font-semibold">
-                <Sparkles className="w-3.5 h-3.5 text-[#0E7C86]" />
-                <span>{lang === 'uz' ? 'Aqlli Media Integratsiya:' : 'Как это работает по ссылке:'}</span>
-              </div>
-              <ul className="space-y-1 list-disc list-inside text-[#5D594E] text-[10.5px]">
-                <li><strong className="text-[#161511]">YouTube:</strong> {lang === 'uz' ? "Videoning nutqi olinadi va o'zbekchaga o'giriladi." : 'Извлекается стенограмма речи спикера и переводится.'}</li>
-                <li><strong className="text-[#161511]">Audio / Podkast:</strong> {lang === 'uz' ? "Audio tahlil qilinadi va yangi podkast tuziladi." : 'Анализируется дорожка и создается сценарий.'}</li>
-              </ul>
-            </div>
           </div>
         )}
 
-        {/* Format Selector: Solo vs Interview vs Voiceover */}
+        {/* Format Selector */}
         <div className="space-y-1.5 pt-1">
           <label className="font-mono text-xs uppercase tracking-wider text-[#5D594E] flex items-center justify-between">
             <span className="flex items-center gap-1.5">
               <Layers className="w-3.5 h-3.5 text-[#0E7C86]" />
-              <span>{lang === 'uz' ? 'Qanday formatda ssenariy yaratilsin?' : 'В каком формате создать сценарий?'}</span>
+              <span>{lang === 'uz' ? 'Rejimni tanlang:' : 'Выберите режим работы:'}</span>
             </span>
           </label>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <button
               type="button"
-              onClick={() => setTargetFormat('podcast')}
+              onClick={() => setTargetFormat('verbatim_dubbing')}
               className={`py-2 px-2.5 rounded-full text-xs font-medium flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                targetFormat === 'podcast'
-                  ? 'bg-[#161511] text-[#F4F1EA] shadow-xs'
-                  : 'bg-white border border-[rgba(22,21,17,0.12)] text-[#5D594E] hover:border-[#161511]'
+                targetFormat === 'verbatim_dubbing'
+                  ? 'bg-[#0E7C86] text-white shadow-xs'
+                  : 'bg-white border border-[rgba(22,21,17,0.12)] text-[#5D594E] hover:border-[#0E7C86]'
               }`}
             >
-              <Mic2 className="w-3.5 h-3.5" />
-              <span>{lang === 'uz' ? 'Yakka Podkast' : 'Одиночный'}</span>
+              <Video className="w-3.5 h-3.5" />
+              <span>{lang === 'uz' ? 'Aniq Dublyaj 1:1' : 'Дубляж 1:1'}</span>
             </button>
 
             <button
@@ -440,7 +417,20 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
               }`}
             >
               <Users2 className="w-3.5 h-3.5" />
-              <span>{lang === 'uz' ? '2 Kishi Intervyu' : 'Интервью (2 голоса)'}</span>
+              <span>{lang === 'uz' ? '2 Ovozli Intervyu' : 'Интервью (2 голоса)'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setTargetFormat('podcast')}
+              className={`py-2 px-2.5 rounded-full text-xs font-medium flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                targetFormat === 'podcast'
+                  ? 'bg-[#161511] text-[#F4F1EA] shadow-xs'
+                  : 'bg-white border border-[rgba(22,21,17,0.12)] text-[#5D594E] hover:border-[#161511]'
+              }`}
+            >
+              <Mic2 className="w-3.5 h-3.5" />
+              <span>{lang === 'uz' ? 'Yakka Podkast' : 'Соло Подкаст'}</span>
             </button>
 
             <button
@@ -453,117 +443,57 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
               }`}
             >
               <Film className="w-3.5 h-3.5" />
-              <span>{lang === 'uz' ? 'Reels Dublyaj' : 'Reels / Озвучка'}</span>
+              <span>{lang === 'uz' ? 'Reels Ovoz' : 'Reels Озвучка'}</span>
             </button>
           </div>
         </div>
 
-        {/* Configuration: Duration and Topic focus */}
-        <div className="pt-1">
-          <div className="space-y-1.5">
-            <label className="font-mono text-xs uppercase tracking-wider text-[#5D594E] flex items-center justify-between">
-              <span className="flex items-center gap-1.5">
-                <Clock className="w-3.5 h-3.5 text-[#0E7C86]" />
-                {lang === 'uz' ? 'Podkast davomiyligi (Xronometraj):' : 'Длительность подкаста:'}
-              </span>
-              <span className="text-[10px] text-[#0A5A62] font-mono font-bold">
-                {finalTargetDuration}
-              </span>
-            </label>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              <select
-                value={targetDurationPreset}
-                onChange={(e) => setTargetDurationPreset(e.target.value)}
-                className="w-full bg-white border border-[rgba(22,21,17,0.14)] rounded-full px-4 py-2 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86] cursor-pointer shadow-xs"
-              >
-                <option value="30 soniya">30 soniya (Reels / Shorts xuk)</option>
-                <option value="1 daqiqa">1 daqiqa (Tezkor yangiliklar)</option>
-                <option value="2 daqiqa">2 daqiqa (Qisqa xulosa / Reels)</option>
-                <option value="3 daqiqa">3 daqiqa (Qisqa podkast)</option>
-                <option value="5 daqiqa">5 daqiqa (Mavzu sharhi)</option>
-                <option value="10 daqiqa">10 daqiqa (Standart podkast soni)</option>
-                <option value="15 daqiqa">15 daqiqa (Tahliliy podkast)</option>
-                <option value="custom">Ixtiyoriy daqiqa (Custom)...</option>
-              </select>
-
-              {targetDurationPreset === 'custom' ? (
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min={1}
-                    max={120}
-                    value={customMinutes}
-                    onChange={(e) => setCustomMinutes(Math.max(1, parseInt(e.target.value) || 1))}
-                    className="w-24 bg-white border border-[rgba(22,21,17,0.14)] rounded-full px-3 py-1.5 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86]"
-                  />
-                  <span className="font-mono text-xs text-[#7D7A70]">
-                    {lang === 'uz' ? 'daqiqa (1 dan 120 gacha)' : 'минут (от 1 до 120)'}
-                  </span>
-                </div>
-              ) : (
-                <div className="font-mono text-[11px] text-[#7D7A70] flex items-center bg-white border border-[rgba(22,21,17,0.12)] px-3 rounded-full">
-                  {lang === 'uz'
-                    ? 'AI tizim mos so\'zlar sonini tanlaydi.'
-                    : 'ИИ подберет точное число слов.'}
-                </div>
-              )}
+        {/* Duration Selector: ONLY shown when generating AI Podcast/Interview by topic/article (max 10 min), hidden for video/verbatim dubbing */}
+        {!isStoryboardOrVideoSource ? (
+          <div className="pt-1">
+            <div className="space-y-1.5">
+              <label className="font-mono text-xs uppercase tracking-wider text-[#5D594E] flex items-center justify-between">
+                <span className="flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-[#0E7C86]" />
+                  {lang === 'uz' ? 'Podkast davomiyligi (10 daqiqagacha):' : 'Длительность подкаста (до 10 минут):'}
+                </span>
+                <span className="text-[10px] text-[#0A5A62] font-mono font-bold">
+                  {finalTargetDuration}
+                </span>
+              </label>
+              <div className="grid grid-cols-4 gap-2">
+                {[
+                  { val: '1 daqiqa', labelUz: '1 daqiqa', labelRu: '1 минута' },
+                  { val: '3 daqiqa', labelUz: '3 daqiqa', labelRu: '3 минуты' },
+                  { val: '5 daqiqa', labelUz: '5 daqiqa', labelRu: '5 минут' },
+                  { val: '10 daqiqa', labelUz: '10 daqiqa', labelRu: '10 минут' },
+                ].map((d) => (
+                  <button
+                    key={d.val}
+                    type="button"
+                    onClick={() => setTargetDurationPreset(d.val)}
+                    className={`py-2 px-3 rounded-full text-xs font-medium transition-all cursor-pointer ${
+                      targetDurationPreset === d.val
+                        ? 'bg-[#161511] text-[#F4F1EA] font-semibold'
+                        : 'bg-white border border-[rgba(22,21,17,0.14)] text-[#5D594E] hover:text-[#161511]'
+                    }`}
+                  >
+                    {lang === 'uz' ? d.labelUz : d.labelRu}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
-        </div>
-
-        {/* Tone and Language Adaptation */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="space-y-1.5">
-            <label className="font-mono text-xs uppercase tracking-wider text-[#5D594E] flex items-center gap-1.5">
-              <Sliders className="w-3.5 h-3.5 text-[#0E7C86]" />
-              {lang === 'uz' ? 'Ijro ohangi va uslubi:' : 'Тон и стиль подачи:'}
-            </label>
-            <select
-              value={tone}
-              onChange={(e) => setTone(e.target.value)}
-              className="w-full bg-white border border-[rgba(22,21,17,0.14)] rounded-full px-4 py-2 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86] cursor-pointer shadow-xs"
-            >
-              <option value="engaging">Jonli, samimiy va jalb qiluvchi</option>
-              <option value="analytical">Chuqur ilmiy, tahliliy ekspert</option>
-              <option value="commercial">Dinamik va yuqori energiya</option>
-              <option value="storytelling">Badiiy, ta'sirchan hikoyanavislik</option>
-              <option value="humorous">Yengil, quvnoq va hazilomuz</option>
-            </select>
+        ) : (
+          <div className="p-3 rounded-xl bg-[#0E7C86]/10 border border-[#0E7C86]/25 text-xs text-[#0A5A62] flex items-center gap-2">
+            <Clock className="w-4 h-4 text-[#0E7C86] shrink-0" />
+            <span>
+              {lang === 'uz'
+                ? "Taymkodli raskadrovka va videodublyajda davomiylik avtomatik ravishda video va taymkodlar bo'yicha belgilanadi (1:1)."
+                : 'При дубляже видео и раскадровки с таймкодами длительность определяется автоматически по таймкодам (1:1 без отсебятины).'}
+            </span>
           </div>
-
-          <div className="space-y-1.5">
-            <label className="font-mono text-xs uppercase tracking-wider text-[#5D594E] flex items-center gap-1.5">
-              <Globe className="w-3.5 h-3.5 text-[#0E7C86]" />
-              {lang === 'uz' ? 'Til moslashuvi:' : 'Языковая адаптация:'}
-            </label>
-            <select
-              value={languageMode}
-              onChange={(e) => setLanguageMode(e.target.value as any)}
-              className="w-full bg-white border border-[rgba(22,21,17,0.14)] rounded-full px-4 py-2 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86] cursor-pointer shadow-xs"
-            >
-              <option value="uzbek">O'zbek tiliga mukammal lokalizatsiya</option>
-              <option value="original">Asl tilda saqlash (Ruscha / Inglizcha)</option>
-            </select>
-          </div>
-        </div>
-
-        {/* User Instructions */}
-        <div className="space-y-1.5">
-          <label className="font-mono text-xs uppercase tracking-wider text-[#5D594E] block">
-            {lang === 'uz' ? 'Maxsus ko\'rsatmalar (ixtiyoriy):' : 'Пожелания (необязательно):'}
-          </label>
-          <input
-            type="text"
-            value={userInstructions}
-            onChange={(e) => setUserInstructions(e.target.value)}
-            placeholder={
-              lang === 'uz'
-                ? 'Masalan: Hayotiy misollar va savol-javob qo\'shing...'
-                : 'Например: добавить примеры, диалог...'
-            }
-            className="w-full bg-white border border-[rgba(22,21,17,0.14)] rounded-full px-4 py-2.5 text-xs text-[#161511] placeholder-[#7D7A70] focus:outline-none focus:border-[#0E7C86] shadow-xs"
-          />
-        </div>
+        )}
 
         {/* Error Message */}
         {errorMsg && (
@@ -582,8 +512,10 @@ export const DocumentSourceModal: React.FC<DocumentSourceModalProps> = ({
           <Sparkles className={`w-4 h-4 ${isAnalyzing ? 'animate-spin' : ''}`} />
           <span>
             {isAnalyzing
-              ? (lang === 'uz' ? 'Multimodal Tahlil Qilmoqda...' : 'Анализирует...')
-              : (lang === 'uz' ? `${finalTargetDuration}lik Mukammal Ssenariy Yaratish` : `Сгенерировать Сценарий (${finalTargetDuration})`)}
+              ? (lang === 'uz' ? 'Tahlil Qilinmoqda...' : 'Обработка...')
+              : isStoryboardOrVideoSource
+              ? (lang === 'uz' ? '1:1 Aniq Dublyajga Oʻtkazish' : 'Перевести раскадровку 1:1 по таймкодам')
+              : (lang === 'uz' ? `${finalTargetDuration}lik Ssenariy Yaratish` : `Создать сценарий (${finalTargetDuration})`)}
           </span>
           <ArrowRight className="w-4 h-4" />
         </button>

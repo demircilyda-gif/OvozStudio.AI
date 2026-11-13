@@ -13,7 +13,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
-import { execAsync } from "./audioVerifier.js";
+import { execAsync } from "./audioVerifier.ts";
 
 const COBALT_PORT = 9099;
 let serverInstance: http.Server | null = null;

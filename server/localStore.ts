@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { isEmailAdmin, getAdminEmails } from './authUtils.js';
+import { isEmailAdmin, getAdminEmails } from './authUtils.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -57,12 +57,28 @@ export interface StoredProcessedSession {
   processedAt: string;
 }
 
+export interface StoredVipRequest {
+  id: string;
+  userId: string;
+  userEmail: string;
+  projectTitle: string;
+  format: string;
+  targetDuration: string;
+  contactPhone: string;
+  brief: string;
+  status: 'new' | 'in_progress' | 'completed' | 'cancelled';
+  adminNotes?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
 interface StorageData {
   users: Record<string, StoredUser>;
   paymentRequests: Record<string, StoredPaymentRequest>;
   pendingCreditGrants: Record<string, StoredPendingGrant>;
   generations: Record<string, any[]>;
   processedSessions: Record<string, StoredProcessedSession>;
+  vipRequests: Record<string, StoredVipRequest>;
   geminiApiKey?: string;
 }
 
@@ -73,6 +89,7 @@ class LocalStore {
     pendingCreditGrants: {},
     generations: {},
     processedSessions: {},
+    vipRequests: {},
   };
 
   constructor() {
@@ -94,6 +111,7 @@ class LocalStore {
           pendingCreditGrants: parsed.pendingCreditGrants || {},
           generations: parsed.generations || {},
           processedSessions: parsed.processedSessions || {},
+          vipRequests: parsed.vipRequests || {},
           geminiApiKey: parsed.geminiApiKey || undefined,
         };
       } else {
@@ -122,6 +140,7 @@ class LocalStore {
             creditsRemaining: 999999,
             tier: 'unlimited',
             role: 'admin',
+            initialBonusGranted: true,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
           };
@@ -161,17 +180,23 @@ class LocalStore {
   }
 
   public saveUser(user: Partial<StoredUser> & { uid: string }): StoredUser {
-    const existing = this.data.users[user.uid] || (user.email ? this.getUserByEmail(user.email) : null) || ({} as Partial<StoredUser>);
+    const existing =
+      this.data.users[user.uid] ||
+      (user.email ? this.getUserByEmail(user.email) : null) ||
+      ({} as Partial<StoredUser>);
     const hasExistingRecord = Boolean(existing && existing.uid);
     const initialCredits = hasExistingRecord
-      ? (typeof existing.creditsRemaining === 'number' ? existing.creditsRemaining : 0)
+      ? typeof existing.creditsRemaining === 'number'
+        ? existing.creditsRemaining
+        : 0
       : 5;
 
     const updated: StoredUser = {
       uid: user.uid,
       email: (user.email ?? existing.email ?? '').trim().toLowerCase(),
       displayName: user.displayName ?? existing.displayName ?? 'Foydalanuvchi',
-      creditsRemaining: typeof user.creditsRemaining === 'number' ? user.creditsRemaining : initialCredits,
+      creditsRemaining:
+        typeof user.creditsRemaining === 'number' ? user.creditsRemaining : initialCredits,
       tier: user.tier ?? existing.tier ?? 'free',
       role: user.role ?? existing.role ?? 'user',
       initialBonusGranted: true,
@@ -206,7 +231,10 @@ class LocalStore {
     return this.data.paymentRequests[id] || null;
   }
 
-  public updatePaymentRequest(id: string, updates: Partial<StoredPaymentRequest>): StoredPaymentRequest | null {
+  public updatePaymentRequest(
+    id: string,
+    updates: Partial<StoredPaymentRequest>
+  ): StoredPaymentRequest | null {
     const req = this.data.paymentRequests[id];
     if (!req) return null;
     const updated: StoredPaymentRequest = {
@@ -215,6 +243,45 @@ class LocalStore {
       updatedAt: new Date().toISOString(),
     };
     this.data.paymentRequests[id] = updated;
+    this.save();
+    return updated;
+  }
+
+  // --- VIP Production Requests ---
+  public createVipRequest(req: StoredVipRequest): StoredVipRequest {
+    if (!this.data.vipRequests) {
+      this.data.vipRequests = {};
+    }
+    this.data.vipRequests[req.id] = req;
+    this.save();
+    return req;
+  }
+
+  public getVipRequests(statusFilter?: string): StoredVipRequest[] {
+    const all = Object.values(this.data.vipRequests || {}).sort(
+      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+    );
+    if (!statusFilter || statusFilter === 'all') return all;
+    return all.filter((r) => r.status === statusFilter);
+  }
+
+  public getUserVipRequests(uid: string): StoredVipRequest[] {
+    return Object.values(this.data.vipRequests || {})
+      .filter((r) => r.userId === uid)
+      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+  }
+
+  public updateVipRequest(
+    id: string,
+    updates: Partial<StoredVipRequest>
+  ): StoredVipRequest | null {
+    if (!this.data.vipRequests || !this.data.vipRequests[id]) return null;
+    const updated: StoredVipRequest = {
+      ...this.data.vipRequests[id],
+      ...updates,
+      updatedAt: new Date().toISOString(),
+    };
+    this.data.vipRequests[id] = updated;
     this.save();
     return updated;
   }
@@ -246,9 +313,14 @@ class LocalStore {
     if (!this.data.generations[uid]) {
       this.data.generations[uid] = [];
     }
-    const existingIdx = this.data.generations[uid].findIndex((g: any) => g.id && g.id === record.id);
+    const existingIdx = this.data.generations[uid].findIndex(
+      (g: any) => g.id && g.id === record.id
+    );
     if (existingIdx >= 0) {
-      this.data.generations[uid][existingIdx] = { ...this.data.generations[uid][existingIdx], ...record };
+      this.data.generations[uid][existingIdx] = {
+        ...this.data.generations[uid][existingIdx],
+        ...record,
+      };
     } else {
       this.data.generations[uid].unshift(record);
     }
@@ -352,6 +424,11 @@ class LocalStore {
 
   public setGeminiApiKey(key: string): void {
     this.data.geminiApiKey = key.trim();
+    this.save();
+  }
+
+  public clearGeminiApiKey(): void {
+    delete this.data.geminiApiKey;
     this.save();
   }
 }

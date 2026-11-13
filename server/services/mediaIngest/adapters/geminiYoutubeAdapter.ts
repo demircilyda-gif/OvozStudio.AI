@@ -1,5 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
-import { DubbingSegment, IngestJobState } from "../types.js";
+import type { DubbingSegment, IngestJobState } from "../types.ts";
 
 export interface GeminiTranscriptResult {
   success: boolean;

@@ -15,14 +15,18 @@ import {
   Filter,
   ShieldCheck,
   Key,
+  Crown,
 } from 'lucide-react';
 import {
   AppUserProfile,
   PaymentRequest,
   GenerationRecord,
+  VipProductionRequest,
   adminFetchAllUsers,
   adminFetchPaymentRequests,
   adminFetchAllGenerations,
+  adminFetchVipRequests,
+  adminUpdateVipRequest,
   approvePaymentRequest,
   rejectPaymentRequest,
   adminManualGrantCredits,
@@ -34,7 +38,7 @@ interface AdminDashboardTabProps {
   lang: 'uz' | 'ru';
 }
 
-type AdminSection = 'analytics' | 'generations' | 'users' | 'payments';
+type AdminSection = 'analytics' | 'generations' | 'users' | 'payments' | 'vip';
 
 export const AdminDashboardTab: React.FC<AdminDashboardTabProps> = ({ lang }) => {
   const { user, isAdmin } = useAuth();
@@ -43,6 +47,7 @@ export const AdminDashboardTab: React.FC<AdminDashboardTabProps> = ({ lang }) =>
   const [users, setUsers] = useState<AppUserProfile[]>([]);
   const [generations, setGenerations] = useState<GenerationRecord[]>([]);
   const [paymentRequests, setPaymentRequests] = useState<PaymentRequest[]>([]);
+  const [vipRequests, setVipRequests] = useState<VipProductionRequest[]>([]);
 
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [feedbackMsg, setFeedbackMsg] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
@@ -81,12 +86,14 @@ export const AdminDashboardTab: React.FC<AdminDashboardTabProps> = ({ lang }) =>
   const loadAllAdminData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [fetchedUsers, fetchedPayments] = await Promise.all([
+      const [fetchedUsers, fetchedPayments, fetchedVip] = await Promise.all([
         adminFetchAllUsers(),
         adminFetchPaymentRequests('all'),
+        adminFetchVipRequests('all'),
       ]);
       setUsers(fetchedUsers);
       setPaymentRequests(fetchedPayments);
+      setVipRequests(fetchedVip);
 
       const fetchedGenerations = await adminFetchAllGenerations(fetchedUsers);
       setGenerations(fetchedGenerations);
@@ -160,9 +167,9 @@ export const AdminDashboardTab: React.FC<AdminDashboardTabProps> = ({ lang }) =>
     }[] = [
       {
         key: 'podcast_tts',
-        labelUz: 'Yakkaxon Podkast & TTS',
-        labelRu: 'Подкаст и Озвучка (TTS)',
-        match: (t) => t === 'podcast' || t === 'tts',
+        labelUz: 'Yakkaxon Podkast, TTS & Muqova',
+        labelRu: 'Подкаст, TTS и Обложки',
+        match: (t) => t === 'podcast' || t === 'tts' || t === 'cover',
       },
       {
         key: 'agent_call',
@@ -313,6 +320,8 @@ export const AdminDashboardTab: React.FC<AdminDashboardTabProps> = ({ lang }) =>
         return lang === 'uz' ? 'Video Dublyaj' : 'Видео Дубляж';
       case 'agent_call':
         return lang === 'uz' ? 'AI Qoʻngʻiroq Agenti' : 'AI Голосовой Звонок';
+      case 'cover':
+        return lang === 'uz' ? 'AI SVG Muqova' : 'AI SVG Обложка';
       default:
         return type.toUpperCase();
     }
@@ -439,6 +448,26 @@ export const AdminDashboardTab: React.FC<AdminDashboardTabProps> = ({ lang }) =>
     }
   };
 
+  const handleUpdateVipStatus = async (
+    requestId: string,
+    status: 'new' | 'in_progress' | 'completed' | 'cancelled'
+  ) => {
+    try {
+      const ok = await adminUpdateVipRequest(requestId, status);
+      if (ok) {
+        showToast(
+          lang === 'uz' ? 'VIP buyurtma holati yangilandi' : 'Статус VIP-заявки обновлён',
+          'success'
+        );
+        await loadAllAdminData();
+      } else {
+        showToast('Xatolik yuz berdi', 'error');
+      }
+    } catch (err: any) {
+      showToast(err.message || 'Xatolik', 'error');
+    }
+  };
+
   if (!isAdmin) {
     return (
       <div className="bg-white border border-[rgba(22,21,17,0.12)] rounded-2xl p-8 text-center max-w-xl mx-auto my-12 space-y-3">
@@ -541,6 +570,23 @@ export const AdminDashboardTab: React.FC<AdminDashboardTabProps> = ({ lang }) =>
                 {lang === 'uz'
                   ? `To'lovlar (${analyticsSummary.pendingPaymentsCount})`
                   : `Оплаты (${analyticsSummary.pendingPaymentsCount})`}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveSection('vip')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                activeSection === 'vip'
+                  ? 'bg-[#161511] text-[#F4F1EA]'
+                  : 'text-[#5D594E] hover:text-[#161511]'
+              }`}
+            >
+              <Crown className="w-3.5 h-3.5 text-[#C98A12]" />
+              <span>
+                {lang === 'uz'
+                  ? `VIP (${vipRequests.filter((v) => v.status === 'new').length})`
+                  : `VIP (${vipRequests.filter((v) => v.status === 'new').length})`}
               </span>
             </button>
           </div>
@@ -1580,6 +1626,88 @@ export const AdminDashboardTab: React.FC<AdminDashboardTabProps> = ({ lang }) =>
                             {req.approvedBy || '—'}
                           </span>
                         )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* SECTION 5: VIP PRODUCTION REQUESTS */}
+      {activeSection === 'vip' && (
+        <div className="bg-white border border-[rgba(22,21,17,0.12)] rounded-2xl p-5 space-y-4">
+          <div>
+            <h2 className="text-base font-bold text-[#161511]">
+              {lang === 'uz'
+                ? `Maxsus VIP Production Buyurtmalari (${vipRequests.length})`
+                : `Индивидуальные VIP-заявки на продакшн (${vipRequests.length})`}
+            </h2>
+            <p className="text-xs text-[#5D594E]">
+              {lang === 'uz'
+                ? "Eksklyuziv bo'limdan yuborilgan korporativ podkast, IVR va klonlash buyurtmalari"
+                : 'Корпоративные заказы на подкасты, IVR и клонирование голоса из раздела VIP'}
+            </p>
+          </div>
+
+          {vipRequests.length === 0 ? (
+            <div className="py-12 text-center text-xs text-[#5D594E] border border-dashed border-[rgba(22,21,17,0.14)] rounded-xl">
+              {lang === 'uz' ? 'Hozircha VIP buyurtmalar yo‘q.' : 'Индивидуальных VIP-заявок пока нет.'}
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-[rgba(22,21,17,0.12)] text-[#5D594E]">
+                    <th className="py-3 pr-3 font-semibold">{lang === 'uz' ? 'Sana' : 'Дата'}</th>
+                    <th className="py-3 px-3 font-semibold">{lang === 'uz' ? 'Mijoz / Aloqa' : 'Клиент / Контакт'}</th>
+                    <th className="py-3 px-3 font-semibold">{lang === 'uz' ? 'Loyiha & Format' : 'Проект и Формат'}</th>
+                    <th className="py-3 px-3 font-semibold">{lang === 'uz' ? 'Texnik Topshiriq' : 'ТЗ / Описание'}</th>
+                    <th className="py-3 pl-3 font-semibold text-right">{lang === 'uz' ? 'Holat' : 'Статус'}</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[rgba(22,21,17,0.06)]">
+                  {vipRequests.map((req) => (
+                    <tr key={req.id} className="hover:bg-[#F4F1EA]/60 transition-colors">
+                      <td className="py-3 pr-3 font-mono tabular-nums text-[11px] text-[#5D594E] whitespace-nowrap">
+                        {req.createdAt
+                          ? new Date(req.createdAt).toLocaleString(lang === 'ru' ? 'ru-RU' : 'uz-UZ', {
+                              day: '2-digit',
+                              month: '2-digit',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })
+                          : '—'}
+                      </td>
+                      <td className="py-3 px-3">
+                        <div className="font-semibold text-[#161511]">{req.userEmail}</div>
+                        <div className="text-[11px] text-[#0A5A62] font-mono">{req.contactPhone || '—'}</div>
+                      </td>
+                      <td className="py-3 px-3">
+                        <div className="font-semibold text-[#161511]">{req.projectTitle}</div>
+                        <div className="text-[11px] text-[#5D594E]">
+                          {req.format} · {req.targetDuration}
+                        </div>
+                      </td>
+                      <td className="py-3 px-3 text-[#5D594E] max-w-md whitespace-pre-wrap">{req.brief}</td>
+                      <td className="py-3 pl-3 text-right whitespace-nowrap">
+                        <select
+                          value={req.status}
+                          onChange={(e) =>
+                            handleUpdateVipStatus(
+                              req.id,
+                              e.target.value as 'new' | 'in_progress' | 'completed' | 'cancelled'
+                            )
+                          }
+                          className="bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] rounded-lg px-2.5 py-1 text-xs font-semibold text-[#161511] outline-none cursor-pointer"
+                        >
+                          <option value="new">{lang === 'uz' ? 'Yangi' : 'Новая'}</option>
+                          <option value="in_progress">{lang === 'uz' ? 'Jarayonda' : 'В работе'}</option>
+                          <option value="completed">{lang === 'uz' ? 'Bajarildi' : 'Завершена'}</option>
+                          <option value="cancelled">{lang === 'uz' ? 'Bekor qilindi' : 'Отменена'}</option>
+                        </select>
                       </td>
                     </tr>
                   ))}

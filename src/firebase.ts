@@ -75,91 +75,105 @@ export function isUserAdmin(email?: string | null): boolean {
   return ADMIN_EMAILS.includes(email.trim().toLowerCase());
 }
 
-// Get or initialize user profile (saves to Firestore directly and syncs to server)
+// Get or initialize user profile (authoritative server /api/user/sync first, never resets spent credits)
 export async function getOrCreateUserProfile(user: User): Promise<AppUserProfile> {
   const userRef = doc(db, 'users', user.uid);
   const isAdmin = isUserAdmin(user.email);
+  const defaultDisplayName = user.displayName || user.email?.split('@')[0] || 'Foydalanuvchi';
 
+  // 1. Primary path: sync with authoritative server ledger (/api/user/sync checks Firestore + localStore before granting 5 credits once)
+  try {
+    const idToken = await user.getIdToken();
+    const syncRes = await fetch('/api/user/sync', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({
+        displayName: defaultDisplayName,
+        photoURL: user.photoURL || '',
+      }),
+    });
+
+    if (syncRes.ok) {
+      const syncData = await syncRes.json();
+      if (syncData?.profile) {
+        const serverProfile: AppUserProfile = {
+          uid: user.uid,
+          email: user.email || syncData.profile.email || '',
+          displayName: syncData.profile.displayName || defaultDisplayName,
+          photoURL: user.photoURL || syncData.profile.photoURL || '',
+          role: isAdmin ? 'admin' : (syncData.profile.role === 'admin' ? 'admin' : 'user'),
+          tier: isAdmin ? 'unlimited' : (syncData.profile.tier || 'free'),
+          creditsRemaining: isAdmin
+            ? 999999
+            : typeof syncData.profile.creditsRemaining === 'number'
+              ? syncData.profile.creditsRemaining
+              : 5,
+          createdAt: syncData.profile.createdAt || new Date().toISOString(),
+          updatedAt: syncData.profile.updatedAt || new Date().toISOString(),
+        };
+
+        // Update non-protected profile metadata in Firestore if document already exists or create initial doc cleanly
+        try {
+          const snap = await getDoc(userRef);
+          if (!snap.exists()) {
+            await setDoc(userRef, serverProfile, { merge: true });
+          } else {
+            await updateDoc(userRef, {
+              displayName: serverProfile.displayName,
+              photoURL: serverProfile.photoURL || '',
+              updatedAt: new Date().toISOString(),
+            });
+          }
+        } catch {
+          // Firestore rules protect creditsRemaining/role/tier from client mutation; server Admin SDK handles ledger writes
+        }
+
+        return serverProfile;
+      }
+    }
+  } catch (syncErr) {
+    console.warn('Authoritative /api/user/sync fallback notice:', syncErr);
+  }
+
+  // 2. Fallback path if server endpoint is temporarily unreachable: read existing Firestore doc without resetting balance
   try {
     const snap = await getDoc(userRef);
-    let profile: AppUserProfile;
-
     if (snap.exists()) {
       const data = snap.data() as AppUserProfile;
-      profile = {
+      return {
         ...data,
+        uid: user.uid,
         email: user.email || data.email || '',
-        displayName: user.displayName || data.displayName || user.email?.split('@')[0] || 'Foydalanuvchi',
+        displayName: user.displayName || data.displayName || defaultDisplayName,
         photoURL: user.photoURL || data.photoURL || '',
         role: isAdmin ? 'admin' : (data.role || 'user'),
         tier: isAdmin ? 'unlimited' : (data.tier || 'free'),
-        creditsRemaining: isAdmin ? 999999 : (typeof data.creditsRemaining === 'number' ? data.creditsRemaining : 5),
-        updatedAt: new Date().toISOString(),
+        creditsRemaining: isAdmin
+          ? 999999
+          : typeof data.creditsRemaining === 'number'
+            ? data.creditsRemaining
+            : 5,
+        updatedAt: data.updatedAt || new Date().toISOString(),
       };
-      // Keep doc updated in Firestore
-      await setDoc(userRef, profile, { merge: true }).catch(() => {});
-    } else {
-      // Create new profile directly in Firestore
-      profile = {
-        uid: user.uid,
-        email: user.email || '',
-        displayName: user.displayName || user.email?.split('@')[0] || 'Foydalanuvchi',
-        photoURL: user.photoURL || '',
-        role: isAdmin ? 'admin' : 'user',
-        tier: isAdmin ? 'unlimited' : 'free',
-        creditsRemaining: isAdmin ? 999999 : 5,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      try {
-        await setDoc(userRef, profile, { merge: true });
-      } catch (fErr) {
-        console.warn('Direct Firestore write notice:', fErr);
-      }
     }
-
-    // Always sync with server so localStore also has this user
-    try {
-      const idToken = await user.getIdToken();
-      await fetch('/api/user/sync', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${idToken}`,
-        },
-        body: JSON.stringify(profile),
-      });
-    } catch {
-      // Server sync optional fallback
-    }
-
-    return profile;
   } catch (err) {
-    console.warn('Error fetching or creating user profile:', err);
-    const fallbackProfile: AppUserProfile = {
-      uid: user.uid,
-      email: user.email || '',
-      displayName: user.displayName || user.email?.split('@')[0] || 'Foydalanuvchi',
-      photoURL: user.photoURL || '',
-      role: isAdmin ? 'admin' : 'user',
-      tier: isAdmin ? 'unlimited' : 'free',
-      creditsRemaining: isAdmin ? 999999 : 5,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    try {
-      const idToken = await user.getIdToken();
-      fetch('/api/user/sync', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${idToken}`,
-        },
-        body: JSON.stringify(fallbackProfile),
-      }).catch(() => {});
-    } catch {}
-    return fallbackProfile;
+    console.warn('Firestore profile read fallback notice:', err);
   }
+
+  return {
+    uid: user.uid,
+    email: user.email || '',
+    displayName: defaultDisplayName,
+    photoURL: user.photoURL || '',
+    role: isAdmin ? 'admin' : 'user',
+    tier: isAdmin ? 'unlimited' : 'free',
+    creditsRemaining: isAdmin ? 999999 : 5,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 // Firestore Error Handling matching Skill Specification
@@ -274,7 +288,7 @@ export async function addCreditsToUser(
 export async function logUserGeneration(
   uid: string,
   userEmail: string,
-  type: 'podcast' | 'voiceover' | 'tts' | 'dubbing' | 'agent_call',
+  type: 'podcast' | 'voiceover' | 'tts' | 'dubbing' | 'agent_call' | 'cover',
   title: string,
   creditsCost: number = 1,
   status: 'completed' | 'failed' = 'completed'
@@ -785,6 +799,68 @@ export async function adminUpdateUserProfile(
     }
     return { success: false, message: err.message || 'Xatolik yuz berdi' };
   }
+}
+
+export interface VipProductionRequest {
+  id: string;
+  userId: string;
+  userEmail: string;
+  projectTitle: string;
+  format: string;
+  targetDuration: string;
+  contactPhone: string;
+  brief: string;
+  status: 'new' | 'in_progress' | 'completed' | 'cancelled';
+  adminNotes?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export async function submitVipProductionRequest(input: {
+  projectTitle: string;
+  format: string;
+  targetDuration: string;
+  contactPhone: string;
+  brief: string;
+}): Promise<VipProductionRequest> {
+  const res = await authFetch('/api/vip/requests', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || 'VIP buyurtmani yuborishda xatolik');
+  }
+  return data.request as VipProductionRequest;
+}
+
+export async function adminFetchVipRequests(
+  status: string = 'all'
+): Promise<VipProductionRequest[]> {
+  try {
+    const res = await authFetch(`/api/billing/admin/vip-requests?status=${encodeURIComponent(status)}`);
+    if (res.ok) {
+      const data = await res.json();
+      return Array.isArray(data.requests) ? data.requests : [];
+    }
+  } catch (err) {
+    console.warn('VIP requests fetch notice:', err);
+  }
+  return [];
+}
+
+export async function adminUpdateVipRequest(
+  requestId: string,
+  status: 'new' | 'in_progress' | 'completed' | 'cancelled',
+  adminNotes?: string
+): Promise<boolean> {
+  const res = await authFetch('/api/billing/admin/vip-requests/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ requestId, status, adminNotes }),
+  });
+  return res.ok;
 }
 
 

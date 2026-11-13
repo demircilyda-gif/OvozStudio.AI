@@ -10,8 +10,8 @@
  */
 
 import { GoogleGenAI } from "@google/genai";
-import { mediaIngestService } from "./mediaIngest/mediaIngestService.js";
-import { IngestJobState, MediaStreamInspection } from "./mediaIngest/types.js";
+import { mediaIngestService } from "./mediaIngest/mediaIngestService.ts";
+import type { IngestJobState, MediaStreamInspection } from "./mediaIngest/types.ts";
 
 export interface PipelineAttemptLog {
   id: string;

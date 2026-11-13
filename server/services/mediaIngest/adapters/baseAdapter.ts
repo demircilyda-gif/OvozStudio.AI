@@ -1,4 +1,4 @@
-import { MediaPlatform, IngestJobState } from "../types.js";
+import type { MediaPlatform, IngestJobState } from "../types.ts";
 
 export interface AdapterResult {
   success: boolean;

@@ -1,20 +1,20 @@
 import fs from "node:fs";
 import path from "node:path";
 import { GoogleGenAI } from "@google/genai";
-import {
+import type {
   IngestJobState,
   IngestResult,
   MediaPlatform,
   AdapterAttemptLog,
   DubbingSegment,
-} from "./types.js";
-import { inspectMediaStreams, extractDecodedAudio, sanitizeLogOutput } from "./audioVerifier.js";
-import { UploadedFileAdapter } from "./adapters/uploadedFileAdapter.js";
-import { DirectUrlAdapter } from "./adapters/directUrlAdapter.js";
-import { TikWMAdapter } from "./adapters/tikwmAdapter.js";
-import { YtDlpAdapter } from "./adapters/ytdlpAdapter.js";
-import { CobaltAdapter } from "./adapters/cobaltAdapter.js";
-import { GeminiYouTubeAdapter } from "./adapters/geminiYoutubeAdapter.js";
+} from "./types.ts";
+import { inspectMediaStreams, extractDecodedAudio, sanitizeLogOutput } from "./audioVerifier.ts";
+import { UploadedFileAdapter } from "./adapters/uploadedFileAdapter.ts";
+import { DirectUrlAdapter } from "./adapters/directUrlAdapter.ts";
+import { TikWMAdapter } from "./adapters/tikwmAdapter.ts";
+import { YtDlpAdapter } from "./adapters/ytdlpAdapter.ts";
+import { CobaltAdapter } from "./adapters/cobaltAdapter.ts";
+import { GeminiYouTubeAdapter } from "./adapters/geminiYoutubeAdapter.ts";
 
 export function detectMediaPlatform(url: string): MediaPlatform {
   const u = url.toLowerCase();

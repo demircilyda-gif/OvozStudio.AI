@@ -87,10 +87,19 @@ export interface AudioSegmentCue {
 // ----------------------------------------------------
 export interface DialogueTurn {
   id: string;
-  speakerId: 'HOST_1' | 'HOST_2';
+  speakerId: 'HOST_1' | 'HOST_2' | string;
   speakerName: string;
+  speakerGender?: 'female' | 'male';
+  voiceId?: string;
+  baseVoice?: string;
   text: string;
   originalText?: string;
+  originalTextRu?: string;
+  intonationRu?: string;
+  visualContext?: string;
+  sceneTitle?: string;
+  speechStyle?: string;
+  pace?: 'slow' | 'normal' | 'fast';
   timecode?: string;
   startSec?: number;
   endSec?: number;
@@ -101,6 +110,8 @@ export interface DialogueTurn {
   durationSeconds?: number;
   startTime?: number;
   endTime?: number;
+  fitStepApplied?: string;
+  validationNotes?: string;
   musicCue?: TurnMusicCue;
 }
 
@@ -170,6 +181,8 @@ export interface RealEstateLeadCard {
   urgency?: 'immediate' | 'this_month' | 'exploring';
   paymentMethod?: 'cash' | 'mortgage' | 'installments';
   leadTemperature?: 'hot' | 'warm' | 'cold';
+  clientName?: string;
+  preferredContactTime?: string;
   keyNotes?: string;
   nextStep?: string;
   offTopicAttempts?: number;

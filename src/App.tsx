@@ -40,6 +40,7 @@ const LOCAL_STORAGE_PODCASTS_KEY = 'podkast_uz_library_v2';
 
 export default function App() {
   const {
+    user,
     isAuthenticated,
     isAdmin,
     credits,
@@ -252,8 +253,8 @@ export default function App() {
     return () => window.removeEventListener('open-api-key-modal', handleOpenKeyModal);
   }, [isAdmin]);
 
-  // CMS Podcast Library
-  const [podcasts, setPodcasts] = useState<CMSPodcastItem[]>(() => {
+  // CMS Podcast Library (stored in IndexedDB, filtered strictly per user)
+  const [allPodcasts, setAllPodcasts] = useState<CMSPodcastItem[]>(() => {
     try {
       const saved = localStorage.getItem(LOCAL_STORAGE_PODCASTS_KEY);
       if (saved) return JSON.parse(saved);
@@ -269,7 +270,7 @@ export default function App() {
       try {
         const stored = await getAllPodcastsFromDb();
         if (stored && stored.length > 0) {
-          setPodcasts(stored);
+          setAllPodcasts(stored);
         }
       } catch (err) {
         console.warn('Could not read from IndexedDB:', err);
@@ -277,6 +278,29 @@ export default function App() {
     };
     loadFromDb();
   }, []);
+
+  // Filter library items strictly by the currently logged-in user
+  const podcasts = React.useMemo(() => {
+    if (!user) return [];
+    const currentEmail = (user.email || '').trim().toLowerCase();
+    return allPodcasts.filter((p) => {
+      if (p.ownerUid) {
+        return p.ownerUid === user.uid;
+      }
+      if (p.ownerEmail && currentEmail) {
+        return p.ownerEmail.trim().toLowerCase() === currentEmail;
+      }
+      // Legacy items created before ownerUid tagging belong only to the admin account
+      return isAdmin;
+    });
+  }, [allPodcasts, user, isAdmin]);
+
+  // Reset transient studio state when switching accounts
+  useEffect(() => {
+    setCurrentAudio(null);
+    setInterviewTurns(undefined);
+    setInterviewTopic('');
+  }, [user?.uid]);
 
   // Handle Stripe Checkout return
   const [paymentNotice, setPaymentNotice] = useState<string | null>(null);
@@ -291,11 +315,10 @@ export default function App() {
         .then((res) => res.json())
         .then((data) => {
           if (data.paid && data.credits) {
+            if (typeof data.creditsRemaining === 'number') {
+              syncCredits(data.creditsRemaining);
+            }
             if (data.newlyCredited) {
-              addCredits(
-                data.credits,
-                data.planId === 'pro' || data.planId === 'unlimited' ? data.planId : undefined
-              );
               setPaymentNotice(
                 lang === 'uz'
                   ? `To'lov muvaffaqiyatli qabul qilindi! Hisobingizga +${data.credits} kredit qo'shildi.`
@@ -315,7 +338,7 @@ export default function App() {
 
       window.history.replaceState({}, document.title, window.location.pathname);
     }
-  }, [lang, addCredits]);
+  }, [lang, syncCredits, credits]);
 
   // Save voices
   useEffect(() => {
@@ -439,10 +462,12 @@ export default function App() {
           durationSeconds: data.durationSeconds || targetSeconds,
           rawAudioWavBase64: data.audioBase64,
           createdAt: new Date().toISOString(),
+          ownerUid: user?.uid,
+          ownerEmail: user?.email || '',
         };
 
         savePodcastToDb(newCmsItem);
-        setPodcasts((prev) => [newCmsItem, ...prev]);
+        setAllPodcasts((prev) => [newCmsItem, ...prev]);
         if (typeof data.creditsRemaining === 'number') {
           syncCredits(data.creditsRemaining);
         } else {
@@ -451,7 +476,8 @@ export default function App() {
         await logGeneration('podcast', title || 'O\'zbekcha Podkast', 1);
       }
     } catch (err: any) {
-      alert(`Xatolik: ${err.message}`);
+      setPaymentNotice(`⚠️ Xatolik: ${err.message}`);
+      setTimeout(() => setPaymentNotice(null), 7000);
     } finally {
       setIsSynthesizing(false);
     }
@@ -698,9 +724,11 @@ export default function App() {
                                 durationSeconds: currentAudio.durationSeconds,
                                 rawAudioWavBase64: currentAudio.rawAudioWavBase64,
                                 createdAt: new Date().toISOString(),
+                                ownerUid: user?.uid,
+                                ownerEmail: user?.email || '',
                               };
                               savePodcastToDb(newCmsItem);
-                              setPodcasts((prev) => [newCmsItem, ...prev]);
+                              setAllPodcasts((prev) => [newCmsItem, ...prev]);
                             }}
                             lang={lang}
                           />
@@ -764,9 +792,11 @@ export default function App() {
                           durationSeconds: item.durationSeconds || 60,
                           rawAudioWavBase64: item.rawAudioWavBase64,
                           createdAt: new Date().toISOString(),
+                          ownerUid: user?.uid,
+                          ownerEmail: user?.email || '',
                         };
                         savePodcastToDb(newCmsItem);
-                        setPodcasts((prev) => [newCmsItem, ...prev]);
+                        setAllPodcasts((prev) => [newCmsItem, ...prev]);
                       }}
                       lang={lang}
                     />
@@ -798,9 +828,11 @@ export default function App() {
                           durationSeconds: item.durationSeconds || 30,
                           rawAudioWavBase64: item.rawAudioWavBase64,
                           createdAt: new Date().toISOString(),
+                          ownerUid: user?.uid,
+                          ownerEmail: user?.email || '',
                         };
                         savePodcastToDb(newCmsItem);
-                        setPodcasts((prev) => [newCmsItem, ...prev]);
+                        setAllPodcasts((prev) => [newCmsItem, ...prev]);
                       }}
                       lang={lang}
                     />
@@ -829,12 +861,17 @@ export default function App() {
                     <PodcastCMS
                       podcasts={podcasts}
                       onUpdatePodcast={(updated) => {
-                        savePodcastToDb(updated);
-                        setPodcasts((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+                        const withOwner = {
+                          ...updated,
+                          ownerUid: updated.ownerUid || user?.uid,
+                          ownerEmail: updated.ownerEmail || user?.email || '',
+                        };
+                        savePodcastToDb(withOwner);
+                        setAllPodcasts((prev) => prev.map((p) => (p.id === withOwner.id ? withOwner : p)));
                       }}
                       onDeletePodcast={(id) => {
                         deletePodcastFromDb(id);
-                        setPodcasts((prev) => prev.filter((p) => p.id !== id));
+                        setAllPodcasts((prev) => prev.filter((p) => p.id !== id));
                       }}
                       onOpenInStudio={handleOpenInStudio}
                       onCreateNew={() => {

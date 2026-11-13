@@ -48,6 +48,9 @@ interface LiveCallCardProps {
   apiKeyNotice?: string | null;
   callErrorMessage?: string | null;
   onDismissNotice?: () => void;
+  callMode?: 'live' | 'cloned';
+  onSelectCallMode?: (mode: 'live' | 'cloned') => void;
+  lastTurnTimingMs?: number | null;
 }
 
 export const LiveCallCard: React.FC<LiveCallCardProps> = ({
@@ -76,6 +79,9 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
   apiKeyNotice,
   callErrorMessage,
   onDismissNotice,
+  callMode = 'live',
+  onSelectCallMode,
+  lastTurnTimingMs,
 }) => {
   const { isAdmin } = useAuth();
   const [activeWordIdx, setActiveWordIdx] = useState(0);
@@ -226,7 +232,11 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
             <h3 className="font-serif text-base sm:text-lg font-normal text-[#161511] truncate leading-tight">
               {isSuperTaxi
                 ? `${agentVoiceName || 'MADINA'} — SuperTaksi IVR Dispetcheri (15–20s)`
-                : `${agentVoiceName || 'SHOKHRUKH'} — Toshkent rieltor-eksperti`}
+                : `${agentVoiceName || 'SHOHRUX'} — ${
+                    lang === 'ru'
+                      ? 'Менеджер агентства недвижимости Ташкента'
+                      : 'Toshkent ko\'chmas mulk agentligi menejeri'
+                  }`}
             </h3>
             <p
               className="font-mono text-[11px] text-[#0A5A62] font-semibold tracking-wider mt-0.5 flex items-center gap-1.5"
@@ -243,8 +253,10 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
               />
               <span>
                 {isSuperTaxi
-                  ? '0 TOKEN WAV SALOM · GEMINI 3.8 LIVE · O\'ZBEKCHA'
-                  : 'OVOZSTUDIO NEURAL LIVE · 0% AKSENT'}
+                  ? "0 TOKEN WAV SALOM · JONLI EFIR · O'ZBEKCHA"
+                  : callMode === 'cloned'
+                  ? "SHAXSIY OVOZ (SHOHRUX) · OQIMLI AUDIO · SAVE_LEAD CRM"
+                  : "0 TOKEN WAV SALOM · JONLI EFIR (LIVE) · SAVE_LEAD CRM"}
               </span>
             </p>
           </div>
@@ -364,17 +376,52 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
               </div>
             </div>
           ) : (
-            <div className="p-4 rounded-2xl bg-[#F4F1EA]/65 border border-[rgba(22,21,17,0.08)] flex items-start gap-3">
-              <div className="p-2 rounded-xl bg-[#0E7C86]/10 text-[#0E7C86] shrink-0 mt-0.5">
-                <Sparkles className="w-4 h-4" />
-              </div>
-              <div className="space-y-1">
-                <h4 className="text-xs font-semibold text-[#161511]">
-                  {lang === 'uz' ? 'Qo\'ng\'iroq mavzusi va maqsadi:' : 'Тема и контекст звонка:'}
-                </h4>
-                <p className="text-xs text-[#5D594E] leading-relaxed">
-                  "{callTopic}"
-                </p>
+            <div className="space-y-3">
+              {/* Direct 2-Mode Switcher right on the Call Card */}
+              {onSelectCallMode && (
+                <div className="p-3 rounded-2xl bg-[#F4F1EA]/90 border border-[rgba(22,21,17,0.12)] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                  <span className="text-xs font-mono font-bold text-[#161511] px-1">
+                    {lang === 'uz' ? "Qo'ng'iroq rejimini tanlang:" : 'Выберите режим звонка:'}
+                  </span>
+                  <div className="grid grid-cols-2 gap-1.5 bg-white p-1 rounded-full border border-[rgba(22,21,17,0.12)]">
+                    <button
+                      type="button"
+                      onClick={() => onSelectCallMode('live')}
+                      className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                        callMode === 'live'
+                          ? 'bg-[#0E7C86] text-white shadow-xs'
+                          : 'text-[#5D594E] hover:text-[#161511]'
+                      }`}
+                    >
+                      <span>⚡ {lang === 'uz' ? 'Jonli Efir (Live)' : 'Живой Эфир (Live)'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onSelectCallMode('cloned')}
+                      className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                        callMode === 'cloned'
+                          ? 'bg-[#161511] text-[#F4F1EA] shadow-xs'
+                          : 'text-[#5D594E] hover:text-[#161511]'
+                      }`}
+                    >
+                      <span>🎙️ {lang === 'uz' ? 'Shaxsiy Ovoz (Shohrux)' : 'Личный Голос (Шохрух)'}</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="p-4 rounded-2xl bg-[#F4F1EA]/65 border border-[rgba(22,21,17,0.08)] flex items-start gap-3">
+                <div className="p-2 rounded-xl bg-[#0E7C86]/10 text-[#0E7C86] shrink-0 mt-0.5">
+                  <Sparkles className="w-4 h-4" />
+                </div>
+                <div className="space-y-1">
+                  <h4 className="text-xs font-semibold text-[#161511]">
+                    {lang === 'uz' ? "Qo'ng'iroq mavzusi va maqsadi:" : 'Тема и контекст звонка:'}
+                  </h4>
+                  <p className="text-xs text-[#5D594E] leading-relaxed">
+                    "{callTopic}"
+                  </p>
+                </div>
               </div>
             </div>
           )}
@@ -389,9 +436,11 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
             <span>
               {isSuperTaxi
                 ? (lang === 'uz'
-                    ? '🚕 SuperTaksi IVR Qo\'ng\'iroqni Boshlash (15–20s Jonli)'
+                    ? "🚕 SuperTaksi IVR Qo'ng'iroqni Boshlash (15–20s Jonli)"
                     : '🚕 Позвонить Оператору SuperTaksi IVR (15–20с Живой)')
-                : (lang === 'uz' ? '📞 Qo\'ng\'iroqni Boshlash (Jonli)' : '📞 Начать Звонок (Живой)')}
+                : callMode === 'cloned'
+                ? (lang === 'uz' ? "📞 Qo'ng'iroqni Boshlash (Shaxsiy Ovoz)" : '📞 Начать Звонок (Личный Голос)')
+                : (lang === 'uz' ? "📞 Qo'ng'iroqni Boshlash (Jonli Live)" : '📞 Начать Звонок (Живой Live)')}
             </span>
           </button>
         </div>
@@ -412,12 +461,19 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
                   : lang === 'uz' ? 'Jonli Audio Suhbat Oqimi' : 'Прямой речевой канал'}
               </span>
             </div>
-            <div className="text-[11px] text-[#5D594E]">
-              {agentSpeaking
-                ? lang === 'uz' ? '🗣️ Agent gapirmoqda' : '🗣️ Говорит агент'
-                : userSpeaking
-                ? lang === 'uz' ? '🎤 Siz gapiryapsiz' : '🎤 Вы говорите'
-                : lang === 'uz' ? '👂 Tinglanmoqda' : '👂 Слушает'}
+            <div className="text-[11px] text-[#5D594E] flex items-center gap-2">
+              {typeof lastTurnTimingMs === 'number' && lastTurnTimingMs > 0 && (
+                <span className="px-2 py-0.5 rounded-full bg-[#0E7C86]/10 text-[#0A5A62] font-mono text-[10px] font-semibold">
+                  ⚡ {(lastTurnTimingMs / 1000).toFixed(2)}s
+                </span>
+              )}
+              <span>
+                {agentSpeaking
+                  ? lang === 'uz' ? '🗣️ Agent gapirmoqda' : '🗣️ Говорит агент'
+                  : userSpeaking
+                  ? lang === 'uz' ? '🎤 Siz gapiryapsiz' : '🎤 Вы говорите'
+                  : lang === 'uz' ? '👂 Tinglanmoqda' : '👂 Слушает'}
+              </span>
             </div>
           </div>
 
@@ -443,6 +499,8 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
             {/* Historical transcript lines */}
             {transcriptLines.map((line, idx) => {
               const isAgent = (line as any).speaker === 'agent' || line.sender === 'agent';
+              const isLastLine = idx === transcriptLines.length - 1;
+              const isMatchingSubtitle = isLastLine && isAgent && currentSubtitle && line.text.trim() === currentSubtitle.trim();
               return (
                 <div key={line.id || idx} className="break-words">
                   <span
@@ -452,13 +510,15 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
                   >
                     {isAgent ? 'AGENT ·' : 'MIJOZ ·'}
                   </span>
-                  {renderLineTokens(line.text, false)}
+                  {renderLineTokens(line.text, Boolean(isMatchingSubtitle))}
                 </div>
               );
             })}
 
-            {/* Currently spoken live line with word-by-word highlight */}
-            {currentSubtitle && (
+            {/* Currently spoken live line with word-by-word highlight (if not already the last transcript line) */}
+            {currentSubtitle &&
+              (!transcriptLines.length ||
+                transcriptLines[transcriptLines.length - 1]?.text?.trim() !== currentSubtitle.trim()) && (
               <div className="break-words">
                 <span className="font-semibold text-[#0A5A62] mr-1.5">
                   AGENT ·
@@ -569,6 +629,93 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
                     </div>
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* Realtor Live Qualification Card & Quick Test Chips */}
+          {selectedPersona === 'tashkent_real_estate' && (
+            <div className="space-y-3">
+              {onSendText && (
+                <div className="space-y-1.5">
+                  <span className="text-[11px] font-mono text-[#5D594E] block">
+                    {lang === 'ru'
+                      ? '🏢 Скажите в микрофон или нажмите быструю фразу клиента:'
+                      : '🏢 Mikrofonga ayting yoki tezkor sinash uchun bosing:'}
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {(lang === 'ru'
+                      ? [
+                          'Мне нужна двухкомнатная квартира на Чиланзаре',
+                          'Вторичка, наличными, до семидесяти тысяч',
+                          'Меня зовут Сардор, скиньте варианты в Телеграм',
+                          'А сколько стоит квадрат в Мирабаде?',
+                        ]
+                      : [
+                          'Chilonzordan ikki xonali uy kerak edi',
+                          'Naqd pulga olaman, yetmish ming atrofida',
+                          'Ismim Sardor, variantlarni Telegramdan tashlang',
+                          'Mirobodda kvadrat narxi qancha?',
+                        ]
+                    ).map((phrase) => (
+                      <button
+                        key={phrase}
+                        type="button"
+                        onClick={() => onSendText(phrase)}
+                        className="px-2.5 py-1 rounded-full bg-[#F4F1EA] hover:bg-[#ECE7DB] border border-[rgba(22,21,17,0.14)] text-[11px] font-mono text-[#161511] cursor-pointer transition-all active:scale-95"
+                      >
+                        🗣️ "{phrase}"
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="p-3.5 rounded-xl bg-[#F4F1EA]/70 border border-[rgba(22,21,17,0.12)] text-xs font-mono space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-[#161511] flex items-center gap-1.5">
+                    <Building2 className="w-3.5 h-3.5 text-[#0E7C86]" />
+                    <span>
+                      {lang === 'ru'
+                        ? 'КВАЛИФИКАЦИЯ ЛИДА (SAVE_LEAD):'
+                        : 'MIJOZ KVALIFIKATSIYASI (SAVE_LEAD):'}
+                    </span>
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#0E7C86]/15 text-[#0A5A62]">
+                    {reLeadCard.clientName
+                      ? `✓ ${reLeadCard.clientName.toUpperCase()}`
+                      : lang === 'ru'
+                      ? 'В ПРОЦЕССЕ...'
+                      : 'ANIQLANMOQDA...'}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1 border-t border-black/10">
+                  <div>
+                    <span className="text-[10px] text-[#5D594E] block">
+                      {lang === 'ru' ? '1. ЦЕЛЬ / РАЙОН:' : '1. MAQSAD / TUMAN:'}
+                    </span>
+                    <span className="font-bold text-[#161511]">
+                      {reLeadCard.clientIntent || 'buy'} · {reLeadCard.district || '—'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-[#5D594E] block">
+                      {lang === 'ru' ? '2. КОМНАТЫ / БЮДЖЕТ:' : '2. XONALAR / BYUDJET:'}
+                    </span>
+                    <span className="font-bold text-[#0E7C86]">
+                      {reLeadCard.roomsCount || '—'} · {reLeadCard.budgetRange || '—'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-[#5D594E] block">
+                      {lang === 'ru' ? '3. ОПЛАТА / ИМЯ:' : '3. TO\'LOV / ISM:'}
+                    </span>
+                    <span className="font-bold text-[#161511]">
+                      {reLeadCard.paymentMethod || '—'}
+                      {reLeadCard.clientName ? ` · ${reLeadCard.clientName}` : ''}
+                    </span>
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -709,24 +856,24 @@ export const LiveCallCard: React.FC<LiveCallCardProps> = ({
               </div>
 
               {/* Lead Snapshot Summary */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 p-4 rounded-2xl bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.1)] text-xs">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 p-4 rounded-2xl bg-[#F4F1EA]/60 border border-[rgba(22,21,17,0.1)] text-xs">
                 <div>
-                  <span className="text-[10px] font-mono uppercase text-[#7D7A70] block">Maqsad</span>
-                  <span className="font-semibold text-[#161511] capitalize">{reLeadCard.clientIntent || 'Sotib olish'}</span>
+                  <span className="text-[10px] font-mono uppercase text-[#7D7A70] block">Maqsad / Tuman</span>
+                  <span className="font-semibold text-[#161511] capitalize">
+                    {reLeadCard.clientIntent || 'Sotib olish'} · {reLeadCard.district || 'Chilonzor'}
+                  </span>
                 </div>
                 <div>
-                  <span className="text-[10px] font-mono uppercase text-[#7D7A70] block">Tuman</span>
-                  <span className="font-semibold text-[#161511]">{reLeadCard.district || 'Mirobod'}</span>
+                  <span className="text-[10px] font-mono uppercase text-[#7D7A70] block">Xonalar / Byudjet</span>
+                  <span className="font-semibold text-[#0E7C86] font-mono">
+                    {reLeadCard.roomsCount || '2 xonali'} · {reLeadCard.budgetRange || '$50,000+'}
+                  </span>
                 </div>
                 <div>
-                  <span className="text-[10px] font-mono uppercase text-[#7D7A70] block">Byudjet</span>
-                  <span className="font-semibold text-[#0E7C86] font-mono">{reLeadCard.budgetRange || '$50,000+'}</span>
-                </div>
-                <div>
-                  <span className="text-[10px] font-mono uppercase text-[#7D7A70] block">Harorat</span>
-                  <span className="font-semibold text-[#C4552D] font-mono uppercase flex items-center gap-1">
-                    <Flame className="w-3 h-3 text-[#C4552D]" />
-                    {reLeadCard.leadTemperature || 'WARM'}
+                  <span className="text-[10px] font-mono uppercase text-[#7D7A70] block">To'lov / Mijoz</span>
+                  <span className="font-semibold text-[#161511] font-mono">
+                    {reLeadCard.paymentMethod || 'cash'}
+                    {reLeadCard.clientName ? ` · ${reLeadCard.clientName}` : ''}
                   </span>
                 </div>
               </div>

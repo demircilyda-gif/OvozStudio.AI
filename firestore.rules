@@ -2,70 +2,285 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    function isAuthenticated() {
+    // 0. Global Safety Net — default deny all reads and writes
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 1. Reusable Hardened Primitives
+    function isSignedIn() {
       return request.auth != null;
     }
 
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
     function isOwner(userId) {
-      return isAuthenticated() && request.auth.uid == userId;
+      return isSignedIn() && request.auth.uid == userId;
     }
 
     function isAdmin() {
-      return isAuthenticated() && (
+      return isVerified() && (
         request.auth.token.email in ['demircilyda@gmail.com']
       );
     }
 
-    // User profiles: readable by owner or admin
-    // System fields: creditsRemaining, role, tier are strictly protected from client updates
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidEmailKey(emailId) {
+      return emailId is string && emailId.size() >= 3 && emailId.size() <= 254 && emailId.matches('^[^/\\s]+@[^/\\s]+\\.[^/\\s]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // 2. Entity Validation Blueprints (synchronized with firebase-blueprint.json)
+    function isValidUser(data) {
+      return data.keys().hasAll(['email', 'role', 'tier', 'createdAt']) &&
+        data.keys().hasOnly([
+          'uid',
+          'email',
+          'displayName',
+          'photoURL',
+          'role',
+          'tier',
+          'creditsRemaining',
+          'initialBonusGranted',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        (!('uid' in data) || isValidId(data.uid)) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 120)) &&
+        (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 1024)) &&
+        data.role in ['admin', 'user'] &&
+        data.tier in ['free', 'starter', 'pro', 'unlimited'] &&
+        (!('creditsRemaining' in data) || (data.creditsRemaining is number && data.creditsRemaining >= 0 && data.creditsRemaining <= 1000000)) &&
+        (!('initialBonusGranted' in data) || data.initialBonusGranted is bool) &&
+        data.createdAt is string && data.createdAt.size() <= 64 &&
+        (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
+    }
+
+    function isValidGeneration(data) {
+      return data.keys().hasAll(['userId', 'type', 'createdAt']) &&
+        data.keys().hasOnly([
+          'id',
+          'userId',
+          'userEmail',
+          'type',
+          'title',
+          'creditsCost',
+          'status',
+          'voiceName',
+          'durationSec',
+          'details',
+          'createdAt'
+        ]) &&
+        (!('id' in data) || (data.id is string && data.id.size() <= 128)) &&
+        isValidId(data.userId) &&
+        (!('userEmail' in data) || (data.userEmail is string && data.userEmail.size() <= 254)) &&
+        data.type in ['podcast', 'voiceover', 'tts', 'dubbing', 'agent_call', 'cover'] &&
+        (!('title' in data) || (data.title is string && data.title.size() <= 240)) &&
+        (!('creditsCost' in data) || (data.creditsCost is number && data.creditsCost >= 0 && data.creditsCost <= 1000)) &&
+        (!('status' in data) || data.status in ['completed', 'failed']) &&
+        (!('voiceName' in data) || (data.voiceName is string && data.voiceName.size() <= 120)) &&
+        (!('durationSec' in data) || (data.durationSec is number && data.durationSec >= 0 && data.durationSec <= 86400)) &&
+        (!('details' in data) || (data.details is string && data.details.size() <= 300)) &&
+        data.createdAt is string && data.createdAt.size() <= 64;
+    }
+
+    function isValidPaymentRequest(data) {
+      return data.keys().hasAll(['userId', 'planId', 'status', 'createdAt']) &&
+        data.keys().hasOnly([
+          'id',
+          'uid',
+          'userId',
+          'userEmail',
+          'userName',
+          'planId',
+          'planName',
+          'price',
+          'credits',
+          'tier',
+          'paymentMethod',
+          'receiptInfo',
+          'notes',
+          'status',
+          'approvedAt',
+          'approvedBy',
+          'updatedAt',
+          'createdAt'
+        ]) &&
+        (!('id' in data) || (data.id is string && data.id.size() <= 128)) &&
+        (!('uid' in data) || isValidId(data.uid)) &&
+        isValidId(data.userId) &&
+        (!('userEmail' in data) || (data.userEmail is string && data.userEmail.size() <= 254)) &&
+        (!('userName' in data) || (data.userName is string && data.userName.size() <= 120)) &&
+        data.planId in ['starter', 'pro', 'unlimited'] &&
+        (!('planName' in data) || (data.planName is string && data.planName.size() <= 100)) &&
+        (!('price' in data) || (data.price is string && data.price.size() <= 64)) &&
+        (!('credits' in data) || (data.credits is number && data.credits >= 1 && data.credits <= 100000)) &&
+        (!('tier' in data) || data.tier in ['starter', 'pro', 'unlimited']) &&
+        (!('paymentMethod' in data) || (data.paymentMethod is string && data.paymentMethod.size() <= 32)) &&
+        (!('receiptInfo' in data) || (data.receiptInfo is string && data.receiptInfo.size() <= 500)) &&
+        (!('notes' in data) || (data.notes is string && data.notes.size() <= 500)) &&
+        data.status in ['pending', 'approved', 'rejected'] &&
+        (!('approvedAt' in data) || (data.approvedAt is string && data.approvedAt.size() <= 64)) &&
+        (!('approvedBy' in data) || (data.approvedBy is string && data.approvedBy.size() <= 254)) &&
+        (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64)) &&
+        data.createdAt is string && data.createdAt.size() <= 64;
+    }
+
+    function isValidPendingGrant(data) {
+      return data.keys().hasAll(['email', 'credits']) &&
+        data.keys().hasOnly(['email', 'credits', 'tier', 'grantedBy', 'updatedAt']) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        data.credits is number && data.credits >= 0 && data.credits <= 1000000 &&
+        (!('tier' in data) || data.tier in ['free', 'pro', 'unlimited']) &&
+        (!('grantedBy' in data) || (data.grantedBy is string && data.grantedBy.size() <= 254)) &&
+        (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
+    }
+
+    function isValidVipRequest(data) {
+      return data.keys().hasAll(['userId', 'projectTitle', 'status', 'createdAt']) &&
+        data.keys().hasOnly([
+          'id',
+          'userId',
+          'userEmail',
+          'projectTitle',
+          'format',
+          'targetDuration',
+          'contactPhone',
+          'brief',
+          'status',
+          'adminNotes',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        (!('id' in data) || (data.id is string && data.id.size() <= 128)) &&
+        isValidId(data.userId) &&
+        (!('userEmail' in data) || (data.userEmail is string && data.userEmail.size() <= 254)) &&
+        data.projectTitle is string && data.projectTitle.size() >= 2 && data.projectTitle.size() <= 200 &&
+        (!('format' in data) || (data.format is string && data.format.size() <= 80)) &&
+        (!('targetDuration' in data) || (data.targetDuration is string && data.targetDuration.size() <= 60)) &&
+        (!('contactPhone' in data) || (data.contactPhone is string && data.contactPhone.size() <= 64)) &&
+        (!('brief' in data) || (data.brief is string && data.brief.size() <= 2000)) &&
+        data.status in ['new', 'in_progress', 'completed', 'cancelled'] &&
+        (!('adminNotes' in data) || (data.adminNotes is string && data.adminNotes.size() <= 500)) &&
+        data.createdAt is string && data.createdAt.size() <= 64 &&
+        (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
+    }
+
+    // 3. User Profiles & Generations Subcollection
+    // System fields: creditsRemaining, role, tier, initialBonusGranted are strictly protected from client updates
     match /users/{userId} {
-      allow read: if isOwner(userId) || isAdmin();
-      allow create: if isAdmin() || (
-        isOwner(userId) &&
-        (!request.resource.data.keys().hasAny(['role', 'tier', 'creditsRemaining']) ||
-         (request.resource.data.role == 'user' && request.resource.data.tier == 'free' && request.resource.data.creditsRemaining <= 5))
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin() || (isSignedIn() && existing().uid == request.auth.uid);
+
+      allow create: if isValidId(userId) && isValidUser(incoming()) && (
+        isAdmin() || (
+          isVerified() &&
+          isOwner(userId) &&
+          (!('uid' in incoming()) || incoming().uid == request.auth.uid) &&
+          incoming().role == 'user' &&
+          incoming().tier == 'free' &&
+          (!('creditsRemaining' in incoming()) || incoming().creditsRemaining <= 5)
+        )
       );
-      allow update: if isAdmin() || (
-        isOwner(userId) &&
-        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['creditsRemaining', 'role', 'tier'])
+
+      allow update: if isValidId(userId) && isValidUser(incoming()) && (
+        isAdmin() || (
+          isVerified() &&
+          isOwner(userId) &&
+          incoming().createdAt == existing().createdAt &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['creditsRemaining', 'role', 'tier']) &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'updatedAt'])
+        )
       );
-      allow delete: if isAdmin();
+
+      allow delete: if isValidId(userId) && isAdmin();
 
       match /generations/{generationId} {
-        allow read: if isOwner(userId) || isAdmin();
-        allow write: if isOwner(userId) || isAdmin();
+        allow get: if isValidId(userId) && isValidId(generationId) && (isOwner(userId) || isAdmin());
+        allow list: if isAdmin() || (isOwner(userId) && existing().userId == request.auth.uid);
+
+        allow create: if isValidId(userId) && isValidId(generationId) && isValidGeneration(incoming()) && (
+          isAdmin() || (
+            isVerified() &&
+            isOwner(userId) &&
+            incoming().userId == request.auth.uid &&
+            exists(/databases/$(database)/documents/users/$(userId))
+          )
+        );
+
+        allow update: if isValidId(userId) && isValidId(generationId) && isValidGeneration(incoming()) && isAdmin();
+        allow delete: if isValidId(userId) && isValidId(generationId) && isAdmin();
       }
     }
 
-    // Payment Requests: readable by owner or admin; create allowed by request owner; full management by admin
+    // 4. Payment Requests (terminal state locked once approved/rejected for non-admins)
     match /paymentRequests/{requestId} {
-      allow read: if isAuthenticated() && (
-        resource.data.uid == request.auth.uid ||
-        resource.data.userId == request.auth.uid ||
-        isAdmin()
+      allow get: if isValidId(requestId) && (
+        isAdmin() ||
+        (isSignedIn() && (existing().userId == request.auth.uid || existing().uid == request.auth.uid))
       );
-      allow create: if isAuthenticated() && (
-        (request.resource.data.uid == request.auth.uid || request.resource.data.userId == request.auth.uid) &&
-        request.resource.data.status == 'pending' &&
-        !request.resource.data.keys().hasAny(['approvedAt', 'approvedBy', 'processedAt'])
+      allow list: if isAdmin() || (isSignedIn() && existing().userId == request.auth.uid);
+
+      allow create: if isValidId(requestId) && isValidPaymentRequest(incoming()) && (
+        isAdmin() || (
+          isVerified() &&
+          incoming().userId == request.auth.uid &&
+          (!('uid' in incoming()) || incoming().uid == request.auth.uid) &&
+          incoming().status == 'pending' &&
+          !incoming().keys().hasAny(['approvedAt', 'approvedBy'])
+        )
       );
-      allow update, delete: if isAdmin();
+
+      allow update: if isValidId(requestId) && isValidPaymentRequest(incoming()) && isAdmin();
+      allow delete: if isValidId(requestId) && isAdmin();
     }
 
-    // Pending credit grants: managed by admin
+    // 5. Pending Credit Grants (Admin-only collection)
     match /pendingCreditGrants/{email} {
-      allow read, write: if isAdmin();
+      allow get: if isValidEmailKey(email) && isAdmin();
+      allow list: if isAdmin();
+      allow create: if isValidEmailKey(email) && isValidPendingGrant(incoming()) && isAdmin();
+      allow update: if isValidEmailKey(email) && isValidPendingGrant(incoming()) && isAdmin();
+      allow delete: if isValidEmailKey(email) && isAdmin();
     }
 
-    // Connection diagnostic test
+    // 6. Custom VIP Production Requests
+    match /vipRequests/{requestId} {
+      allow get: if isValidId(requestId) && (
+        isAdmin() || (isSignedIn() && existing().userId == request.auth.uid)
+      );
+      allow list: if isAdmin() || (isSignedIn() && existing().userId == request.auth.uid);
+
+      allow create: if isValidId(requestId) && isValidVipRequest(incoming()) && (
+        isAdmin() || (
+          isVerified() &&
+          incoming().userId == request.auth.uid &&
+          incoming().status == 'new' &&
+          !('adminNotes' in incoming())
+        )
+      );
+
+      allow update: if isValidId(requestId) && isValidVipRequest(incoming()) && isAdmin();
+      allow delete: if isValidId(requestId) && isAdmin();
+    }
+
+    // 7. Connection Health Check Document
     match /test/connection {
-      allow read: if true;
-      allow write: if false;
-    }
-
-    // Default deny for all other collections
-    match /{document=**} {
-      allow read, write: if false;
+      allow get: if true;
+      allow list, write: if false;
     }
   }
 }

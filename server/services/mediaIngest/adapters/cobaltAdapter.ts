@@ -1,7 +1,7 @@
 import fs from "node:fs";
-import { BaseMediaAdapter, AdapterResult } from "./baseAdapter.js";
-import { MediaPlatform, IngestJobState } from "../types.js";
-import { startCobaltInternalServer } from "../cobaltInternalServer.js";
+import { BaseMediaAdapter, type AdapterResult } from "./baseAdapter.ts";
+import type { MediaPlatform, IngestJobState } from "../types.ts";
+import { startCobaltInternalServer } from "../cobaltInternalServer.ts";
 
 /**
  * Cobalt Adapter

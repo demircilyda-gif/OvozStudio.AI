@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { authFetch } from '../utils/authFetch';
+import { submitVipProductionRequest } from '../firebase';
 import { VoiceProfile, ExclusiveEpisode } from '../types/podcast';
 import {
   Crown,
@@ -39,7 +40,7 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
   userClonedVoiceId,
   lang,
 }) => {
-  const { isAuthenticated, isAdmin, requireAuth } = useAuth();
+  const { requireAuth, syncCredits, logGeneration } = useAuth();
 
   // VIP Custom Script Studio State
   const [vipTopic, setVipTopic] = useState("O'zbekistonda Texnologik Inqilob: 2030-yilgi Startaplar");
@@ -61,6 +62,14 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
   const [coverTags, setCoverTags] = useState('AI, Texnologiya, Kelajak, Toshkent');
   const [isGeneratingCover, setIsGeneratingCover] = useState(false);
   const [generatedSvg, setGeneratedSvg] = useState<string | null>(null);
+
+  // Custom VIP Production Order State
+  const [orderTitle, setOrderTitle] = useState('');
+  const [orderFormat, setOrderFormat] = useState('Maxsus Korporativ Podkast');
+  const [orderDuration, setOrderDuration] = useState('30 daqiqa');
+  const [orderPhone, setOrderPhone] = useState('');
+  const [orderBrief, setOrderBrief] = useState('');
+  const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
 
   // Default Exclusive Episodes List (Full 30-min to 60-min longform master episodes)
   const [exclusiveEpisodes, setExclusiveEpisodes] = useState<ExclusiveEpisode[]>([
@@ -119,13 +128,20 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
         }),
       });
 
-      if (!res.ok) throw new Error('Muqova yaratishda xatolik');
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Muqova yaratishda xatolik');
+      }
       const data = await res.json();
+      if (typeof data.creditsRemaining === 'number') {
+        syncCredits(data.creditsRemaining);
+      }
       if (data.svg) {
         setGeneratedSvg(data.svg);
+        await logGeneration('cover', coverTitle || 'AI SVG Muqova', 1);
       }
     } catch (e: any) {
-      alert(`Xatolik: ${e.message}`);
+      setVipNotice(`Xatolik: ${e.message}`);
     } finally {
       setIsGeneratingCover(false);
     }
@@ -181,7 +197,7 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
         setTimeout(() => setVipNotice(null), 5000);
       }
     } catch (e: any) {
-      alert(`Xatolik: ${e.message}`);
+      setVipNotice(`Xatolik: ${e.message}`);
     } finally {
       setIsGeneratingVipScript(false);
     }
@@ -212,7 +228,7 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
         setTimeout(() => setVipNotice(null), 5000);
       }
     } catch (e: any) {
-      alert(`Xatolik: ${e.message}`);
+      setVipNotice(`Xatolik: ${e.message}`);
     } finally {
       setIsEnrichingVip(false);
     }
@@ -297,10 +313,17 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
           speechStyle: vipMood,
         }),
       });
-      if (!res.ok) throw new Error('Ovoz sintezida xato');
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Ovoz sintezida xato');
+      }
       const data = await res.json();
+      if (typeof data.creditsRemaining === 'number') {
+        syncCredits(data.creditsRemaining);
+      }
       if (data.audioBase64) {
         setVipAudioBase64(data.audioBase64);
+        await logGeneration('podcast', vipTopic || 'VIP Masterclass', 1);
         setVipNotice(
           lang === 'uz'
             ? `🎙️ VIP Ovoz muvaffaqiyatli sintezlandi (${data.durationSeconds}s, 24kHz HD)!`
@@ -309,9 +332,55 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
         setTimeout(() => setVipNotice(null), 5000);
       }
     } catch (e: any) {
-      alert(`Xatolik: ${e.message}`);
+      setVipNotice(`Xatolik: ${e.message}`);
     } finally {
       setIsSynthesizingVip(false);
+    }
+  };
+
+  // Submit Custom VIP Production Order
+  const handleSubmitVipOrder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (
+      !requireAuth(
+        () => {},
+        lang === 'uz'
+          ? "Individual VIP buyurtma yuborish uchun tizimga kiring."
+          : "Войдите в аккаунт для отправки индивидуального VIP-заказа."
+      )
+    )
+      return;
+
+    if (!orderTitle.trim() || !orderBrief.trim()) {
+      setVipNotice(
+        lang === 'uz'
+          ? 'Loyiha nomi va texnik topshiriqni kiriting.'
+          : 'Укажите название проекта и описание задачи.'
+      );
+      return;
+    }
+
+    setIsSubmittingOrder(true);
+    try {
+      await submitVipProductionRequest({
+        projectTitle: orderTitle.trim(),
+        format: orderFormat,
+        targetDuration: orderDuration,
+        contactPhone: orderPhone.trim(),
+        brief: orderBrief.trim(),
+      });
+      setOrderTitle('');
+      setOrderPhone('');
+      setOrderBrief('');
+      setVipNotice(
+        lang === 'uz'
+          ? "✅ Maxsus VIP buyurtmangiz qabul qilindi! Prodyuserlar jamoasi siz bilan bog'lanadi."
+          : '✅ Ваш индивидуальный VIP-заказ принят! Продюсерская группа свяжется с вами.'
+      );
+    } catch (err: any) {
+      setVipNotice(`Xatolik: ${err.message}`);
+    } finally {
+      setIsSubmittingOrder(false);
     }
   };
 
@@ -913,6 +982,96 @@ export const ExclusiveProductionHub: React.FC<ExclusiveProductionHubProps> = ({
               </div>
             </div>
           </div>
+
+          {/* 04 — Custom VIP Production Order Form */}
+          <form
+            onSubmit={handleSubmitVipOrder}
+            className="bg-white border border-[#C98A12]/40 rounded-[22px] p-5 sm:p-6 space-y-3.5 shadow-xs"
+          >
+            <h3 className="text-xs font-mono uppercase tracking-[0.14em] text-[#C98A12] font-semibold flex items-center gap-2 border-b border-[rgba(22,21,17,0.1)] pb-3">
+              <Crown className="w-4 h-4 text-[#C98A12]" />
+              {lang === 'uz'
+                ? '04 — Maxsus VIP Buyurtma (Individual Production)'
+                : '04 — Индивидуальный VIP Продакшн на заказ'}
+            </h3>
+            <p className="text-xs text-[#5D594E]">
+              {lang === 'uz'
+                ? "Brendingiz uchun individual ovoz klonlash, korporativ IVR yoki kalit topshirish (turnkey) podkast buyurtma qiling:"
+                : 'Закажите индивидуальный голосовой клон, корпоративный IVR или выпуск под ключ:'}
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <input
+                type="text"
+                value={orderTitle}
+                onChange={(e) => setOrderTitle(e.target.value)}
+                placeholder={lang === 'uz' ? 'Loyiha yoki kompaniya nomi' : 'Название проекта / компании'}
+                maxLength={150}
+                className="w-full bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-2 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86] focus:bg-white"
+              />
+              <input
+                type="text"
+                value={orderPhone}
+                onChange={(e) => setOrderPhone(e.target.value)}
+                placeholder={lang === 'uz' ? 'Telefon yoki Telegram (@username)' : 'Телефон или Telegram'}
+                maxLength={60}
+                className="w-full bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-2 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86] focus:bg-white"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-2.5">
+              <select
+                value={orderFormat}
+                onChange={(e) => setOrderFormat(e.target.value)}
+                className="w-full bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-2 text-xs text-[#161511] outline-none"
+              >
+                <option value="Maxsus Korporativ Podkast">Maxsus Korporativ Podkast</option>
+                <option value="AI Call-Center / IVR Integratsiya">AI Call-Center / IVR Integratsiya</option>
+                <option value="Ko'p Ovozli Hujjatli Dublyaj">Ko&apos;p Ovozli Hujjatli Dublyaj</option>
+                <option value="Shaxsiy Brend Ovoz Klonlash">Shaxsiy Brend Ovoz Klonlash</option>
+              </select>
+              <select
+                value={orderDuration}
+                onChange={(e) => setOrderDuration(e.target.value)}
+                className="w-full bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-2 text-xs text-[#161511] outline-none"
+              >
+                <option value="15 daqiqa">15 daqiqa</option>
+                <option value="30 daqiqa">30 daqiqa</option>
+                <option value="60 daqiqa">60 daqiqa</option>
+                <option value="Doimiy hamkorlik">Doimiy hamkorlik</option>
+              </select>
+            </div>
+
+            <textarea
+              rows={3}
+              value={orderBrief}
+              onChange={(e) => setOrderBrief(e.target.value)}
+              placeholder={
+                lang === 'uz'
+                  ? "Qisqacha texnik topshiriq, til (o'zbek/rus), spikerlar soni va muddat..."
+                  : 'Краткое ТЗ, язык озвучки, количество дикторов и желаемые сроки...'
+              }
+              maxLength={2000}
+              className="w-full bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] rounded-xl p-3 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86] focus:bg-white"
+            />
+
+            <button
+              type="submit"
+              disabled={isSubmittingOrder}
+              className="w-full py-2.5 rounded-xl bg-[#161511] hover:bg-[#0A5A62] text-[#F4F1EA] text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-50"
+            >
+              <Crown className="w-3.5 h-3.5 text-[#C98A12]" />
+              <span>
+                {isSubmittingOrder
+                  ? lang === 'uz'
+                    ? 'Yuborilmoqda...'
+                    : 'Отправка...'
+                  : lang === 'uz'
+                  ? 'VIP Buyurtma Yuborish'
+                  : 'Отправить VIP-заявку'}
+              </span>
+            </button>
+          </form>
         </div>
       </div>
     </div>

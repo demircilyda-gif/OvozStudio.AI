@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { IngestJobState } from "../types.js";
+import type { IngestJobState } from "../types.ts";
 
 export class UploadedFileAdapter {
   readonly name = "UploadedFileAdapter";
