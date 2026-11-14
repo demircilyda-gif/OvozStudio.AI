@@ -112,6 +112,7 @@ export interface DialogueTurn {
   endTime?: number;
   fitStepApplied?: string;
   validationNotes?: string;
+  nonSpeechEvents?: string[];
   musicCue?: TurnMusicCue;
 }
 

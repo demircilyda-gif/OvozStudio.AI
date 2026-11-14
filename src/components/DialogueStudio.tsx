@@ -415,13 +415,31 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   // Per-User Saved Dubbing Projects History (strictly isolated by user.uid)
   const [userHistory, setUserHistory] = useState<SavedDialogueHistoryItem[]>([]);
 
-  // Uploaded Video File State (up to 15 min / 600 MB)
+  // Uploaded Video File State (up to 30 MB on client)
   const [uploadedVideoFileId, setUploadedVideoFileId] = useState<string | null>(null);
   const [uploadedVideoFileName, setUploadedVideoFileName] = useState<string | null>(null);
   const [uploadedVideoSizeMb, setUploadedVideoSizeMb] = useState<number | null>(null);
   const [uploadedVideoPreviewUrl, setUploadedVideoPreviewUrl] = useState<string | null>(null);
   const [isUploadingVideo, setIsUploadingVideo] = useState<boolean>(false);
-  const [autoExtractFromVideo, setAutoExtractFromVideo] = useState<boolean>(false);
+  // Point 1: Video analysis is enabled by default (true)
+  const [autoExtractFromVideo, setAutoExtractFromVideo] = useState<boolean>(true);
+  const [videoJobStatus, setVideoJobStatus] = useState<{
+    jobId: string;
+    stage:
+      | 'uploading_to_gemini'
+      | 'gemini_processing'
+      | 'storyboard'
+      | 'translating'
+      | 'done'
+      | 'failed';
+    progress: number;
+    error?: string | null;
+    turnsCount?: number;
+    speakersCount?: number;
+    elapsedSeconds?: number;
+    creditsDeducted?: number;
+  } | null>(null);
+  const videoJobPollTimerRef = useRef<number | null>(null);
   const [duckingMode, setDuckingMode] = useState<'smart_ducking' | 'mute_speech_keep_music' | 'voice_only'>('smart_ducking');
   const [isMuxingVideo, setIsMuxingVideo] = useState<boolean>(false);
   const [muxedVideoDownloadUrl, setMuxedVideoDownloadUrl] = useState<string | null>(null);
@@ -518,6 +536,11 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       setTotalDuration(0);
       setSrtSubtitles('');
       setDialogueNotice(null);
+      if (videoJobPollTimerRef.current) {
+        window.clearTimeout(videoJobPollTimerRef.current);
+        videoJobPollTimerRef.current = null;
+      }
+      setVideoJobStatus(null);
       setUploadedVideoFileId(null);
       setUploadedVideoFileName(null);
       setUploadedVideoSizeMb(null);
@@ -1096,15 +1119,95 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     }
   };
 
-  // Upload Video File up to 15 min / 600 MB via multipart/form-data
+  const getStageLabelRu = (
+    stage:
+      | 'uploading_to_gemini'
+      | 'gemini_processing'
+      | 'storyboard'
+      | 'translating'
+      | 'done'
+      | 'failed'
+  ): string => {
+    switch (stage) {
+      case 'uploading_to_gemini':
+        return 'Загрузка видео в Gemini Files API';
+      case 'gemini_processing':
+        return 'Обработка видео в Gemini Files API (ожидание ACTIVE)';
+      case 'storyboard':
+        return 'Создание JSON-раскадровки по таймкодам (gemini-3.8-flash)';
+      case 'translating':
+        return 'Прямой перевод 1:1 на узбекский (gemini-4-hydrogen)';
+      case 'done':
+        return 'Готово';
+      case 'failed':
+        return 'Ошибка разбора';
+      default:
+        return 'Обработка...';
+    }
+  };
+
+  const readLocalVideoDurationSec = (file: File): Promise<number> => {
+    return new Promise((resolve) => {
+      try {
+        const tempVideo = document.createElement('video');
+        tempVideo.preload = 'metadata';
+        const blobUrl = URL.createObjectURL(file);
+        const timer = window.setTimeout(() => {
+          URL.revokeObjectURL(blobUrl);
+          resolve(60);
+        }, 4000);
+        tempVideo.onloadedmetadata = () => {
+          window.clearTimeout(timer);
+          const dur = Number(tempVideo.duration);
+          URL.revokeObjectURL(blobUrl);
+          resolve(Number.isFinite(dur) && dur > 0 ? Math.round(dur * 10) / 10 : 60);
+        };
+        tempVideo.onerror = () => {
+          window.clearTimeout(timer);
+          URL.revokeObjectURL(blobUrl);
+          resolve(60);
+        };
+        tempVideo.src = blobUrl;
+      } catch {
+        resolve(60);
+      }
+    });
+  };
+
+  // Upload Video File (up to 30 MB on client) + Background Gemini Job Polling (Points 1–9)
   const handleVideoFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const sizeMb = Number((file.size / (1024 * 1024)).toFixed(1));
-    if (sizeMb > 600) {
-      setDialogueNotice('Размер видео превышает лимит 600 МБ (15 минут).');
+    // Point 2: Strict 30 MB limit on client
+    if (file.size > 30 * 1024 * 1024) {
+      const limitMsg = 'Видео больше 30 МБ. Сожмите до 720p и загрузите снова';
+      setDialogueNotice(limitMsg);
+      setVideoJobStatus({
+        jobId: '',
+        stage: 'failed',
+        progress: 0,
+        error: limitMsg,
+      });
+      e.target.value = '';
       return;
+    }
+
+    if (
+      !requireAuth(
+        () => {},
+        'Загрузка и ИИ-разбор видео доступны только авторизованным пользователям.'
+      )
+    ) {
+      e.target.value = '';
+      return;
+    }
+
+    const sizeMb = Number((file.size / (1024 * 1024)).toFixed(1));
+
+    if (videoJobPollTimerRef.current) {
+      window.clearTimeout(videoJobPollTimerRef.current);
+      videoJobPollTimerRef.current = null;
     }
 
     // Create local object URL for immediate synchronized preview in browser
@@ -1117,17 +1220,34 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     setUploadedVideoSizeMb(sizeMb);
     setMuxedVideoDownloadUrl(null);
 
+    // Point 1: If storyboard field is empty, ALWAYS run video extraction; checkbox is true by default
+    const isStoryboardFieldEmpty = !storyboardTextRu.trim();
+    const shouldRunAnalysis = autoExtractFromVideo || isStoryboardFieldEmpty;
+
     setIsUploadingVideo(true);
+    setVideoJobStatus(
+      shouldRunAnalysis
+        ? {
+            jobId: 'starting',
+            stage: 'uploading_to_gemini',
+            progress: 5,
+            error: null,
+          }
+        : null
+    );
     setDialogueNotice(
-      autoExtractFromVideo
-        ? `Загрузка видео "${file.name}" (${sizeMb} МБ) и автоматическое создание раскадровки через Gemini Files API...`
-        : `Загрузка видео "${file.name}" (${sizeMb} МБ) на сервер для синхронного дубляжа и склейки MP4...`
+      shouldRunAnalysis
+        ? `Этап: Загрузка видео в Gemini Files API (5%)...`
+        : `Отправка видео "${file.name}" (${sizeMb} МБ) на сервер...`
     );
 
     try {
+      const localDurationSec = await readLocalVideoDurationSec(file);
       const formData = new FormData();
       formData.append('video', file);
-      formData.append('generateStoryboardViaGemini', autoExtractFromVideo ? 'true' : 'false');
+      formData.append('generateStoryboardViaGemini', shouldRunAnalysis ? 'true' : 'false');
+      formData.append('storyboardIsEmpty', isStoryboardFieldEmpty ? 'true' : 'false');
+      formData.append('videoDurationSec', String(localDurationSec));
       formData.append('userClonedVoiceId', userClonedVoiceId || 'voice_17raj9ewke3g');
 
       const res = await authFetch('/api/podcast/upload-dubbing-video', {
@@ -1137,36 +1257,241 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || 'Ошибка загрузки видео');
+        throw new Error(err.message_ru || err.error || err.message || 'Ошибка загрузки видео');
       }
 
       const data = await res.json();
-      setUploadedVideoFileId(data.fileId || data.videoSessionId);
+      const resolvedFileId = data.fileId || data.videoSessionId;
+      setUploadedVideoFileId(resolvedFileId);
 
-      const sb = data.parsedStoryboard || data.storyboardResult;
-      if (sb && Array.isArray(sb.turns) && sb.turns.length > 0) {
-        const parsedCost =
-          typeof sb.estimatedCostUsd === 'number'
-            ? sb.estimatedCostUsd
-            : Number(sb.estimatedCostUsd?.totalUsd ?? 0.05);
-        setTurns(sb.turns);
-        setNoSpeechIntervals(sb.noSpeechIntervals || []);
-        setEstimatedCostUsd(Number.isFinite(parsedCost) ? parsedCost : 0.05);
-        if (data.generatedStoryboardText || data.generatedRawStoryboard) {
-          setStoryboardTextRu(data.generatedStoryboardText || data.generatedRawStoryboard);
-        }
+      // If no background job was requested (only possible when storyboardTextRu was already filled and user unchecked box)
+      if (!data.jobId) {
+        setIsUploadingVideo(false);
         setDialogueNotice(
-          `✅ Видео "${file.name}" (${sizeMb} МБ) загружено и раскадровка автоматически переведена 1:1 (${sb.turns.length} реплик)!`
+          `Видео "${file.name}" (${sizeMb} МБ) сохранено для сборки MP4.`
         );
-      } else {
-        setDialogueNotice(
-          `✅ Видео "${file.name}" (${sizeMb} МБ) загружено! Теперь оно синхронизировано с таблицей таймкодов и готово к экспорту MP4 с узбекским дубляжом.`
-        );
+        return;
       }
+
+      const jobId = String(data.jobId);
+      setVideoJobStatus({
+        jobId,
+        stage: 'uploading_to_gemini',
+        progress: 10,
+        error: null,
+      });
+
+      // Point 3: Poll GET /api/podcast/dubbing-job/:jobId every 2.5 seconds
+      const pollJob = async () => {
+        try {
+          const jobRes = await authFetch(`/api/podcast/dubbing-job/${encodeURIComponent(jobId)}`);
+          const jobData = await jobRes.json().catch(() => ({}));
+
+          if (!jobRes.ok || jobData.stage === 'failed') {
+            const reason =
+              jobData.error || 'не удалось разобрать видео';
+            setVideoJobStatus({
+              jobId,
+              stage: 'failed',
+              progress: 0,
+              error: reason,
+            });
+            setIsUploadingVideo(false);
+            // Point 7: Honest error message
+            setDialogueNotice(
+              `Раскадровка не получена: ${reason}. Вставьте текст раскадровки вручную или загрузите видео снова.`
+            );
+            return;
+          }
+
+          if (jobData.stage === 'done') {
+            const resPayload = jobData.result || {};
+            const sb = resPayload.parsedStoryboard || resPayload.storyboardResult;
+            const turnsList = Array.isArray(sb?.turns) ? sb.turns : [];
+
+            if (turnsList.length === 0) {
+              const emptyReason = 'в видео не обнаружено речевых реплик';
+              setVideoJobStatus({
+                jobId,
+                stage: 'failed',
+                progress: 0,
+                error: emptyReason,
+              });
+              setIsUploadingVideo(false);
+              setDialogueNotice(
+                `Раскадровка не получена: ${emptyReason}. Вставьте текст раскадровки вручную или загрузите видео снова.`
+              );
+              return;
+            }
+
+            const parsedCost =
+              typeof sb.estimatedCostUsd === 'number'
+                ? sb.estimatedCostUsd
+                : Number(sb.estimatedCostUsd?.totalUsd ?? 0.05);
+            const safeCost = Number.isFinite(parsedCost) ? parsedCost : 0.05;
+            const safeDuration = Number(
+              sb.totalVideoDurationSec || sb.totalDurationSec || resPayload.videoDurationSec || localDurationSec
+            );
+
+            setTurns(turnsList);
+            setNoSpeechIntervals(
+              (sb.noSpeechIntervals || []).map((ns: any) => ({
+                timecode: ns.timecode,
+                startSec: ns.startSec,
+                endSec: ns.endSec,
+                durationSec: ns.durationSec,
+                description: ns.visualDescription || ns.description || ns.label || 'Без слов',
+              }))
+            );
+            setEstimatedCostUsd(safeCost);
+            setTotalVideoDurationSec(safeDuration);
+            setMasterAudioMode('time_aligned');
+
+            const genText =
+              resPayload.generatedStoryboardText || sb.generatedStoryboardText || '';
+            if (genText) {
+              setStoryboardTextRu(genText);
+            }
+
+            // Assign detected speakers (male/female) to Speaker 1 & Speaker 2
+            const detectedSpeakers = Array.isArray(sb.speakers) ? sb.speakers : [];
+            const speakersCount =
+              detectedSpeakers.length > 0
+                ? detectedSpeakers.length
+                : new Set(turnsList.map((t: any) => t.speakerId)).size || 1;
+
+            if (detectedSpeakers.length > 0) {
+              const sp1 =
+                detectedSpeakers.find((s: any) => s.id === 'HOST_1' || s.speakerId === 'HOST_1') ||
+                detectedSpeakers[0];
+              const sp2 =
+                detectedSpeakers.find((s: any) => s.id === 'HOST_2' || s.speakerId === 'HOST_2') ||
+                detectedSpeakers[1];
+
+              if (sp1) {
+                setSpeaker1Name(sp1.name || (sp1.gender === 'female' ? 'Девушка (Ж)' : 'Мужчина (М)'));
+                if (sp1.description) setSpeaker1Role(sp1.description.slice(0, 60));
+                if (sp1.gender === 'female') {
+                  const femVoice = voices.find(
+                    (v) => v.id === 'aziza' || v.baseVoice === 'Kore' || v.gender === 'female'
+                  );
+                  if (femVoice) setSpeaker1VoiceId(femVoice.id);
+                } else {
+                  const maleVoice =
+                    voices.find((v) => v.isReplicatedVoice || v.id.includes('17raj9')) ||
+                    voices.find((v) => v.gender === 'male');
+                  if (maleVoice) setSpeaker1VoiceId(maleVoice.id);
+                }
+              }
+
+              if (sp2) {
+                setSpeaker2Name(sp2.name || (sp2.gender === 'female' ? 'Девушка (Ж)' : 'Мужчина (М)'));
+                if (sp2.description) setSpeaker2Role(sp2.description.slice(0, 60));
+                setSpeaker2Gender(sp2.gender === 'female' ? 'female' : 'male');
+                if (sp2.gender === 'male') {
+                  const clonedVoice =
+                    voices.find((v) => v.isReplicatedVoice || v.id.includes('17raj9')) ||
+                    voices.find((v) => v.gender === 'male');
+                  if (clonedVoice) setSpeaker2VoiceId(clonedVoice.id);
+                } else {
+                  const femVoice = voices.find(
+                    (v) => v.id === 'aziza' || v.baseVoice === 'Kore' || v.gender === 'female'
+                  );
+                  if (femVoice) setSpeaker2VoiceId(femVoice.id);
+                }
+              }
+
+              if (detectedSpeakers.length > 2) {
+                setExtraSpeakers(
+                  detectedSpeakers.slice(2).map((s: any, idx: number) => ({
+                    speakerId: s.id || `HOST_${idx + 3}`,
+                    name: s.name || `Спикер ${idx + 3}`,
+                    gender: s.gender === 'female' ? 'female' : 'male',
+                    voiceId: s.recommendedVoiceId || 'Fenrir',
+                    baseVoice: s.recommendedBaseVoice || 'Fenrir',
+                    description: s.description,
+                  }))
+                );
+              } else {
+                setExtraSpeakers([]);
+              }
+            }
+
+            if (typeof resPayload.creditsRemaining === 'number') {
+              syncCredits(resPayload.creditsRemaining);
+            }
+
+            saveProjectToUserHistory({
+              title: file.name || topic || 'Видео-дубляж 1:1',
+              storyboardTextRu: genText,
+              turns: turnsList,
+              noSpeechIntervals: sb.noSpeechIntervals || [],
+              totalVideoDurationSec: safeDuration,
+              estimatedCostUsd: safeCost,
+            });
+
+            setVideoJobStatus({
+              jobId,
+              stage: 'done',
+              progress: 100,
+              error: null,
+              turnsCount: turnsList.length,
+              speakersCount,
+              elapsedSeconds: resPayload.elapsedSeconds,
+              creditsDeducted: resPayload.creditsDeducted,
+            });
+            setIsUploadingVideo(false);
+
+            // Point 7: Exact honest message on completion
+            setDialogueNotice(
+              `Раскадровка: ${turnsList.length} реплик, ${speakersCount} спикеров. Проверьте таблицу и нажмите Озвучить.`
+            );
+            return;
+          }
+
+          // Still in progress: uploading_to_gemini | gemini_processing | storyboard | translating
+          const currentStage = jobData.stage || 'gemini_processing';
+          const currentPct = Number(jobData.progress || 20);
+          setVideoJobStatus({
+            jobId,
+            stage: currentStage,
+            progress: currentPct,
+            error: null,
+          });
+          setDialogueNotice(
+            `Этап: ${getStageLabelRu(currentStage)} (${currentPct}%)...`
+          );
+
+          videoJobPollTimerRef.current = window.setTimeout(pollJob, 2500);
+        } catch (pollErr: any) {
+          const reason = pollErr?.message || 'потеряна связь с сервером';
+          setVideoJobStatus({
+            jobId,
+            stage: 'failed',
+            progress: 0,
+            error: reason,
+          });
+          setIsUploadingVideo(false);
+          setDialogueNotice(
+            `Раскадровка не получена: ${reason}. Вставьте текст раскадровки вручную или загрузите видео снова.`
+          );
+        }
+      };
+
+      videoJobPollTimerRef.current = window.setTimeout(pollJob, 2500);
     } catch (err: any) {
-      setDialogueNotice(`Ошибка загрузки видео: ${err.message}`);
-    } finally {
+      const reason = err?.message || 'ошибка отправки видео';
+      setVideoJobStatus({
+        jobId: '',
+        stage: 'failed',
+        progress: 0,
+        error: reason,
+      });
       setIsUploadingVideo(false);
+      // Point 7: Honest message when storyboard is not obtained
+      setDialogueNotice(
+        `Раскадровка не получена: ${reason}. Вставьте текст раскадровки вручную или загрузите видео снова.`
+      );
     }
   };
 
@@ -1310,8 +1635,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     }
   };
 
-  // Download .SRT Subtitles
+  // Download .SRT Subtitles (Point 8: Disabled when turns.length === 0)
   const handleDownloadSrt = () => {
+    if (turns.length === 0) return;
     let srtContent = srtSubtitles;
     if (!srtContent) {
       const fmtSrt = (sec: number) => {
@@ -1331,6 +1657,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         .join('\n');
     }
 
+    if (!srtContent.trim()) return;
     const blob = new Blob([srtContent], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -2218,15 +2545,15 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
             {studioSourceMode === 'verbatim' ? (
               /* MODE 1: Verbatim 1:1 Storyboard + Video Upload up to 15 min */
               <div className="space-y-4">
-                {/* Video Upload Card (up to 15 min / 600 MB) */}
+                {/* Video Upload Card (up to 30 MB / 720p) */}
                 <div className="p-4 rounded-2xl bg-white border border-[rgba(14,124,134,0.28)] space-y-3 shadow-2xs">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <Video className="w-4 h-4 text-[#0E7C86]" />
                       <span className="text-xs font-bold text-[#161511]">
                         {lang === 'uz'
-                          ? '1. Original Videoni Yuklash (MP4 / WebM / MOV, 15 daqiqagacha / 600 MB):'
-                          : '1. Загрузите оригинал видео (MP4 / WebM / MOV, до 15 мин / 600 МБ):'}
+                          ? '1. Original Videoni Yuklash (MP4 / WebM / MOV, 30 MB gacha / 720p):'
+                          : '1. Загрузить оригинальное видео (MP4 / WebM / MOV, до 30 МБ / 720p):'}
                       </span>
                     </div>
                     <label className="flex items-center gap-1.5 text-[11px] text-[#5D594E] cursor-pointer">
@@ -2239,7 +2566,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                       <span>
                         {lang === 'uz'
                           ? 'Videodan avtomatik raskadrovka olish (Gemini Files API)'
-                          : 'Авто-создать раскадровку из видео (если нет текста)'}
+                          : 'Авто-создать раскадровку из видео'}
                       </span>
                     </label>
                   </div>
@@ -2262,13 +2589,17 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           {uploadedVideoFileName
                             ? `${uploadedVideoFileName} (${uploadedVideoSizeMb} МБ)`
                             : lang === 'uz'
-                            ? 'Video tanlanmagan (ixtiyoriy — MP4 eksport va sinxron pleyer uchun)'
-                            : 'Видео не выбрано (загрузите MP4 для синхронного плеера и склейки дубляжа)'}
+                            ? 'Video tanlanmagan (30 MB gacha / 720p)'
+                            : 'Видео не выбрано (загрузите MP4 до 30 МБ для ИИ-разбора и склейки дубляжа)'}
                         </p>
                         <p className="text-[11px] text-[#5D594E]">
-                          {uploadedVideoFileId
-                            ? '✅ Загружено на сервер · Готово к сборке MP4 с узбекской дорожкой'
-                            : 'Поддерживаются ролики 3 мин, 10 мин, 15 мин (прямая потоковая загрузка без лимита 35 МБ)'}
+                          {videoJobStatus && videoJobStatus.stage !== 'done' && videoJobStatus.stage !== 'failed'
+                            ? `Этап: ${getStageLabelRu(videoJobStatus.stage)} (${videoJobStatus.progress}%)`
+                            : videoJobStatus?.stage === 'done'
+                            ? `✓ Раскадровка: ${videoJobStatus.turnsCount ?? turns.length} реплик, ${videoJobStatus.speakersCount ?? 2} спикеров. Проверьте таблицу и нажмите Озвучить.`
+                            : videoJobStatus?.stage === 'failed'
+                            ? `Раскадровка не получена: ${videoJobStatus.error}. Вставьте текст раскадровки вручную или загрузите видео снова.`
+                            : 'Лимит 30 МБ (720p) · 1 кредит за начатую минуту видео (списывается только после готовой раскадровки)'}
                         </p>
                       </div>
                     </div>
@@ -2277,18 +2608,83 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                       type="button"
                       onClick={() => videoInputRef.current?.click()}
                       disabled={isUploadingVideo}
-                      className="btn-pill btn-solid text-xs py-2 px-4 flex items-center justify-center gap-1.5 shrink-0 bg-[#0E7C86] hover:bg-[#0A5A62] text-white border-none cursor-pointer"
+                      className="btn-pill btn-solid text-xs py-2 px-4 flex items-center justify-center gap-1.5 shrink-0 bg-[#0E7C86] hover:bg-[#0A5A62] text-white border-none cursor-pointer disabled:opacity-60"
                     >
                       <Upload className={`w-3.5 h-3.5 ${isUploadingVideo ? 'animate-bounce' : ''}`} />
                       <span>
                         {isUploadingVideo
-                          ? 'Загрузка видео...'
+                          ? videoJobStatus && videoJobStatus.stage !== 'done' && videoJobStatus.stage !== 'failed'
+                            ? `Разбор (${videoJobStatus.progress}%)...`
+                            : 'Загрузка видео...'
                           : uploadedVideoFileName
                           ? 'Заменить видео'
-                          : 'Выбрать видео (до 15 мин)'}
+                          : 'Загрузить оригинальное видео'}
                       </span>
                     </button>
                   </div>
+
+                  {/* Background Job Stage & Progress Bar (Point 3: shown while running, no "✓" until stage === 'done') */}
+                  {videoJobStatus && videoJobStatus.stage !== 'done' && videoJobStatus.stage !== 'failed' && (
+                    <div className="p-3.5 rounded-xl bg-[#FAF8F3] border border-[#0E7C86]/35 space-y-2">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-semibold text-[#0A5A62] flex items-center gap-1.5">
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#0E7C86]" />
+                          <span>{getStageLabelRu(videoJobStatus.stage)}</span>
+                        </span>
+                        <span className="font-mono text-xs font-bold text-[#0E7C86]">
+                          {videoJobStatus.progress}%
+                        </span>
+                      </div>
+                      <div className="w-full h-2 rounded-full bg-[#ECE7DB] overflow-hidden">
+                        <div
+                          className="h-full bg-[#0E7C86] transition-all duration-300 rounded-full"
+                          style={{ width: `${Math.max(5, Math.min(100, videoJobStatus.progress))}%` }}
+                        />
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2 text-[10.5px] font-mono text-[#5D594E]">
+                        <span className={videoJobStatus.stage === 'uploading_to_gemini' ? 'text-[#0E7C86] font-bold' : ''}>
+                          1. Загрузка в Gemini
+                        </span>
+                        <span>→</span>
+                        <span className={videoJobStatus.stage === 'gemini_processing' ? 'text-[#0E7C86] font-bold' : ''}>
+                          2. Обработка видео (ACTIVE)
+                        </span>
+                        <span>→</span>
+                        <span className={videoJobStatus.stage === 'storyboard' ? 'text-[#0E7C86] font-bold' : ''}>
+                          3. Раскадровка JSON (gemini-3.8-flash)
+                        </span>
+                        <span>→</span>
+                        <span className={videoJobStatus.stage === 'translating' ? 'text-[#0E7C86] font-bold' : ''}>
+                          4. Перевод 1:1 (gemini-4-hydrogen)
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  {videoJobStatus?.stage === 'failed' && (
+                    <div className="p-3 rounded-xl bg-[#FEF2F2] border border-[#FCA5A5] text-xs text-[#991B1B] flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 text-[#DC2626] shrink-0" />
+                      <span>
+                        Раскадровка не получена: {videoJobStatus.error}. Вставьте текст раскадровки вручную или загрузите видео снова.
+                      </span>
+                    </div>
+                  )}
+
+                  {videoJobStatus?.stage === 'done' && (
+                    <div className="p-3 rounded-xl bg-[rgba(14,124,134,0.08)] border border-[rgba(14,124,134,0.3)] text-xs text-[#0A5A62] flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="w-4 h-4 text-[#0E7C86] shrink-0" />
+                        <span className="font-semibold">
+                          ✓ Раскадровка: {videoJobStatus.turnsCount ?? turns.length} реплик, {videoJobStatus.speakersCount ?? 2} спикеров. Проверьте таблицу и нажмите Озвучить.
+                        </span>
+                      </div>
+                      {typeof videoJobStatus.elapsedSeconds === 'number' && (
+                        <span className="font-mono text-[10.5px] text-[#5D594E] shrink-0">
+                          {videoJobStatus.elapsedSeconds}с · списано {videoJobStatus.creditsDeducted ?? 0} кред.
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Per-User Saved Dubbing Projects History (Visible ONLY to the user who created them) */}
@@ -3035,7 +3431,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                         >
                           {isHost1 ? <User className="w-3.5 h-3.5" /> : <Bot className="w-3.5 h-3.5" />}
                           <span>{turn.speakerName || (isHost1 ? speaker1Name : speaker2Name)}</span>
-                          <span className="text-[10px] font-mono opacity-80">⇄</span>
+                          <span className="text-[10px] font-mono opacity-85">
+                            ({(turn.speakerGender || (isHost1 ? speaker1Profile?.gender : speaker2Gender)) === 'female' ? 'Ж' : 'М'}) ⇄
+                          </span>
                         </button>
 
                         {turn.timecode && (
@@ -3044,12 +3442,21 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           </span>
                         )}
 
-                        {turn.intonationRu && (
+                        {(turn.intonationRu || turn.emotion) && (
                           <span
                             className="text-[10.5px] px-2.5 py-0.5 rounded-full bg-[#C4552D]/10 text-[#C4552D] border border-[#C4552D]/30 font-medium"
-                            title="Интонация из раскадровки (управляет стилем Gemini 3.8 TTS)"
+                            title="Эмоция / интонация из раскадровки (управляет стилем Gemini 3.8 TTS)"
                           >
-                            🎭 {turn.intonationRu}
+                            🎭 {turn.intonationRu || turn.emotion}
+                          </span>
+                        )}
+
+                        {Array.isArray(turn.nonSpeechEvents) && turn.nonSpeechEvents.length > 0 && (
+                          <span
+                            className="font-mono text-[10px] px-2.5 py-0.5 rounded-full bg-[#0E7C86]/12 text-[#0A5A62] border border-[#0E7C86]/35 font-semibold"
+                            title="Неречевые реакции (вынесены отдельно из текста в non_speech_events)"
+                          >
+                            🔊 non_speech: {turn.nonSpeechEvents.join(', ')}
                           </span>
                         )}
 
@@ -3362,11 +3769,12 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                     <span>🎵 Скачать Аудиодорожку WAV (По таймкодам)</span>
                   </button>
 
-                  {/* 3. Download .SRT Subtitles */}
+                  {/* 3. Download .SRT Subtitles (Point 8: disabled when turns.length === 0) */}
                   <button
                     type="button"
                     onClick={handleDownloadSrt}
-                    className="btn-pill btn-ghost w-full py-2.5 flex items-center justify-center gap-2 text-xs font-semibold border border-[rgba(22,21,17,0.16)] cursor-pointer"
+                    disabled={turns.length === 0}
+                    className="btn-pill btn-ghost w-full py-2.5 flex items-center justify-center gap-2 text-xs font-semibold border border-[rgba(22,21,17,0.16)] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <Subtitles className="w-4 h-4 text-[#0E7C86]" />
                     <span>📝 Скачать Субтитры .SRT</span>
@@ -3432,7 +3840,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 <button
                   type="button"
                   onClick={handleDownloadSrt}
-                  className="btn-pill btn-ghost text-xs py-2 px-4 inline-flex items-center gap-1.5 border border-[rgba(22,21,17,0.14)] cursor-pointer"
+                  disabled={turns.length === 0}
+                  className="btn-pill btn-ghost text-xs py-2 px-4 inline-flex items-center gap-1.5 border border-[rgba(22,21,17,0.14)] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Subtitles className="w-3.5 h-3.5 text-[#0E7C86]" />
                   <span>Скачать .SRT субтитры перевода</span>

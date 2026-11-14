@@ -55,10 +55,32 @@ export interface VerbatimTurn {
   speechStyle: string; // Gemini 3.8 TTS speechMetadata.style
   pace: "slow" | "normal" | "fast";
   inlineTags: string[];
+  nonSpeechEvents?: string[];
   maxSyllables: number;
   actualSyllables: number;
   validationPassed: boolean;
   validationNotes?: string;
+}
+
+export interface VideoJsonSpeaker {
+  id: string;
+  gender: "male" | "female";
+  description: string;
+}
+
+export interface VideoJsonSegment {
+  start: string;
+  end: string;
+  type: "speech" | "no_speech";
+  speakerId: string;
+  emotion: string;
+  text_original: string;
+  non_speech_events: string[];
+}
+
+export interface VideoJsonStoryboard {
+  speakers: VideoJsonSpeaker[];
+  segments: VideoJsonSegment[];
 }
 
 export interface VerbatimParseResult {
@@ -67,6 +89,7 @@ export interface VerbatimParseResult {
   turns: VerbatimTurn[];
   noSpeechIntervals: NoSpeechInterval[];
   totalDurationSec: number;
+  generatedStoryboardText?: string;
   estimatedCostUsd: {
     translationUsd: number;
     ttsUsd: number;
@@ -75,7 +98,36 @@ export interface VerbatimParseResult {
 }
 
 /**
- * Parse timestamp like "00:12", "01:05", "00:01:25", "00:12,500" into seconds
+ * Probes exact video duration in seconds via /usr/bin/ffprobe (or fallback).
+ */
+export async function probeVideoDurationSec(
+  filePath: string,
+  fallbackSec = 60
+): Promise<number> {
+  if (fs.existsSync("/usr/bin/ffprobe")) {
+    try {
+      const { stdout } = await execFileAsync("/usr/bin/ffprobe", [
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        filePath,
+      ]);
+      const parsed = parseFloat(String(stdout || "").trim());
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return Math.round(parsed * 10) / 10;
+      }
+    } catch (e: any) {
+      console.warn("[probeVideoDurationSec] ffprobe warning:", e?.message);
+    }
+  }
+  return fallbackSec > 0 ? fallbackSec : 60;
+}
+
+/**
+ * Parse timestamp like "00:12", "01:05", "00:01:25", "00:12,500", "01:14.5" into seconds
  */
 export function parseTimecodeToSec(raw: string): number {
   const cleaned = String(raw || "")
@@ -145,13 +197,14 @@ export function extractAndConvertInlineRemarks(rawSpokenText: string): {
   cleanedText: string;
   inlineTags: string[];
   extraStyleHints: string[];
+  nonSpeechEvents: string[];
 } {
   let text = String(rawSpokenText || "").trim();
   const inlineTags: string[] = [];
   const extraStyleHints: string[] = [];
+  const nonSpeechEvents: string[] = [];
 
   // 1. If the line has outer quotes «...» or "...", strip any editorial note AFTER the closing quote:
-  // e.g. «...за пять и две секунды». (в оригинале оговаривается: «обменять»)
   const guillemetMatch = text.match(/^«([\s\S]*?)»\.?\s*(?:\(([^)]*)\))?\.?$/);
   if (guillemetMatch) {
     text = guillemetMatch[1].trim();
@@ -177,6 +230,7 @@ export function extractAndConvertInlineRemarks(rawSpokenText: string): {
     // Chuckle / light laugh: (хе-хе), (усмешка), (смешок), (хихикает), (улыбается)
     if (/хе-хе|хех|усмеш|смешок|хихик|улыбк|улыба/i.test(inner)) {
       inlineTags.push("<laugh>");
+      nonSpeechEvents.push("laugh");
       extraStyleHints.push("light short chuckle, warm smiling tone");
       return " <laugh> ";
     }
@@ -184,6 +238,7 @@ export function extractAndConvertInlineRemarks(rawSpokenText: string): {
     // Full laugh: (смеется), (смеётся), (смех), (ха-ха)
     if (/смеет|смеёт|смех|ха-ха|хохоч|ржет|ржёт|laugh/i.test(inner)) {
       inlineTags.push("<laugh>");
+      nonSpeechEvents.push("laugh");
       extraStyleHints.push("natural laughing delivery");
       return " <laugh> ";
     }
@@ -191,6 +246,7 @@ export function extractAndConvertInlineRemarks(rawSpokenText: string): {
     // Sigh: (вздыхает), (вздох), (выдох)
     if (/вздых|вздох|выдох|sigh/i.test(inner)) {
       inlineTags.push("<sigh>");
+      nonSpeechEvents.push("sigh");
       extraStyleHints.push("audible sigh");
       return " <sigh> ";
     }
@@ -198,12 +254,14 @@ export function extractAndConvertInlineRemarks(rawSpokenText: string): {
     // Pause: (пауза), (короткая пауза), (молчание)
     if (/пауз|молчан|тишин|pause/i.test(inner)) {
       inlineTags.push("<short pause>");
+      nonSpeechEvents.push("short pause");
       return " <short pause> ";
     }
 
     // Breath / gasp: (вдох), (переводит дух), (ах), (удивленный вдох)
     if (/вдох|переводит дух|дыхан|ахнув|задых|breath|gasp/i.test(inner)) {
       inlineTags.push("<breath>");
+      nonSpeechEvents.push("breath");
       extraStyleHints.push("audible intake of breath");
       return " <breath> ";
     }
@@ -211,6 +269,7 @@ export function extractAndConvertInlineRemarks(rawSpokenText: string): {
     // Cough / throat clear: (кашляет), (покашливает)
     if (/кашл|покашл|горло|cough/i.test(inner)) {
       inlineTags.push("<cough>");
+      nonSpeechEvents.push("cough");
       return " <cough> ";
     }
 
@@ -237,6 +296,7 @@ export function extractAndConvertInlineRemarks(rawSpokenText: string): {
     cleanedText: text.replace(/\s+/g, " ").trim(),
     inlineTags: Array.from(new Set(inlineTags)),
     extraStyleHints: Array.from(new Set(extraStyleHints)),
+    nonSpeechEvents: Array.from(new Set(nonSpeechEvents)),
   };
 }
 
@@ -280,29 +340,29 @@ export function mapRussianIntonationToStyle(
   let emotion = "warm";
   let pace: "slow" | "normal" | "fast" = "normal";
 
-  if (/удивл|недовер|восторг|азарт|бодр|ого|шок|вызов/i.test(combined)) {
+  if (/удивл|недовер|восторг|азарт|бодр|ого|шок|вызов|excited|surpris/i.test(combined)) {
     emotion = "excited";
     styleParts.push("Expressive, surprised and energetic delivery with lively rising pitch");
-  } else if (/вопрос|интерес|любопыт/i.test(combined)) {
+  } else if (/вопрос|интерес|любопыт|curious|question/i.test(combined)) {
     emotion = "curious";
     styleParts.push("Curious, inquisitive, natural questioning intonation");
-  } else if (/иронич|скепсис|ухмыл|улыбк|смеш|смех|дружелюб|довольно/i.test(combined)) {
+  } else if (/иронич|скепсис|ухмыл|улыбк|смеш|смех|дружелюб|довольно|warm|smil/i.test(combined)) {
     emotion = "warm";
     styleParts.push("Warm, smiling, slightly playful and friendly conversational tone");
-  } else if (/серьез|серьёз|эксперт|акцент на цифр|резюмир/i.test(combined)) {
+  } else if (/серьез|серьёз|эксперт|акцент на цифр|резюмир|serious|confident/i.test(combined)) {
     emotion = "serious";
     styleParts.push("Confident, authoritative, clear and grounded delivery");
-  } else if (/шёпот|шепот|тихо/i.test(combined)) {
+  } else if (/шёпот|шепот|тихо|whisper/i.test(combined)) {
     emotion = "whisper";
     styleParts.push("Soft, intimate whispering delivery");
-  } else if (/спокойн|размерен|уверен/i.test(combined)) {
+  } else if (/спокойн|размерен|уверен|calm/i.test(combined)) {
     emotion = "calm";
     styleParts.push("Calm, composed, steady and natural conversational delivery");
   }
 
-  if (/быстр|бодр|азарт|коротко/i.test(combined)) {
+  if (/быстр|бодр|азарт|коротко|fast/i.test(combined)) {
     pace = "fast";
-  } else if (/медлен|размерен|протяжн|пауз/i.test(combined)) {
+  } else if (/медлен|размерен|протяжн|пауз|slow/i.test(combined)) {
     pace = "slow";
   }
 
@@ -366,7 +426,7 @@ export function parseStoryboardDeterministic(rawStoryboardText: string): {
 
     const detectedGender: "female" | "male" =
       genderHint ||
-      (/\(\s*ж\s*\)|девушк|женщин|ведущая|гостья|она|ayol|qiz|malika|aziza|kore|aoede/i.test(
+      (/\(\s*ж\s*\)|девушк|женщин|ведущая|гостья|она|ayol|qiz|malika|aziza|kore|aoede|female/i.test(
         `${rawName} ${description}`
       )
         ? "female"
@@ -391,7 +451,6 @@ export function parseStoryboardDeterministic(rawStoryboardText: string): {
     const index = speakersMap.size + 1;
     const id = `HOST_${index}`;
 
-    // Pick distinct default voices for N speakers
     const femaleVoices = [
       { voiceId: "Kore", baseVoice: "Kore" },
       { voiceId: "Aoede", baseVoice: "Aoede" },
@@ -435,7 +494,6 @@ export function parseStoryboardDeterministic(rawStoryboardText: string): {
   const lines = normalized.split("\n");
   let currentSceneTitle = "";
 
-  // 1. First pass: scan for Speaker Profile headers at top (e.g., "Спикер 1 (Ж) — Девушка: ..." or "икер 1 (Ж) — Девушка: ...")
   const speakerHeaderRegex =
     /^(?:сп)?икер\s*(\d+)\s*(?:\(\s*([ЖМжмMFmf])\s*\))?\s*[—–\-:]\s*([^:]+):\s*(.+)$/i;
   for (const line of lines) {
@@ -455,12 +513,9 @@ export function parseStoryboardDeterministic(rawStoryboardText: string): {
     }
   }
 
-  // 2. Second pass: parse timestamped turn headers and structured fields
-  // Matches: "00:00 – 00:02 | Девушка (Ж):" or "[00:12 - 00:18] Мужчина (М):" or "00:45 – 00:52 | Музыка и графика (Без слов):"
   const turnHeaderRegex =
     /^\[?\s*(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?)\s*(?:[—–\-]|-->)\s*(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?)\s*\]?\s*(?:\||—|–|-|:)?\s*(.+?)\s*:?\s*$/;
 
-  // Also support single-timestamp lines like "[00:12] Спикер 1: «Привет»"
   const singleTimeInlineRegex =
     /^\[?\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*(?:[—–\-]\s*(\d{1,2}:\d{2}(?::\d{2})?))?\s*\]?\s*(?:\||—|–|-)?\s*([^:«"]+?)\s*:\s*([«"].+[»"].*)$/;
 
@@ -482,16 +537,13 @@ export function parseStoryboardDeterministic(rawStoryboardText: string): {
     const line = lines[i].trim();
     if (!line) continue;
 
-    // Skip speaker profile header lines already parsed
     if (speakerHeaderRegex.test(line)) continue;
 
-    // Scene header detection: "Сцена 1. Габариты, комфорт и динамика разгона (00:00 – 00:45)"
     if (/^(?:сцена|scene|глава|часть|bob)\s*\d+/i.test(line)) {
       currentSceneTitle = line;
       continue;
     }
 
-    // Check inline single-line turn first
     const inlineMatch = line.match(singleTimeInlineRegex);
     if (inlineMatch && !/^(?:видеоряд|интонация|текст)\s*:/i.test(line)) {
       if (activeBlock) rawBlocks.push(activeBlock);
@@ -511,7 +563,6 @@ export function parseStoryboardDeterministic(rawStoryboardText: string): {
       continue;
     }
 
-    // Check multi-line turn header: "00:00 – 00:02 | Девушка (Ж):"
     const headerMatch = line.match(turnHeaderRegex);
     if (headerMatch) {
       if (activeBlock) rawBlocks.push(activeBlock);
@@ -593,7 +644,7 @@ export function parseStoryboardDeterministic(rawStoryboardText: string): {
     }
 
     const speakerProfile = registerSpeaker(blk.headerLabel);
-    const { cleanedText, inlineTags, extraStyleHints } =
+    const { cleanedText, inlineTags, extraStyleHints, nonSpeechEvents } =
       extractAndConvertInlineRemarks(spokenTextRu);
 
     if (!cleanedText) {
@@ -608,7 +659,6 @@ export function parseStoryboardDeterministic(rawStoryboardText: string): {
       speakerProfile
     );
 
-    // Budget ~4.8 Uzbek syllables per second (minimum 4 syllables for 1-sec turns like "Ketdik!")
     const maxSyllables = Math.max(4, Math.ceil(durationSec * 4.8));
 
     turns.push({
@@ -630,6 +680,7 @@ export function parseStoryboardDeterministic(rawStoryboardText: string): {
       speechStyle,
       pace,
       inlineTags,
+      nonSpeechEvents,
       maxSyllables,
     });
   }
@@ -661,7 +712,7 @@ async function fallbackExtractStoryboardViaLlm(
 Правила:
 1. Отдели описание видеоряда ("Видеоряд", что происходит в кадре) от прямой речи ("Текст"). Видеоряд НИКОГДА не должен попадать в spokenTextRu.
 2. Музыкальные вставки и пролеты камеры "Без слов" помести в массив noSpeechIntervals.
-3. В spokenTextRu оставь ТОЛЬКО прямую русскую речь говорящего. Если внутри речи указан смех "(хе-хе)" или "(смеется)", замени на тег <laugh>; если вздох — на <sigh>; если пауза — на <short pause>.
+3. В spokenTextRu оставь ТОЛЬКО прямую речь говорящего на языке оригинала. Если внутри речи указан смех "(хе-хе)" или "(смеется)", замени на тег <laugh>; если вздох — на <sigh>; если пауза — на <short pause>.
 
 Текст раскадровки:
 """
@@ -751,149 +802,183 @@ ${rawText.slice(0, 30000)}
 }
 
 /**
- * Translates parsed Russian turns 1:1 into natural conversational Uzbek using gemini-4-hydrogen (ThinkingLevel.LOW, temp 0.2)
- * and runs the Post-Translation Validator (checking 1:1 count, sentence count, documented tags, and syllable budget).
+ * Core 1:1 translator (`gemini-4-hydrogen`, temperature 0.1, ThinkingLevel.LOW)
+ * Directly translates `cleanedRuForTranslation` (in ANY source language: Russian, English, etc.)
+ * into natural conversational Uzbek 1:1.
+ * Verifies in code that the number of segments and their `id`s match the original;
+ * if any are missing, automatically repeats translation for the missing segments.
  */
-export async function parseAndTranslateVerbatimStoryboard(
+export async function translateTurns1To1WithVerification(
   ai: GoogleGenAI,
-  rawStoryboardText: string
+  speakers: ParsedSpeakerProfile[],
+  rawTurns: Omit<
+    VerbatimTurn,
+    "text" | "actualSyllables" | "validationPassed" | "validationNotes"
+  >[],
+  noSpeechIntervals: NoSpeechInterval[],
+  generatedStoryboardText?: string
 ): Promise<VerbatimParseResult> {
-  // Step 1: Deterministic parse first
-  let parsed = parseStoryboardDeterministic(rawStoryboardText);
-
-  // Step 2: If deterministic parser found 0 turns, run LLM fallback extractor
-  if (parsed.turns.length === 0 && rawStoryboardText.trim().length > 10) {
-    parsed = {
-      ...(await fallbackExtractStoryboardViaLlm(ai, rawStoryboardText)),
-      unparsedBlocks: [],
-    };
+  if (rawTurns.length === 0) {
+    throw new Error("В видео или тексте не обнаружено речевых реплик для озвучки.");
   }
 
-  if (parsed.turns.length === 0) {
-    throw new Error(
-      "В отправленном тексте не найдено реплик для озвучки. Убедитесь, что в раскадровке есть строки «Текст: ...» или таймкоды «00:00 – 00:05»."
-    );
-  }
-
-  // Step 3: Batch 1:1 Verbatim Translation via gemini-4-hydrogen (ThinkingLevel.LOW, temp 0.2)
-  const translationInput = parsed.turns.map((t) => ({
+  const buildInputItem = (
+    t: Omit<VerbatimTurn, "text" | "actualSyllables" | "validationPassed" | "validationNotes">
+  ) => ({
     id: t.id,
     timeWindowSec: t.durationSec,
     maxSyllables: t.maxSyllables,
     speakerGender: t.speakerGender,
-    intonationRu: t.intonationRu || "",
-    russianSpokenText: t.cleanedRuForTranslation,
-  }));
-
-  const translationSystemPrompt = `Ты — профессиональный режиссёр узбекского дубляжа (Лип-синк и точный хронометраж 1:1).
-Твоя задача — перевести массив русских реплик на естественный разговорный узбекский язык (латиница) СТРОГО 1-в-1 для закадрового дубляжа видео.
-
-ЖЕСТКИЕ ПРАВИЛА (НАРУШЕНИЕ ЗАПРЕЩЕНО):
-1. СТРОГО 1-В-1 БЕЗ ОТСЕБЯТИНЫ: Сколько реплик на входе — ровно столько же на выходе с теми же id. Запрещено добавлять от себя даже одно лишнее слово, приветствие, связку или предложение.
-2. НИКАКИХ РУСИЗМОВ И ДУБЛИРОВАНИЯ:
-   - Например, «Давай!» (1 сек) переводится строго одним словом: «Ketdik!» или «Qani!» (ЗАПРЕЩЕНО писать «Davay! Ketdik!»).
-   - «Ого-о! Вот это вдавило!» (2 сек) переводится коротко под 2 секунды: «O'ho'-o'! Zo'r tortdi-yu!» (7 слогов).
-   - «Нет <laugh>» (1 сек) -> «Yo'q <laugh>».
-   - «Угу. Не веришь?» -> «Aha. Ishonmayapsanmi?».
-3. СОХРАНЕНИЕ ДОКУМЕНТИРОВАННЫХ ТЕГОВ TTS:
-   - Если в russianSpokenText есть теги <laugh>, <sigh>, <short pause>, <breath>, <cough>, сохрани ТОЧНО ЭТИ ЖЕ ТЕГИ в нужном месте узбекской фразы.
-   - НИКОГДА не используй несуществующие теги вроде <chuckle> и НИКОГДА не пиши слова в скобках вроде (kulib) или (смеется).
-4. УКЛАДКА В СЕКУНДЫ И СЛОГИ (Lip-Sync Budget):
-   - Каждая узбекская реплика должна укладываться в лимит maxSyllables (примерно 4.5–4.8 слога в секунду), чтобы диктор произнёс её спокойно и естественно за timeWindowSec секунд без скороговорки.`;
-
-  const candidateModels = ["gemini-4-hydrogen", "gemini-3.8-flash"];
-  let translatedItems: Array<{ id: string; uzbekText: string }> = [];
-
-  for (const modelName of candidateModels) {
-    try {
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: `${translationSystemPrompt}\n\nВходной массив реплик для перевода 1:1:\n${JSON.stringify(
-          translationInput,
-          null,
-          2
-        )}`,
-        config: {
-          temperature: 0.2,
-          ...(modelName.includes("hydrogen")
-            ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
-            : {}),
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              translations: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    id: { type: Type.STRING },
-                    uzbekText: { type: Type.STRING },
-                  },
-                  required: ["id", "uzbekText"],
-                },
-              },
-            },
-            required: ["translations"],
-          },
-        },
-      });
-      const data = JSON.parse(response.text || "{}");
-      if (Array.isArray(data?.translations) && data.translations.length > 0) {
-        translatedItems = data.translations;
-        break;
-      }
-    } catch (err: any) {
-      console.warn(`[Verbatim Translator] ${modelName} fallback notice:`, err?.message);
-    }
-  }
-
-  const translationMap = new Map<string, string>();
-  translatedItems.forEach((item, idx) => {
-    if (item?.id && item?.uzbekText) {
-      translationMap.set(item.id, item.uzbekText);
-    } else if (parsed.turns[idx] && item?.uzbekText) {
-      translationMap.set(parsed.turns[idx].id, item.uzbekText);
-    }
+    emotion: t.intonationRu || t.emotion || "",
+    text_original: t.cleanedRuForTranslation,
   });
 
-  // Step 4: Post-Translation Automated Validator (checks syllable budget, sentence count, and tag whitelist)
+  const translationInput = rawTurns.map(buildInputItem);
+
+  const translationSystemPrompt = `Ты — профессиональный режиссёр узбекского дубляжа (Лип-синк и точный хронометраж 1:1).
+Твоя задача — перевести массив реплик (text_original на языке оригинала: русский, английский или другой) напрямую на естественный разговорный узбекский язык (латиница) СТРОГО 1-в-1 для закадрового дубляжа видео, без промежуточного перевода.
+
+ЖЕСТКИЕ ПРАВИЛА (НАРУШЕНИЕ ЗАПРЕЩЕНО):
+1. СТРОГО 1-В-1 БЕЗ ОТСЕБЯТИНЫ: Сколько реплик на входе — ровно столько же на выходе с теми же самыми id. Запрещено пропускать реплики, объединять их или добавлять от себя лишние слова, приветствия или предложения.
+2. НИКАКИХ РУСИЗМОВ И ДУБЛИРОВАНИЯ:
+   - Например, «Давай!» (1 сек) переводится строго одним словом: «Ketdik!» или «Qani!» (ЗАПРЕЩЕНО писать «Davay! Ketdik!»).
+   - «Ого-о! Вот это вдавило!» (2 сек) переводится коротко под 2 секунды: «O'ho'-o'! Zo'r tortdi-yu!».
+   - «Нет» (1 сек) -> «Yo'q».
+   - «Угу. Не веришь?» -> «Aha. Ishonmayapsanmi?».
+3. БЕЗ РЕМАРОК В ТЕКСТЕ:
+   - НИКОГДА не пиши слова в скобках вроде (kulib), (смеется), (вздыхает) внутри uzbekText.
+   - Если в text_original уже есть документированные теги <laugh>, <sigh>, <short pause>, <breath>, <cough>, сохрани их.
+4. УКЛАДКА В СЕКУНДЫ И СЛОГИ (Lip-Sync Budget):
+   - Каждая узбекская реплика должна укладываться в лимит maxSyllables (~4.8 слога в секунду), чтобы диктор произнёс её естественно за timeWindowSec секунд.`;
+
+  const candidateModels = ["gemini-4-hydrogen", "gemini-3.8-flash"];
+
+  const requestTranslationBatch = async (
+    itemsToTranslate: ReturnType<typeof buildInputItem>[]
+  ): Promise<Array<{ id: string; uzbekText: string }>> => {
+    for (const modelName of candidateModels) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: `${translationSystemPrompt}\n\nВходной массив реплик для перевода 1:1 (${itemsToTranslate.length} шт.):\n${JSON.stringify(
+            itemsToTranslate,
+            null,
+            2
+          )}`,
+          config: {
+            temperature: 0.1,
+            ...(modelName.includes("hydrogen")
+              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+              : {}),
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                translations: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      id: { type: Type.STRING },
+                      uzbekText: { type: Type.STRING },
+                    },
+                    required: ["id", "uzbekText"],
+                  },
+                },
+              },
+              required: ["translations"],
+            },
+          },
+        });
+        const data = JSON.parse(response.text || "{}");
+        if (Array.isArray(data?.translations) && data.translations.length > 0) {
+          return data.translations;
+        }
+      } catch (err: any) {
+        console.warn(`[Verbatim Translator] ${modelName} fallback notice:`, err?.message);
+      }
+    }
+    return [];
+  };
+
+  // Initial translation pass (chunked by 35 turns if very long to ensure zero truncation)
+  const CHUNK_SIZE = 35;
+  const translationMap = new Map<string, string>();
+
+  for (let i = 0; i < translationInput.length; i += CHUNK_SIZE) {
+    const chunk = translationInput.slice(i, i + CHUNK_SIZE);
+    const chunkResult = await requestTranslationBatch(chunk);
+    chunkResult.forEach((item, idx) => {
+      if (item?.id && item?.uzbekText?.trim()) {
+        translationMap.set(String(item.id).trim(), item.uzbekText.trim());
+      } else if (chunk[idx] && item?.uzbekText?.trim()) {
+        translationMap.set(chunk[idx].id, item.uzbekText.trim());
+      }
+    });
+  }
+
+  // Verification in code (Point 6): check that segment count and every segment `id` match the original;
+  // otherwise repeat translation for missing segments!
+  for (let retryPass = 0; retryPass < 2; retryPass++) {
+    const missingTurns = rawTurns.filter(
+      (t) => !translationMap.has(t.id) || !translationMap.get(t.id)?.trim()
+    );
+    if (missingTurns.length === 0 && translationMap.size === rawTurns.length) {
+      break;
+    }
+    if (missingTurns.length === 0) break;
+
+    console.log(
+      `[Verbatim Translator] Retry pass ${retryPass + 1}: translating ${missingTurns.length} missing segment(s) by id...`
+    );
+    const retryItems = missingTurns.map(buildInputItem);
+    const retryTranslated = await requestTranslationBatch(retryItems);
+    retryTranslated.forEach((item, idx) => {
+      if (item?.id && item?.uzbekText?.trim()) {
+        translationMap.set(String(item.id).trim(), item.uzbekText.trim());
+      } else if (missingTurns[idx] && item?.uzbekText?.trim()) {
+        translationMap.set(missingTurns[idx].id, item.uzbekText.trim());
+      }
+    });
+  }
+
+  // Post-Translation Automated Validator (checks syllable budget, sentence count, and tag whitelist)
   const turnsNeedingShortening: Array<{
     id: string;
-    russianText: string;
+    originalText: string;
     draftUzbek: string;
     targetMaxSyllables: number;
     timeWindowSec: number;
   }> = [];
 
-  const validatedTurns: VerbatimTurn[] = parsed.turns.map((turn) => {
+  const validatedTurns: VerbatimTurn[] = rawTurns.map((turn) => {
     const rawTranslated =
       translationMap.get(turn.id) || turn.cleanedRuForTranslation;
     let sanitizedUz = sanitizeDocumentedTtsTags(rawTranslated);
 
-    // Ensure inline tags from original (<laugh>, <sigh>, <short pause>, <breath>, <cough>) were not lost
+    // Ensure inline tags from original (<laugh>, <sigh>, <short pause>, <breath>, <cough>) are preserved
     for (const tag of turn.inlineTags) {
       if (!sanitizedUz.toLowerCase().includes(tag.toLowerCase())) {
-        if (tag === "<laugh>") {
-          sanitizedUz = `${sanitizedUz} <laugh>`.trim();
+        if (tag === "<laugh>" || tag === "<sigh>" || tag === "<breath>" || tag === "<cough>") {
+          sanitizedUz = `${sanitizedUz} ${tag}`.trim();
         }
       }
     }
 
     const actualSyllables = countSyllables(sanitizedUz);
-    const ruSentences = countSentences(turn.cleanedRuForTranslation);
+    const origSentences = countSentences(turn.cleanedRuForTranslation);
     const uzSentences = countSentences(sanitizedUz);
 
     const isTooLong =
       turn.durationSec <= 3
         ? actualSyllables > turn.maxSyllables + 3
         : actualSyllables > Math.ceil(turn.maxSyllables * 1.2);
-    const hasExtraSentences = uzSentences > ruSentences + 1;
+    const hasExtraSentences = uzSentences > origSentences + 1;
 
     if (isTooLong || hasExtraSentences) {
       turnsNeedingShortening.push({
         id: turn.id,
-        russianText: turn.cleanedRuForTranslation,
+        originalText: turn.cleanedRuForTranslation,
         draftUzbek: sanitizedUz,
         targetMaxSyllables: turn.maxSyllables,
         timeWindowSec: turn.durationSec,
@@ -911,7 +996,7 @@ export async function parseAndTranslateVerbatimStoryboard(
     };
   });
 
-  // Step 5: Automatic Re-Translation for any turns that failed syllable or sentence validation
+  // Automatic Re-Translation for any turns that exceeded syllable budget
   if (turnsNeedingShortening.length > 0) {
     for (const modelName of candidateModels) {
       try {
@@ -975,25 +1060,393 @@ export async function parseAndTranslateVerbatimStoryboard(
   const maxTurnEnd = Math.max(
     0,
     ...validatedTurns.map((t) => t.endSec),
-    ...parsed.noSpeechIntervals.map((n) => n.endSec)
+    ...noSpeechIntervals.map((n) => n.endSec)
   );
 
-  // Cost estimator: gemini-4-hydrogen ($1.50/1M in, $7.50/1M out) + gemini-3.8-flash-tts (~$0.01 per turn)
   const translationUsd = Math.max(0.01, Math.round(validatedTurns.length * 0.0015 * 100) / 100);
   const ttsUsd = Math.max(0.02, Math.round(validatedTurns.length * 0.01 * 100) / 100);
 
   return {
     title: validatedTurns[0]?.sceneTitle || "Точный дубляж 1:1 по раскадровке",
-    speakers: parsed.speakers,
+    speakers,
     turns: validatedTurns,
-    noSpeechIntervals: parsed.noSpeechIntervals,
+    noSpeechIntervals,
     totalDurationSec: maxTurnEnd,
+    generatedStoryboardText,
     estimatedCostUsd: {
       translationUsd,
       ttsUsd,
       totalUsd: Math.round((translationUsd + ttsUsd) * 100) / 100,
     },
   };
+}
+
+/**
+ * Extracts structured JSON storyboard directly from an ACTIVE Gemini Files API video using `gemini-3.8-flash`
+ * and `responseSchema` (Point 5):
+ * {
+ *   speakers: [{ id, gender: "male"|"female", description }],
+ *   segments: [{
+ *     start: "MM:SS.s", end: "MM:SS.s",
+ *     type: "speech" | "no_speech",
+ *     speakerId, emotion, text_original, non_speech_events: ["laugh","sigh",...]
+ *   }]
+ * }
+ */
+export async function extractVideoJsonStoryboardViaGemini(
+  ai: GoogleGenAI,
+  fileUri: string,
+  mimeType: string
+): Promise<VideoJsonStoryboard> {
+  const prompt = `Проанализируй это видео от начала и до конца и создай точную посекундную раскадровку в формате JSON для профессионального дубляжа 1:1.
+
+СТРОГИЕ ПРАВИЛА:
+1. speakers: перечисли всех говорящих в видео:
+   - id: "HOST_1", "HOST_2" (и далее, если спикеров больше)
+   - gender: строго "female" (женский голос) или "male" (мужской голос)
+   - description: краткое описание роли, внешности и характера голоса на русском языке (например: "Девушка на пассажирском сиденье, живой эмоциональный голос" или "Мужчина-водитель, спокойный уверенный голос").
+2. segments: разбей видео хронологически по таймкодам start и end в формате "MM:SS.s" (например "00:00.0", "00:02.5", "01:14.2").
+3. type:
+   - "speech" — когда звучит речь спикера. Каждую отдельную реплику или смену спикера выделяй в отдельный сегмент.
+   - "no_speech" — когда речи нет (играет только музыка, проезд камеры, графика или пауза более 2 секунд).
+4. text_original:
+   - Записывай ДОСЛОВНО на языке оригинала видео (русский, английский или другой).
+   - НЕ переводи text_original на этом шаге!
+   - НИЧЕГО не добавляй от себя, не додумывай и не пересказывай. Сколько фраз реально произнесено в видео — ровно столько и должно быть.
+   - Для сегментов type="no_speech" оставляй text_original пустой строкой "".
+5. non_speech_events:
+   - Если говорящий смеётся, усмехается, вздыхает, делает заметный вдох или покашливает, выноси это СТРОГО в массив non_speech_events (допустимые значения: "laugh", "sigh", "short pause", "breath", "cough"), А НЕ ВНУТРЬ text_original! Внутри text_original не должно быть слов в скобках вроде "(смеется)" или "(вздыхает)".
+6. emotion:
+   - Укажи точную интонацию и эмоцию реплики на русском языке (например: "С интересом, вопросительно", "Спокойно, уверенно", "Восторженно, с удивлением", "С легкой улыбкой"). Для "no_speech" укажи краткое описание музыки/кадра (например: "Динамичная музыка, кадры автомобиля").`;
+
+  const response = await ai.models.generateContent({
+    model: "gemini-3.8-flash",
+    contents: [
+      {
+        role: "user",
+        parts: [
+          {
+            fileData: {
+              fileUri,
+              mimeType: mimeType || "video/mp4",
+            },
+          },
+          {
+            text: prompt,
+          },
+        ],
+      },
+    ],
+    config: {
+      temperature: 0.1,
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          speakers: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                id: { type: Type.STRING },
+                gender: { type: Type.STRING, enum: ["male", "female"] },
+                description: { type: Type.STRING },
+              },
+              required: ["id", "gender", "description"],
+            },
+          },
+          segments: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                start: { type: Type.STRING },
+                end: { type: Type.STRING },
+                type: { type: Type.STRING, enum: ["speech", "no_speech"] },
+                speakerId: { type: Type.STRING },
+                emotion: { type: Type.STRING },
+                text_original: { type: Type.STRING },
+                non_speech_events: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+              },
+              required: [
+                "start",
+                "end",
+                "type",
+                "speakerId",
+                "emotion",
+                "text_original",
+                "non_speech_events",
+              ],
+            },
+          },
+        },
+        required: ["speakers", "segments"],
+      },
+    },
+  });
+
+  const parsed: VideoJsonStoryboard = JSON.parse(response.text || "{}");
+  if (!parsed || !Array.isArray(parsed.segments) || parsed.segments.length === 0) {
+    throw new Error("Модель не вернула сегменты раскадровки из видео.");
+  }
+  return {
+    speakers: Array.isArray(parsed.speakers) ? parsed.speakers : [],
+    segments: parsed.segments,
+  };
+}
+
+/**
+ * Converts structured `VideoJsonStoryboard` from `gemini-3.8-flash` into `ParsedSpeakerProfile[]`,
+ * `turns`, and `noSpeechIntervals`, then translates 1:1 into Uzbek via `gemini-4-hydrogen`
+ * (temperature 0.1, ThinkingLevel.LOW) with segment count & id verification.
+ */
+export async function convertAndTranslateVideoJsonStoryboard(
+  ai: GoogleGenAI,
+  jsonStoryboard: VideoJsonStoryboard
+): Promise<VerbatimParseResult & { rawJsonStoryboard: VideoJsonStoryboard }> {
+  const femaleVoices = [
+    { voiceId: "Kore", baseVoice: "Kore" },
+    { voiceId: "Aoede", baseVoice: "Aoede" },
+    { voiceId: "Zephyr", baseVoice: "Zephyr" },
+  ];
+  const maleVoices = [
+    { voiceId: "voice_17raj9ewke3g", baseVoice: "Charon" },
+    { voiceId: "Fenrir", baseVoice: "Fenrir" },
+    { voiceId: "Puck", baseVoice: "Puck" },
+  ];
+
+  const speakerMap = new Map<string, ParsedSpeakerProfile>();
+  const rawSpeakers =
+    jsonStoryboard.speakers.length > 0
+      ? jsonStoryboard.speakers
+      : [{ id: "HOST_1", gender: "male" as const, description: "Спикер 1" }];
+
+  let femCount = 0;
+  let maleCount = 0;
+
+  rawSpeakers.forEach((sp, idx) => {
+    const normalizedId = `HOST_${idx + 1}`;
+    const gender: "female" | "male" = sp.gender === "female" ? "female" : "male";
+    const chosenVoice =
+      gender === "female"
+        ? femaleVoices[femCount++ % femaleVoices.length]
+        : maleVoices[maleCount++ % maleVoices.length];
+
+    const roleName =
+      gender === "female"
+        ? `Девушка (Ж)`
+        : `Мужчина (М)`;
+
+    const profile: ParsedSpeakerProfile = {
+      id: normalizedId,
+      rawLabel: roleName,
+      name: roleName,
+      gender,
+      description: (sp.description || "").trim(),
+      defaultVoiceStyle:
+        gender === "female"
+          ? `Natural expressive female Uzbek speaker. ${sp.description || ""}`
+          : `Natural confident male Uzbek speaker. ${sp.description || ""}`,
+      recommendedVoiceId: chosenVoice.voiceId,
+      recommendedBaseVoice: chosenVoice.baseVoice,
+    };
+
+    speakerMap.set(sp.id, profile);
+    speakerMap.set(normalizedId, profile);
+  });
+
+  const resolveSpeaker = (rawSpeakerId: string): ParsedSpeakerProfile => {
+    if (speakerMap.has(rawSpeakerId)) return speakerMap.get(rawSpeakerId)!;
+    const upper = String(rawSpeakerId || "").toUpperCase();
+    if (speakerMap.has(upper)) return speakerMap.get(upper)!;
+    // Match by number e.g. "S1" / "1" / "SPEAKER_1" -> "HOST_1"
+    const numMatch = upper.match(/(\d+)/);
+    if (numMatch) {
+      const candidate = `HOST_${numMatch[1]}`;
+      if (speakerMap.has(candidate)) return speakerMap.get(candidate)!;
+    }
+    return Array.from(speakerMap.values())[0];
+  };
+
+  const uniqueSpeakers = Array.from(
+    new Map(Array.from(speakerMap.values()).map((s) => [s.id, s])).values()
+  );
+
+  const rawTurns: Omit<
+    VerbatimTurn,
+    "text" | "actualSyllables" | "validationPassed" | "validationNotes"
+  >[] = [];
+  const noSpeechIntervals: NoSpeechInterval[] = [];
+  const humanStoryboardLines: string[] = [];
+
+  uniqueSpeakers.forEach((sp, i) => {
+    humanStoryboardLines.push(
+      `Спикер ${i + 1} (${sp.gender === "female" ? "Ж" : "М"}) — ${sp.name}: ${
+        sp.description || "Голос дубляжа"
+      }`
+    );
+  });
+  humanStoryboardLines.push("");
+
+  for (const seg of jsonStoryboard.segments) {
+    const startSec = parseTimecodeToSec(seg.start);
+    const parsedEnd = parseTimecodeToSec(seg.end);
+    const endSec = parsedEnd > startSec ? parsedEnd : Math.round((startSec + 2) * 10) / 10;
+    const durationSec = Math.max(0.8, Math.round((endSec - startSec) * 10) / 10);
+    const timecodeStr = `${seg.start || formatSecToTimecode(startSec)} – ${
+      seg.end || formatSecToTimecode(endSec)
+    }`;
+
+    const rawTextOriginal = String(seg.text_original || "").trim();
+    const isNoSpeech = seg.type === "no_speech" || !rawTextOriginal;
+
+    if (isNoSpeech) {
+      noSpeechIntervals.push({
+        id: `nospeech-${noSpeechIntervals.length + 1}`,
+        timecode: timecodeStr,
+        startSec,
+        endSec,
+        durationSec,
+        label: "Без слов",
+        visualDescription: seg.emotion || "Музыка / Видеоряд без речи",
+      });
+      humanStoryboardLines.push(`${timecodeStr} | Музыка и кадр (Без слов):`);
+      if (seg.emotion) humanStoryboardLines.push(`Видеоряд: ${seg.emotion}`);
+      humanStoryboardLines.push("");
+      continue;
+    }
+
+    const spProfile = resolveSpeaker(seg.speakerId);
+    const extracted = extractAndConvertInlineRemarks(rawTextOriginal);
+    // Strip any inline <laugh>/<sigh> from text_original display so text_original is pure spoken words
+    const pureOriginalText = extracted.cleanedText
+      .replace(/<(?:laugh|sigh|short pause|breath|cough)>/gi, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (!pureOriginalText) continue;
+
+    // Combine non_speech_events from schema + any extracted from parentheticals
+    const normalizedEvents = Array.from(
+      new Set([
+        ...(Array.isArray(seg.non_speech_events) ? seg.non_speech_events : [])
+          .map((ev) => String(ev || "").trim().toLowerCase())
+          .filter(Boolean),
+        ...extracted.nonSpeechEvents,
+      ])
+    );
+
+    const eventToTagMap: Record<string, string> = {
+      laugh: "<laugh>",
+      chuckle: "<laugh>",
+      giggle: "<laugh>",
+      sigh: "<sigh>",
+      "short pause": "<short pause>",
+      pause: "<short pause>",
+      breath: "<breath>",
+      gasp: "<breath>",
+      cough: "<cough>",
+    };
+
+    const inlineTags = Array.from(
+      new Set(
+        normalizedEvents
+          .map((ev) => eventToTagMap[ev])
+          .filter((t): t is string => Boolean(t))
+      )
+    );
+
+    const { emotion, speechStyle, pace } = mapRussianIntonationToStyle(
+      seg.emotion || "",
+      "",
+      [...extracted.extraStyleHints, ...normalizedEvents],
+      spProfile
+    );
+
+    const maxSyllables = Math.max(4, Math.ceil(durationSec * 4.8));
+
+    const turnId = `turn-${rawTurns.length + 1}`;
+    rawTurns.push({
+      id: turnId,
+      index: rawTurns.length,
+      timecode: timecodeStr,
+      startSec,
+      endSec,
+      durationSec,
+      speakerId: spProfile.id,
+      speakerName: spProfile.name,
+      speakerGender: spProfile.gender,
+      intonationRu: seg.emotion || undefined,
+      originalTextRu: pureOriginalText,
+      cleanedRuForTranslation: pureOriginalText,
+      emotion,
+      speechStyle,
+      pace,
+      inlineTags,
+      nonSpeechEvents: normalizedEvents,
+      maxSyllables,
+    });
+
+    humanStoryboardLines.push(`${timecodeStr} | ${spProfile.name}:`);
+    if (seg.emotion) humanStoryboardLines.push(`Интонация: ${seg.emotion}`);
+    if (normalizedEvents.length > 0) {
+      humanStoryboardLines.push(`Неречевые реакции: ${normalizedEvents.join(", ")}`);
+    }
+    humanStoryboardLines.push(`Текст: «${pureOriginalText}»`);
+    humanStoryboardLines.push("");
+  }
+
+  if (rawTurns.length === 0) {
+    throw new Error("В видео не обнаружено речевых реплик (получено 0 сегментов речи).");
+  }
+
+  const translatedResult = await translateTurns1To1WithVerification(
+    ai,
+    uniqueSpeakers,
+    rawTurns,
+    noSpeechIntervals,
+    humanStoryboardLines.join("\n").trim()
+  );
+
+  return {
+    ...translatedResult,
+    rawJsonStoryboard: jsonStoryboard,
+  };
+}
+
+/**
+ * Translates parsed storyboard turns 1:1 into natural conversational Uzbek using gemini-4-hydrogen (ThinkingLevel.LOW, temp 0.1)
+ * and runs the Post-Translation Validator (checking 1:1 count & ids, sentence count, documented tags, and syllable budget).
+ */
+export async function parseAndTranslateVerbatimStoryboard(
+  ai: GoogleGenAI,
+  rawStoryboardText: string
+): Promise<VerbatimParseResult> {
+  let parsed = parseStoryboardDeterministic(rawStoryboardText);
+
+  if (parsed.turns.length === 0 && rawStoryboardText.trim().length > 10) {
+    parsed = {
+      ...(await fallbackExtractStoryboardViaLlm(ai, rawStoryboardText)),
+      unparsedBlocks: [],
+    };
+  }
+
+  if (parsed.turns.length === 0) {
+    throw new Error(
+      "В отправленном тексте не найдено реплик для озвучки. Убедитесь, что в раскадровке есть строки «Текст: ...» или таймкоды «00:00 – 00:05»."
+    );
+  }
+
+  return translateTurns1To1WithVerification(
+    ai,
+    parsed.speakers,
+    parsed.turns,
+    parsed.noSpeechIntervals,
+    rawStoryboardText
+  );
 }
 
 /**

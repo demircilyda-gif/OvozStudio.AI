@@ -21,6 +21,9 @@ import { localStore } from "./server/localStore.ts";
 import { isEmailAdmin, getAdminEmails } from "./server/authUtils.ts";
 import {
   parseAndTranslateVerbatimStoryboard,
+  extractVideoJsonStoryboardViaGemini,
+  convertAndTranslateVideoJsonStoryboard,
+  probeVideoDurationSec,
   applyMildAtempoPcm,
   assembleStrictTimecodeMasterPcm,
   generateSrtFromTurns,
@@ -6213,7 +6216,7 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
   }
 });
 
-// 3. Streaming Multipart Video Upload (up to 600 MB / 15 minutes) to /tmp + Optional Gemini Files API Storyboard Extraction
+// 3. Background Video Upload (up to 30 MB on client) to /tmp + Asynchronous Gemini Files API Storyboard & 1:1 Translation Job
 const dubbingVideoStorage = multer.diskStorage({
   destination: (_req, _file, cb) => {
     cb(null, "/tmp");
@@ -6228,7 +6231,7 @@ const dubbingVideoStorage = multer.diskStorage({
 const uploadDubbingVideoMiddleware = multer({
   storage: dubbingVideoStorage,
   limits: {
-    fileSize: 600 * 1024 * 1024, // 600 MB max for 15-minute HD videos
+    fileSize: 32 * 1024 * 1024, // 30 MB client limit (32 MB server ceiling)
   },
 });
 
@@ -6237,16 +6240,264 @@ const uploadedVideoSessions = new Map<
   { filePath: string; originalName: string; mimeType: string; createdAt: number }
 >();
 
+export type DubbingJobStage =
+  | "uploading_to_gemini"
+  | "gemini_processing"
+  | "storyboard"
+  | "translating"
+  | "done"
+  | "failed";
+
+interface DubbingVideoJobState {
+  jobId: string;
+  fileId: string;
+  uid?: string;
+  stage: DubbingJobStage;
+  progress: number;
+  error: string | null;
+  result: any | null;
+  createdAt: number;
+  startedAt: number;
+  completedAt?: number;
+}
+
+const dubbingVideoJobs = new Map<string, DubbingVideoJobState>();
+const generatedDubbedVideos = new Map<string, { filePath: string; createdAt: number }>();
+
+// Cleanup local /tmp video files after 24 hours (Point 10)
+const DUB_VIDEO_TTL_MS = 24 * 60 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [sessionId, session] of uploadedVideoSessions.entries()) {
+    if (now - session.createdAt >= DUB_VIDEO_TTL_MS) {
+      fs.promises.unlink(session.filePath).catch(() => {});
+      uploadedVideoSessions.delete(sessionId);
+    }
+  }
+  for (const [dlId, entry] of generatedDubbedVideos.entries()) {
+    if (now - entry.createdAt >= DUB_VIDEO_TTL_MS) {
+      fs.promises.unlink(entry.filePath).catch(() => {});
+      generatedDubbedVideos.delete(dlId);
+    }
+  }
+  for (const [jId, job] of dubbingVideoJobs.entries()) {
+    if (now - job.createdAt >= DUB_VIDEO_TTL_MS) {
+      dubbingVideoJobs.delete(jId);
+    }
+  }
+}, 30 * 60 * 1000).unref?.();
+
+async function runDubbingVideoBackgroundJob(params: {
+  jobId: string;
+  fileId: string;
+  filePath: string;
+  mimeType: string;
+  fileName: string;
+  sizeBytes: number;
+  videoDurationSec: number;
+  creditCost: number;
+  deductCreditsFn?: (actualCost?: number) => Promise<number>;
+  initialUserBalance?: number;
+}) {
+  const {
+    jobId,
+    fileId,
+    filePath,
+    mimeType,
+    fileName,
+    sizeBytes,
+    videoDurationSec,
+    creditCost,
+    deductCreditsFn,
+    initialUserBalance,
+  } = params;
+
+  const job = dubbingVideoJobs.get(jobId);
+  if (!job) return;
+
+  let uploadedGeminiFile: any = null;
+  const startedAt = Date.now();
+
+  try {
+    // Stage 1: uploading_to_gemini
+    job.stage = "uploading_to_gemini";
+    job.progress = 10;
+
+    uploadedGeminiFile = await ai.files.upload({
+      file: filePath,
+      config: {
+        mimeType: mimeType || "video/mp4",
+      },
+    });
+
+    if (!uploadedGeminiFile || !uploadedGeminiFile.name) {
+      throw new Error("Не удалось загрузить видео в Gemini Files API.");
+    }
+
+    // Stage 2: gemini_processing (wait up to 10 minutes, poll every 3 seconds until state === ACTIVE)
+    job.stage = "gemini_processing";
+    job.progress = 22;
+
+    const maxWaitMs = 10 * 60 * 1000; // 10 minutes
+    const pollIntervalMs = 3000; // 3 seconds
+    const waitStart = Date.now();
+    let currentFile = uploadedGeminiFile;
+
+    while (true) {
+      const state = String(currentFile?.state || "").toUpperCase();
+      if (state === "ACTIVE") {
+        break;
+      }
+      if (state === "FAILED") {
+        throw new Error("Gemini Files API вернул статус FAILED при обработке видео.");
+      }
+      const elapsedWait = Date.now() - waitStart;
+      if (elapsedWait >= maxWaitMs) {
+        throw new Error(
+          "Превышено время ожидания обработки видео в Gemini Files API (более 10 минут)."
+        );
+      }
+      // Smooth progress from 22% to 48% while waiting for ACTIVE
+      job.progress = Math.min(48, 22 + Math.floor((elapsedWait / 60000) * 15));
+      await new Promise((r) => setTimeout(r, pollIntervalMs));
+      currentFile = await ai.files.get({ name: currentFile.name });
+    }
+
+    if (String(currentFile?.state || "").toUpperCase() !== "ACTIVE") {
+      throw new Error("Файл в Gemini Files API не перешёл в состояние ACTIVE.");
+    }
+
+    // Stage 3: storyboard (gemini-3.8-flash direct JSON via responseSchema)
+    job.stage = "storyboard";
+    job.progress = 58;
+
+    const jsonStoryboard = await extractVideoJsonStoryboardViaGemini(
+      ai,
+      currentFile.uri,
+      currentFile.mimeType || mimeType || "video/mp4"
+    );
+
+    const speechSegmentsCount = (jsonStoryboard.segments || []).filter(
+      (s) => s.type === "speech" && String(s.text_original || "").trim().length > 0
+    ).length;
+
+    if (speechSegmentsCount === 0) {
+      throw new Error("В видео не обнаружено ни одной речевой реплики.");
+    }
+
+    // Stage 4: translating (gemini-4-hydrogen, temp 0.1, thinking LOW, direct 1:1 + segment count/id verification)
+    job.stage = "translating";
+    job.progress = 78;
+
+    const translatedStoryboard = await convertAndTranslateVideoJsonStoryboard(
+      ai,
+      jsonStoryboard
+    );
+
+    if (!translatedStoryboard.turns || translatedStoryboard.turns.length === 0) {
+      throw new Error("После перевода не получено ни одной реплики.");
+    }
+
+    // Deduct credits ONLY when stage === "done" (Point 9)
+    let creditsRemaining = initialUserBalance;
+    let creditsDeducted = 0;
+    if (typeof deductCreditsFn === "function") {
+      creditsRemaining = await deductCreditsFn(creditCost);
+      creditsDeducted = creditCost;
+    }
+
+    const elapsedMs = Date.now() - startedAt;
+    const numericCost =
+      typeof translatedStoryboard.estimatedCostUsd === "number"
+        ? translatedStoryboard.estimatedCostUsd
+        : Number(translatedStoryboard.estimatedCostUsd?.totalUsd ?? 0.05);
+
+    const finalStoryboardResult = {
+      ...translatedStoryboard,
+      totalVideoDurationSec: Math.max(
+        videoDurationSec,
+        translatedStoryboard.totalDurationSec || 0
+      ),
+      estimatedCostUsd: numericCost,
+      estimatedCostBreakdown: translatedStoryboard.estimatedCostUsd,
+    };
+
+    job.stage = "done";
+    job.progress = 100;
+    job.completedAt = Date.now();
+    job.result = {
+      fileId,
+      videoSessionId: fileId,
+      fileName,
+      sizeBytes,
+      videoDurationSec,
+      elapsedMs,
+      elapsedSeconds: Math.round((elapsedMs / 1000) * 10) / 10,
+      creditsDeducted,
+      creditsRemaining,
+      speakersCount: translatedStoryboard.speakers.length,
+      turnsCount: translatedStoryboard.turns.length,
+      rawJsonStoryboard: translatedStoryboard.rawJsonStoryboard,
+      generatedStoryboardText: translatedStoryboard.generatedStoryboardText || "",
+      parsedStoryboard: finalStoryboardResult,
+      storyboardResult: finalStoryboardResult,
+    };
+    console.log(
+      `[dubbing-job ${jobId}] DONE in ${(elapsedMs / 1000).toFixed(1)}s | turns=${
+        translatedStoryboard.turns.length
+      } | speakers=${translatedStoryboard.speakers.length} | creditsDeducted=${creditsDeducted}`
+    );
+  } catch (err: any) {
+    console.error(`[dubbing-job ${jobId}] FAILED:`, err);
+    job.stage = "failed";
+    job.error = err?.message || "Ошибка при ИИ-разборе видео.";
+    job.completedAt = Date.now();
+    // Crucial (Point 9): Do NOT deduct credits on failed!
+  } finally {
+    // Delete temporary file in Gemini Files API (Point 10)
+    if (uploadedGeminiFile?.name) {
+      ai.files.delete({ name: uploadedGeminiFile.name }).catch(() => {});
+    }
+  }
+}
+
 app.post(
   "/api/podcast/upload-dubbing-video",
   uploadDubbingVideoMiddleware.single("video"),
+  requireCreditBalance((req) => {
+    const clientDurSec = Number(req.body?.videoDurationSec || 60);
+    return Math.max(1, Math.ceil((clientDurSec > 0 ? clientDurSec : 60) / 60));
+  }),
   async (req: any, res) => {
-    req.setTimeout(600000);
-    res.setTimeout(600000);
     try {
       const file = req.file;
       if (!file || !file.path) {
         return res.status(400).json({ error: "Видеофайл не получен сервером." });
+      }
+
+      if (file.size > 30 * 1024 * 1024) {
+        fs.promises.unlink(file.path).catch(() => {});
+        return res.status(400).json({
+          error: "Видео больше 30 МБ. Сожмите до 720p и загрузите снова",
+        });
+      }
+
+      // Probe exact video duration on server via ffprobe (fallback to client videoDurationSec)
+      const clientDurSec = Number(req.body?.videoDurationSec || 60);
+      const exactDurationSec = await probeVideoDurationSec(file.path, clientDurSec);
+      const creditCost = Math.max(1, Math.ceil(exactDurationSec / 60));
+
+      // Verify user has enough credits for the probed video duration before starting job (Point 9)
+      if (!isEmailAdmin(req.userEmail) && (req.userBalance ?? 0) < creditCost) {
+        fs.promises.unlink(file.path).catch(() => {});
+        return res.status(402).json({
+          error: "insufficient_credits",
+          message_ru: `Недостаточно кредитов для разбора видео (${Math.ceil(
+            exactDurationSec / 60
+          )} мин = ${creditCost} кред., баланс: ${req.userBalance ?? 0}).`,
+          required: creditCost,
+          current: req.userBalance ?? 0,
+        });
       }
 
       const videoSessionId = path.basename(file.path);
@@ -6257,113 +6508,91 @@ app.post(
         createdAt: Date.now(),
       });
 
-      // Optionally auto-generate storyboard from the video using Gemini Files API (ai.files.upload)
-      const autoAnalyze =
-        req.body?.autoAnalyzeWithGemini === "true" ||
-        req.body?.generateStoryboardViaGemini === "true";
-      let storyboardResult: any = null;
-      let generatedRawStoryboard = "";
+      // Point 1: Video analysis is enabled by default (and always runs if storyboard field is empty)
+      const shouldAnalyze =
+        req.body?.generateStoryboardViaGemini !== "false" ||
+        req.body?.storyboardIsEmpty === "true";
 
-      if (autoAnalyze) {
-        let uploadedGeminiFile: any = null;
-        try {
-          uploadedGeminiFile = await ai.files.upload({
-            file: file.path,
-            config: {
-              mimeType: file.mimetype || "video/mp4",
-            },
-          });
-
-          // Poll until file state is ACTIVE
-          let currentFile = uploadedGeminiFile;
-          for (let poll = 0; poll < 40; poll++) {
-            const state = String(currentFile?.state || "").toUpperCase();
-            if (state === "ACTIVE" || !state) break;
-            if (state === "FAILED") {
-              throw new Error("Gemini Files API не смог обработать видеофайл.");
-            }
-            await new Promise((r) => setTimeout(r, 2500));
-            currentFile = await ai.files.get({ name: currentFile.name });
-          }
-
-          const storyboardGenRes = await ai.models.generateContent({
-            model: "gemini-3.8-flash",
-            contents: [
-              {
-                role: "user",
-                parts: [
-                  {
-                    fileData: {
-                      fileUri: currentFile.uri,
-                      mimeType: currentFile.mimeType || file.mimetype || "video/mp4",
-                    },
-                  },
-                  {
-                    text: `Сделай посекундную раскадровку этого видео на русском языке для точного дубляжа 1:1.
-Формат строго такой:
-Спикер 1 (Ж/М) — Имя/роль: краткое описание голоса.
-Спикер 2 (Ж/М) — Имя/роль: краткое описание голоса.
-
-MM:SS – MM:SS | Имя (Ж/М):
-Видеоряд: что происходит в кадре.
-Интонация: каким тоном, с какой эмоцией произносится фраза.
-Текст: «Точная дословная прямая речь из видео (с пометками (смеется), (хе-хе), (вздыхает) если они есть)».
-
-А для музыкальных вставок без речи:
-MM:SS – MM:SS | Музыка и графика (Без слов):
-Видеоряд: описание кадра.`,
-                  },
-                ],
-              },
-            ],
-          });
-
-          generatedRawStoryboard = (storyboardGenRes.text || "").trim();
-          if (generatedRawStoryboard) {
-            const rawParsed = await parseAndTranslateVerbatimStoryboard(
-              ai,
-              generatedRawStoryboard
-            );
-            const numericCost =
-              typeof rawParsed.estimatedCostUsd === "number"
-                ? rawParsed.estimatedCostUsd
-                : Number(rawParsed.estimatedCostUsd?.totalUsd ?? 0.05);
-            storyboardResult = {
-              ...rawParsed,
-              totalVideoDurationSec: rawParsed.totalDurationSec,
-              estimatedCostUsd: numericCost,
-              estimatedCostBreakdown: rawParsed.estimatedCostUsd,
-            };
-          }
-        } finally {
-          if (uploadedGeminiFile?.name) {
-            ai.files.delete({ name: uploadedGeminiFile.name }).catch(() => {});
-          }
-        }
+      if (!shouldAnalyze) {
+        return res.json({
+          jobId: null,
+          fileId: videoSessionId,
+          videoSessionId,
+          fileName: file.originalname,
+          sizeBytes: file.size,
+          videoDurationSec: exactDurationSec,
+        });
       }
 
-      res.json({
+      const jobId = `dubjob_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      dubbingVideoJobs.set(jobId, {
+        jobId,
+        fileId: videoSessionId,
+        uid: req.uid,
+        stage: "uploading_to_gemini",
+        progress: 5,
+        error: null,
+        result: null,
+        createdAt: Date.now(),
+        startedAt: Date.now(),
+      });
+
+      // Start background analysis without blocking the HTTP response (Point 3)
+      void runDubbingVideoBackgroundJob({
+        jobId,
+        fileId: videoSessionId,
+        filePath: file.path,
+        mimeType: file.mimetype || "video/mp4",
+        fileName: file.originalname || "video.mp4",
+        sizeBytes: file.size,
+        videoDurationSec: exactDurationSec,
+        creditCost,
+        deductCreditsFn: req.deductCredits,
+        initialUserBalance: req.userBalance,
+      });
+
+      return res.json({
+        jobId,
         fileId: videoSessionId,
         videoSessionId,
         fileName: file.originalname,
         sizeBytes: file.size,
-        generatedStoryboardText: generatedRawStoryboard || undefined,
-        generatedRawStoryboard: generatedRawStoryboard || undefined,
-        parsedStoryboard: storyboardResult || undefined,
-        storyboardResult: storyboardResult || undefined,
+        videoDurationSec: exactDurationSec,
+        creditCost,
       });
     } catch (err: any) {
       console.error("[upload-dubbing-video] Error:", err);
-      res.status(500).json({
-        error: err?.message || "Ошибка загрузки или анализа видеофайла.",
+      return res.status(500).json({
+        error: err?.message || "Ошибка загрузки видеофайла.",
       });
     }
   }
 );
 
-// 4. Mux Dubbed Uzbek WAV Track with Uploaded Video (up to 15 min) via /usr/bin/ffmpeg
-const generatedDubbedVideos = new Map<string, string>();
+// Poll background dubbing video job status (Point 3)
+app.get("/api/podcast/dubbing-job/:jobId", (req, res) => {
+  const jobId = String(req.params.jobId || "").trim();
+  const job = dubbingVideoJobs.get(jobId);
+  if (!job) {
+    return res.status(404).json({
+      stage: "failed",
+      progress: 0,
+      error: "Задача разбора видео не найдена или истекла.",
+      result: null,
+    });
+  }
 
+  return res.json({
+    jobId: job.jobId,
+    fileId: job.fileId,
+    stage: job.stage,
+    progress: job.progress,
+    error: job.error,
+    result: job.result,
+  });
+});
+
+// 4. Mux Dubbed Uzbek WAV Track with Uploaded Video (up to 15 min) via /usr/bin/ffmpeg
 app.post("/api/podcast/mux-dubbed-video", async (req, res) => {
   req.setTimeout(300000);
   res.setTimeout(300000);
@@ -6422,8 +6651,15 @@ app.post("/api/podcast/mux-dubbed-video", async (req, res) => {
           : "smart_ducking",
     });
 
+    // Point 10: Delete local uploaded source file in /tmp after MP4 assembly
+    fs.promises.unlink(session.filePath).catch(() => {});
+    uploadedVideoSessions.delete(resolvedSessionId);
+
     const downloadId = path.basename(outMp4Path);
-    generatedDubbedVideos.set(downloadId, outMp4Path);
+    generatedDubbedVideos.set(downloadId, {
+      filePath: outMp4Path,
+      createdAt: Date.now(),
+    });
 
     res.json({
       downloadUrl: `/api/podcast/download-dubbed-video/${encodeURIComponent(downloadId)}`,
@@ -6442,7 +6678,7 @@ app.get("/api/podcast/download-dubbed-video/:fileId", (req, res) => {
   try {
     const cleanId = path.basename(req.params.fileId || "");
     const targetPath =
-      generatedDubbedVideos.get(cleanId) || path.join("/tmp", cleanId);
+      generatedDubbedVideos.get(cleanId)?.filePath || path.join("/tmp", cleanId);
     if (!cleanId.startsWith("dubmux_") || !fs.existsSync(targetPath)) {
       return res.status(404).json({ error: "Готовый видеофайл не найден." });
     }
