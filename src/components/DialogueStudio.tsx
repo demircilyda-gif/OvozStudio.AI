@@ -611,7 +611,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         if (loadedDraft.speaker1VoiceId) setSpeaker1VoiceId(loadedDraft.speaker1VoiceId);
         if (loadedDraft.speaker2Name) setSpeaker2Name(loadedDraft.speaker2Name);
         if (loadedDraft.speaker2VoiceId) setSpeaker2VoiceId(loadedDraft.speaker2VoiceId);
-        if (loadedDraft.masterAudioMode) setMasterAudioMode(loadedDraft.masterAudioMode);
+        // Item 1.5: Always use time_aligned for dubbing; never overwrite with stale 'continuous' from draft
+        setMasterAudioMode('time_aligned');
       } else {
         // New or different account that hasn't entered anything -> completely EMPTY!
         setStoryboardTextRu('');
@@ -622,6 +623,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         setTotalVideoDurationSec(0);
         setSpeaker1Name('Спикер 1 (Ж)');
         setSpeaker2Name('Спикер 2 (М)');
+        setMasterAudioMode('time_aligned');
       }
     } finally {
       setTimeout(() => {
@@ -736,7 +738,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     if (item.speaker1VoiceId) setSpeaker1VoiceId(item.speaker1VoiceId);
     setSpeaker2Name(item.speaker2Name || 'Спикер 2 (М)');
     if (item.speaker2VoiceId) setSpeaker2VoiceId(item.speaker2VoiceId);
-    setMasterAudioMode(item.masterAudioMode || 'time_aligned');
+    setMasterAudioMode('time_aligned');
     setTotalVideoDurationSec(Number(item.totalVideoDurationSec) || 0);
     setEstimatedCostUsd(Number(item.estimatedCostUsd) || 0);
     setMasterAudioBase64(null);
@@ -1134,9 +1136,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       case 'gemini_processing':
         return 'Обработка видео в Gemini Files API (ожидание ACTIVE)';
       case 'storyboard':
-        return 'Создание JSON-раскадровки по таймкодам (gemini-3.8-flash)';
+        return 'Создание JSON-раскадровки по таймкодам (gemini-4-argon)';
       case 'translating':
-        return 'Прямой перевод 1:1 на узбекский (gemini-4-hydrogen)';
+        return 'Живая адаптация и самопроверка перевода на узбекский (gemini-4-argon)';
       case 'done':
         return 'Готово';
       case 'failed':
@@ -1518,6 +1520,16 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         timbre: speaker2Timbre || speaker2Profile?.timbre,
       };
 
+      const effectiveVideoDurationSec = Math.max(
+        Number(totalVideoDurationSec) || 0,
+        ...turns.map((t: any) => Number(t.endSec) || 0),
+        ...noSpeechIntervals.map((n: any) => Number(n.endSec) || 0)
+      );
+      const effectiveMode =
+        studioSourceMode === 'verbatim' || turns.some((t) => typeof t.startSec === 'number')
+          ? 'time_aligned'
+          : masterAudioMode;
+
       const res = await authFetch('/api/podcast/synthesize-single-turn', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1526,6 +1538,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           host1Voice: host1VoicePayload,
           host2Voice: host2VoicePayload,
           speakers: extraSpeakers,
+          totalVideoDurationSec: effectiveVideoDurationSec,
         }),
       });
 
@@ -1567,8 +1580,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               turns: updatedSynthesized,
-              masterAudioMode,
-              totalVideoDurationSec,
+              masterAudioMode: effectiveMode,
+              totalVideoDurationSec: effectiveVideoDurationSec,
             }),
           });
           if (stitchRes.ok) {
@@ -2009,13 +2022,22 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
               }
             : null
         );
+        const effectiveStopDurationSec = Math.max(
+          Number(totalVideoDurationSec) || 0,
+          ...turns.map((t: any) => Number(t.endSec) || 0),
+          ...noSpeechIntervals.map((n: any) => Number(n.endSec) || 0)
+        );
+        const effectiveStopMode =
+          studioSourceMode === 'verbatim' || turns.some((t) => typeof t.startSec === 'number')
+            ? 'time_aligned'
+            : masterAudioMode;
         const stitchRes = await authFetch('/api/podcast/stitch-dialogue-turns', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             turns: synthesizedTurns,
-            masterAudioMode,
-            totalVideoDurationSec,
+            masterAudioMode: effectiveStopMode,
+            totalVideoDurationSec: effectiveStopDurationSec,
           }),
         });
         if (stitchRes.ok) {
@@ -2032,7 +2054,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     setBatchProgress(null);
   };
 
-  // Synthesize Full Dialogue (with 4-step duration cascade & strict timecode sync)
+  // Synthesize Full Dialogue (with strict timecode sync)
   const handleSynthesizeDialogue = async () => {
     if (
       !requireAuth(
@@ -2051,6 +2073,19 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     setIsSynthesizing(true);
     setMuxedVideoDownloadUrl(null);
     abortControllerRef.current = new AbortController();
+
+    const effectiveVideoDurationSec = Math.max(
+      Number(totalVideoDurationSec) || 0,
+      ...turns.map((t: any) => Number(t.endSec) || 0),
+      ...noSpeechIntervals.map((n: any) => Number(n.endSec) || 0)
+    );
+    const effectiveMode =
+      studioSourceMode === 'verbatim' || turns.some((t) => typeof t.startSec === 'number')
+        ? 'time_aligned'
+        : masterAudioMode;
+    if (effectiveMode === 'time_aligned' && masterAudioMode !== 'time_aligned') {
+      setMasterAudioMode('time_aligned');
+    }
 
     const host1VoicePayload = {
       voiceId: speaker1Profile?.voiceId || speaker1Profile?.id || 'aziza',
@@ -2083,8 +2118,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
             host1Voice: host1VoicePayload,
             host2Voice: host2VoicePayload,
             speakers: extraSpeakers,
-            masterAudioMode,
-            totalVideoDurationSec,
+            masterAudioMode: effectiveMode,
+            totalVideoDurationSec: effectiveVideoDurationSec,
           }),
         });
 
@@ -2170,7 +2205,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 host1Voice: host1VoicePayload,
                 host2Voice: host2VoicePayload,
                 speakers: extraSpeakers,
-                masterAudioMode,
+                masterAudioMode: effectiveMode,
+                totalVideoDurationSec: effectiveVideoDurationSec,
               }),
             });
 
@@ -2217,8 +2253,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             turns: accumulatedTurns,
-            masterAudioMode,
-            totalVideoDurationSec,
+            masterAudioMode: effectiveMode,
+            totalVideoDurationSec: effectiveVideoDurationSec,
           }),
         });
 

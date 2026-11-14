@@ -31,6 +31,7 @@ import {
   sanitizeDocumentedTtsTags,
   countSyllables,
 } from "./server/services/verbatimStoryboardService.ts";
+import { DUBBING_MODELS_CONFIG } from "./server/config/dubbingModels.ts";
 
 const RUNTIME_ENV_KEYS = {
   API_KEY: (process.env.API_KEY || "").trim(),
@@ -634,10 +635,12 @@ export async function generateGeminiSpeechPcm({
   const { speechText: cleanedText, extractedStyles } = cleanScriptForSpeech(text || "");
   const spokenContent = cleanedText || (text || "").trim() || "...";
 
-  // 3. Uzbek linguistic & phonetic normalization
+  // 3. Uzbek linguistic & phonetic normalization (Stage 1.8: decimals read as words)
   let normalized = spokenContent;
   try {
-    normalized = normalizeUzbekSpeech(spokenContent);
+    normalized = normalizeUzbekSpeech(spokenContent, {
+      decimalStyle: DUBBING_MODELS_CONFIG.decimalPronunciationStyle,
+    });
   } catch {}
   const ttsText = (normalized || spokenContent || "...").trim();
 
@@ -651,9 +654,8 @@ export async function generateGeminiSpeechPcm({
   }
   const effectiveStyle = styleTokens.join(". ");
 
-  const ttsModels = isClonedShohrux
-    ? ["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"]
-    : ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts"];
+  // Stage 1.4: Always use flagship gemini-3.8-flash-tts (never Lite)
+  const ttsModels = [DUBBING_MODELS_CONFIG.ttsDubbingModel];
   const MAX_RETRIES = 3;
 
   const isApiKeyExpired = (err: any) => {
@@ -5457,11 +5459,10 @@ function resolveSpeakerVoiceProfile(
 }
 
 /**
- * 4-Step Duration & Tempo Fitting Cascade for a single turn:
- * 1. Mild ffmpeg atempo <= 1.15 if turn exceeds window by <= 15%
- * 2. Re-synthesize with fast pace in speechMetadata.style if > 15% over window
- * 3. Shorten Uzbek text via gemini-4-hydrogen (ThinkingLevel.LOW) by 25-30% syllables and re-synthesize
- * 4. Allow remaining tail to spill into any silent gap before nextTurnStartSec
+ * Stage 1.3: Duration & Tempo Fitting for a single turn:
+ * - Synthesizes the full Uzbek text with flagship `gemini-3.8-flash-tts` (NEVER truncates or shortens text, and NEVER re-synthesizes with "fast_tts").
+ * - If synthesized audio exceeds the turn's time window (`windowSec`), applies pitch-preserving ffmpeg `atempo` strictly capped at `<= 1.10` (`DUBBING_MODELS_CONFIG.maxAtempoSpeedRatio`).
+ * - Any remaining audio tail naturally spills into the silent pause before the next turn's `startSec`.
  */
 async function synthesizeTurnWithDurationCascade({
   turn,
@@ -5484,7 +5485,7 @@ async function synthesizeTurnWithDurationCascade({
   fitStepApplied: string;
   failed: boolean;
 }> {
-  let activeText = String(turn.text || "").trim() || "...";
+  const activeText = String(turn.text || "").trim() || "...";
   const hasValidWindow =
     strictTimeWindow &&
     typeof turn.startSec === "number" &&
@@ -5496,8 +5497,7 @@ async function synthesizeTurnWithDurationCascade({
     : 0;
 
   try {
-    // Initial synthesis
-    let synthRes = await generateGeminiSpeechPcm({
+    const synthRes = await generateGeminiSpeechPcm({
       text: activeText,
       voiceName: baseVoice,
       voiceId,
@@ -5505,80 +5505,15 @@ async function synthesizeTurnWithDurationCascade({
       speakerName,
     });
     let pcm = synthRes.pcm;
-    let actualSec = pcm.length / 48000;
+    const actualSec = pcm.length / 48000;
     let fitStepApplied = "original";
 
+    const maxAtempo = DUBBING_MODELS_CONFIG.maxAtempoSpeedRatio || 1.1;
     if (hasValidWindow && actualSec > windowSec + 0.08) {
-      const initialRatio = actualSec / windowSec;
-
-      // STEP 1: Mild atempo <= 1.15
-      if (initialRatio <= 1.15) {
-        pcm = await applyMildAtempoPcm(pcm, initialRatio, 24000);
-        fitStepApplied = `atempo_${initialRatio.toFixed(2)}x`;
-      } else {
-        // STEP 2: Fast-pace TTS re-synthesis
-        try {
-          const fastRes = await generateGeminiSpeechPcm({
-            text: activeText,
-            voiceName: baseVoice,
-            voiceId,
-            speechStyle: `${combinedTurnStyle}. Delivery speed: brisk, fast conversational pace, compact energetic articulation.`,
-            speakerName,
-          });
-          if (fastRes.pcm && fastRes.pcm.length > 0 && fastRes.pcm.length < pcm.length) {
-            pcm = fastRes.pcm;
-            actualSec = pcm.length / 48000;
-            fitStepApplied = "fast_tts";
-          }
-        } catch {}
-
-        const ratioAfterFast = actualSec / windowSec;
-        if (ratioAfterFast <= 1.15) {
-          if (ratioAfterFast > 1.01) {
-            pcm = await applyMildAtempoPcm(pcm, ratioAfterFast, 24000);
-            fitStepApplied = `fast_tts+atempo_${ratioAfterFast.toFixed(2)}x`;
-          }
-        } else {
-          // STEP 3: Shorten Uzbek translation via gemini-4-hydrogen (ThinkingLevel.LOW, temp 0.1)
-          const targetSyllables = Math.max(3, Math.floor(windowSec * 4.2));
-          try {
-            const shortenRes = await ai.models.generateContent({
-              model: "gemini-4-hydrogen",
-              contents: `Сократи эту узбекскую реплику дубляжа до максимум ${targetSyllables} слогов (чтобы она свободно прозвучала за ${windowSec} сек), сохранив точный смысл и теги (<laugh>, <sigh>, <short pause>, <breath>, <cough>). Верни только сокращённый узбекский текст без кавычек:\n${activeText}`,
-              config: {
-                temperature: 0.1,
-                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-              },
-            });
-            const candidateShort = sanitizeDocumentedTtsTags(shortenRes.text || "");
-            if (
-              candidateShort &&
-              countSyllables(candidateShort) > 0 &&
-              countSyllables(candidateShort) < countSyllables(activeText)
-            ) {
-              activeText = candidateShort;
-              const shortTts = await generateGeminiSpeechPcm({
-                text: activeText,
-                voiceName: baseVoice,
-                voiceId,
-                speechStyle: `${combinedTurnStyle}. Brisk, natural conversational pace.`,
-                speakerName,
-              });
-              if (shortTts.pcm && shortTts.pcm.length > 0) {
-                pcm = shortTts.pcm;
-                actualSec = pcm.length / 48000;
-                fitStepApplied = "shortened_text";
-              }
-            }
-          } catch {}
-
-          // Apply final mild atempo (strictly capped at <= 1.15) if still slightly over window
-          const finalRatio = actualSec / windowSec;
-          if (finalRatio > 1.01) {
-            pcm = await applyMildAtempoPcm(pcm, Math.min(1.15, finalRatio), 24000);
-            fitStepApplied = `${fitStepApplied}+atempo_${Math.min(1.15, finalRatio).toFixed(2)}x`;
-          }
-        }
+      const neededRatio = Math.min(maxAtempo, actualSec / windowSec);
+      if (neededRatio > 1.01) {
+        pcm = await applyMildAtempoPcm(pcm, neededRatio, 24000);
+        fitStepApplied = `atempo_${neededRatio.toFixed(2)}x`;
       }
     }
 
@@ -5603,7 +5538,7 @@ async function synthesizeTurnWithDurationCascade({
   }
 }
 
-// Synthesize N-speaker dialogue / dubbing with independent voices, cloned voice support, and 4-step duration cascade
+// Synthesize N-speaker dialogue / dubbing with independent voices, cloned voice support, and strict timecode alignment
 app.post(
   "/api/podcast/synthesize-dialogue",
   requireCreditBalance((req) => Math.max(1, Math.ceil((req.body?.turns?.length || 2) / 3))),
@@ -5616,9 +5551,15 @@ app.post(
         host1Voice = {},
         host2Voice = {},
         speakerVoices = {},
-        masterAudioMode = "continuous",
+        masterAudioMode = "time_aligned",
+        totalVideoDurationSec,
         totalTimelineSec,
       } = req.body;
+
+      const resolvedTotalVideoDurationSec =
+        Number(totalVideoDurationSec ?? totalTimelineSec) > 0
+          ? Number(totalVideoDurationSec ?? totalTimelineSec)
+          : undefined;
 
       if (!Array.isArray(turns) || turns.length === 0) {
         return res
@@ -5627,6 +5568,19 @@ app.post(
       }
 
       const isTimeAlignedMode = masterAudioMode === "time_aligned";
+
+      // Stage 1.7: Never fall back to "idx * 3s" in time_aligned mode!
+      if (isTimeAlignedMode) {
+        const missingTimecodeIdx = turns.findIndex(
+          (t: any) => typeof t?.startSec !== "number" || Number.isNaN(t.startSec)
+        );
+        if (missingTimecodeIdx !== -1) {
+          return res.status(400).json({
+            error: `Ошибка синхронизации таймкодов: у реплики #${missingTimecodeIdx + 1} отсутствует точный таймкод начала (startSec).`,
+            message_ru: `Ошибка синхронизации таймкодов: у реплики #${missingTimecodeIdx + 1} отсутствует точный таймкод начала (startSec).`,
+          });
+        }
+      }
 
       // Check if any turn uses a cloned voice or N>2 speakers or time_aligned dubbing mode
       const uniqueSpeakerIds = new Set(turns.map((t: any) => t.speakerId || "HOST_1"));
@@ -5642,7 +5596,7 @@ app.post(
         return l === "voice_17raj9ewke3g" || l === "user-replicated" || l === "shohrux" || l === "shokhrukh";
       });
 
-      // For time_aligned video dubbing, cloned voice, or >2 speakers, ALWAYS use per-turn synthesis with duration cascade!
+      // For time_aligned video dubbing, cloned voice, or >2 speakers, ALWAYS use per-turn synthesis with duration fitting
       const canAttemptNativeMultiSpeaker =
         !isTimeAlignedMode &&
         !usesClonedVoice &&
@@ -5682,7 +5636,9 @@ app.post(
           const { speechText: cleanedTurnText, extractedStyles: turnExtractedStyles } = cleanScriptForSpeech(turn.text || "");
           let spokenText = cleanedTurnText;
           try {
-            spokenText = normalizeUzbekSpeech(spokenText);
+            spokenText = normalizeUzbekSpeech(spokenText, {
+              decimalStyle: DUBBING_MODELS_CONFIG.decimalPronunciationStyle,
+            });
           } catch {}
           const textToSynthesize = spokenText || cleanedTurnText || (turn.text || "").trim() || "...";
 
@@ -5701,7 +5657,8 @@ app.post(
           };
         });
 
-        for (const modelCandidate of ["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"]) {
+        // Stage 1.4: Use ONLY DUBBING_MODELS_CONFIG.ttsDubbingModel (gemini-3.8-flash-tts, never Lite)
+        for (const modelCandidate of [DUBBING_MODELS_CONFIG.ttsDubbingModel]) {
           try {
             const multiResponse = await ai.models.generateContent({
               model: modelCandidate,
@@ -5809,7 +5766,7 @@ app.post(
         }
       }
 
-      // Per-Turn Synthesis with N-speaker support, Cloned Voice support, and 4-Step Duration Cascade
+      // Per-Turn Synthesis with N-speaker support, Cloned Voice support, conversational context, and mild atempo <= 1.10
       const processedTurnResults = await mapConcurrent(turns, 2, async (turn: any, i: number) => {
         if (i > 0) {
           await new Promise((r) => setTimeout(r, 180));
@@ -5823,9 +5780,16 @@ app.post(
           speakerVoices
         );
 
+        const prevTurn = i > 0 ? turns[i - 1] : null;
+        const dialogueContextHint =
+          prevTurn && prevTurn.speakerId !== turn.speakerId
+            ? `Natural conversational dialogue response (reacting naturally to co-host saying "${String(prevTurn.text || "").slice(0, 80)}")`
+            : "Natural living conversational delivery";
+
         const { extractedStyles: turnExtractedStyles } = cleanScriptForSpeech(turn.text || "");
         const combinedTurnStyle = [
           resolved.baseSpeechStyle,
+          dialogueContextHint,
           turn.speechStyle,
           turnExtractedStyles && turnExtractedStyles.length > 0
             ? `Acting & emotional cues: ${turnExtractedStyles.join(", ")}`
@@ -5874,42 +5838,58 @@ app.post(
       const synthesizedTurns: any[] = [];
 
       if (isTimeAlignedMode) {
-        // Strict Timecode Assembly: places every turn at its exact startSec without clamping "Без слов" musical intervals
-        const assembled = assembleStrictTimecodeMasterPcm(
-          processedTurnResults.map((r, idx) => ({
-            startSec: typeof r.turn.startSec === "number" ? r.turn.startSec : idx * 3,
-            endSec:
-              typeof r.turn.endSec === "number"
-                ? r.turn.endSec
-                : (typeof r.turn.startSec === "number" ? r.turn.startSec : idx * 3) +
-                  r.turnPcm.length / 48000,
-            pcm: r.turnPcm,
-          })),
-          typeof totalTimelineSec === "number" ? totalTimelineSec : undefined,
-          24000
-        );
+        if (req.body?.skipMasterStitch) {
+          // Batch mode: return individual synthesized turns preserving their exact startSec & endSec
+          processedTurnResults.forEach((r, idx) => {
+            const actualDur = Math.round((r.turnPcm.length / 48000) * 100) / 100;
+            const finalTurnWav = r.turnWavRaw || buildWavBuffer(r.turnPcm, 24000, 1, 16);
+            synthesizedTurns.push({
+              ...r.turn,
+              id: r.turn.id || `turn-${idx}`,
+              speakerName: r.turn.speakerName || r.speakerName,
+              audioBase64: finalTurnWav.toString("base64"),
+              durationSeconds: actualDur,
+              startTime: r.turn.startSec,
+              endTime: Math.round((r.turn.startSec + actualDur) * 100) / 100,
+              fitStepApplied: r.fitStepApplied,
+              synthesisFailed: r.turnFailed,
+            });
+          });
+        } else {
+          // Strict Timecode Assembly: places every turn at its exact startSec without clamping "Без слов" musical intervals
+          const assembled = assembleStrictTimecodeMasterPcm(
+            processedTurnResults.map((r) => ({
+              startSec: r.turn.startSec,
+              endSec:
+                typeof r.turn.endSec === "number"
+                  ? r.turn.endSec
+                  : r.turn.startSec + r.turnPcm.length / 48000,
+              pcm: r.turnPcm,
+            })),
+            resolvedTotalVideoDurationSec,
+            24000
+          );
 
-        if (!req.body?.skipMasterStitch) {
           const masterWavBuffer = buildWavBuffer(assembled.masterPcm, 24000, 1, 16);
           masterAudioBase64 = masterWavBuffer.toString("base64");
           totalDuration = assembled.totalDurationSec;
-        }
 
-        processedTurnResults.forEach((r, idx) => {
-          const placement = assembled.actualPlacements[idx];
-          const finalTurnWav = r.turnWavRaw || buildWavBuffer(r.turnPcm, 24000, 1, 16);
-          synthesizedTurns.push({
-            ...r.turn,
-            id: r.turn.id || `turn-${idx}`,
-            speakerName: r.turn.speakerName || r.speakerName,
-            audioBase64: finalTurnWav.toString("base64"),
-            durationSeconds: placement.durationSec,
-            startTime: placement.startSec,
-            endTime: placement.endSec,
-            fitStepApplied: r.fitStepApplied,
-            synthesisFailed: r.turnFailed,
+          processedTurnResults.forEach((r, idx) => {
+            const placement = assembled.actualPlacements[idx];
+            const finalTurnWav = r.turnWavRaw || buildWavBuffer(r.turnPcm, 24000, 1, 16);
+            synthesizedTurns.push({
+              ...r.turn,
+              id: r.turn.id || `turn-${idx}`,
+              speakerName: r.turn.speakerName || r.speakerName,
+              audioBase64: finalTurnWav.toString("base64"),
+              durationSeconds: placement.durationSec,
+              startTime: placement.startSec,
+              endTime: placement.endSec,
+              fitStepApplied: r.fitStepApplied,
+              synthesisFailed: r.turnFailed,
+            });
           });
-        });
+        }
       } else {
         // Continuous Podcast Stitching (350ms natural pause between turns)
         const DIALOGUE_PAUSE_SECONDS = 0.35;
@@ -5964,6 +5944,7 @@ app.post(
       res.json({
         masterAudioBase64: masterAudioBase64 || undefined,
         totalDurationSeconds: totalDuration || undefined,
+        totalVideoDurationSec: totalDuration || resolvedTotalVideoDurationSec,
         turns: synthesizedTurns,
         srtSubtitles: generateSrtFromTurns(synthesizedTurns),
         failedTurns: failedTurns.length > 0 ? failedTurns : undefined,
@@ -5981,17 +5962,41 @@ app.post(
 // Stitch multiple dialogue turn audio chunks into a unified master track (supports strict time_aligned and continuous modes)
 app.post("/api/podcast/stitch-dialogue-turns", requireCreditBalance(1), async (req, res) => {
   try {
-    const { turns = [], masterAudioMode = "continuous", totalTimelineSec } = req.body;
+    const {
+      turns = [],
+      masterAudioMode = "time_aligned",
+      totalVideoDurationSec,
+      totalTimelineSec,
+    } = req.body;
+
+    const resolvedTotalVideoDurationSec =
+      Number(totalVideoDurationSec ?? totalTimelineSec) > 0
+        ? Number(totalVideoDurationSec ?? totalTimelineSec)
+        : undefined;
 
     if (!Array.isArray(turns) || turns.length === 0) {
       return res.status(400).json({ error: "Birlashtirish uchun replikalar (turns) kiritilmadi" });
     }
 
     const isTimeAligned = masterAudioMode === "time_aligned";
+
+    // Stage 1.7: Never fall back to "idx * 3s" in time_aligned mode!
+    if (isTimeAligned) {
+      const missingIdx = turns.findIndex(
+        (t: any) => typeof t?.startSec !== "number" || Number.isNaN(t.startSec)
+      );
+      if (missingIdx !== -1) {
+        return res.status(400).json({
+          error: `Ошибка синхронизации таймкодов: у реплики #${missingIdx + 1} отсутствует точный таймкод начала (startSec).`,
+          message_ru: `Ошибка синхронизации таймкодов: у реплики #${missingIdx + 1} отсутствует точный таймкод начала (startSec).`,
+        });
+      }
+    }
+
     let totalPcm: Buffer;
     let totalDurationSeconds = 0;
 
-    const extractedTurns = turns.map((turn: any, idx: number) => {
+    const extractedTurns = turns.map((turn: any) => {
       let turnPcm: Buffer | null = null;
       if (turn.audioBase64) {
         try {
@@ -6005,12 +6010,11 @@ app.post("/api/podcast/stitch-dialogue-turns", requireCreditBalance(1), async (r
       return {
         turn,
         pcm: turnPcm,
-        startSec: typeof turn.startSec === "number" ? turn.startSec : idx * 3,
+        startSec: turn.startSec as number,
         endSec:
           typeof turn.endSec === "number"
             ? turn.endSec
-            : (typeof turn.startSec === "number" ? turn.startSec : idx * 3) +
-              turnPcm.length / 48000,
+            : (turn.startSec || 0) + turnPcm.length / 48000,
       };
     });
 
@@ -6021,7 +6025,7 @@ app.post("/api/podcast/stitch-dialogue-turns", requireCreditBalance(1), async (r
           endSec: et.endSec,
           pcm: et.pcm,
         })),
-        typeof totalTimelineSec === "number" ? totalTimelineSec : undefined,
+        resolvedTotalVideoDurationSec,
         24000
       );
       totalPcm = assembled.masterPcm;
@@ -6052,6 +6056,7 @@ app.post("/api/podcast/stitch-dialogue-turns", requireCreditBalance(1), async (r
       status: "success",
       masterAudioBase64: masterWavBuffer.toString("base64"),
       totalDurationSeconds,
+      totalVideoDurationSec: totalDurationSeconds,
       srtSubtitles,
       totalTurnsStitched: turns.length,
       creditsRemaining,
@@ -6105,7 +6110,7 @@ app.post("/api/podcast/parse-verbatim-storyboard", requireCreditBalance(1), asyn
   }
 });
 
-// 2. Re-synthesize a single turn from the storyboard table (with 4-step duration cascade) and optionally re-stitch master track
+// 2. Re-synthesize a single turn from the storyboard table and optionally re-stitch master track
 app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (req, res) => {
   try {
     const {
@@ -6115,11 +6120,26 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
       host2Voice = {},
       speakerVoices = {},
       masterAudioMode = "time_aligned",
+      totalVideoDurationSec,
       totalTimelineSec,
     } = req.body;
 
+    const resolvedTotalVideoDurationSec =
+      Number(totalVideoDurationSec ?? totalTimelineSec) > 0
+        ? Number(totalVideoDurationSec ?? totalTimelineSec)
+        : undefined;
+
     if (!turn || !turn.text) {
       return res.status(400).json({ error: "Текст реплики обязателен для переозвучки." });
+    }
+
+    if (
+      masterAudioMode === "time_aligned" &&
+      (typeof turn.startSec !== "number" || Number.isNaN(turn.startSec))
+    ) {
+      return res.status(400).json({
+        error: "У выбранной реплики отсутствует таймкод начала (startSec).",
+      });
     }
 
     const resolved = resolveSpeakerVoiceProfile(
@@ -6176,7 +6196,15 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
         t.id === updatedTurn.id ? updatedTurn : t
       );
       if (masterAudioMode === "time_aligned") {
-        const turnsWithPcm = mergedTurns.map((t: any, idx: number) => {
+        const missingIdx = mergedTurns.findIndex(
+          (t: any) => typeof t?.startSec !== "number" || Number.isNaN(t.startSec)
+        );
+        if (missingIdx !== -1) {
+          return res.status(400).json({
+            error: `У реплики #${missingIdx + 1} отсутствует таймкод начала (startSec).`,
+          });
+        }
+        const turnsWithPcm = mergedTurns.map((t: any) => {
           let pcmBuf: Buffer = Buffer.alloc(24000);
           if (t.audioBase64) {
             try {
@@ -6184,18 +6212,17 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
             } catch {}
           }
           return {
-            startSec: typeof t.startSec === "number" ? t.startSec : idx * 3,
+            startSec: t.startSec as number,
             endSec:
               typeof t.endSec === "number"
                 ? t.endSec
-                : (typeof t.startSec === "number" ? t.startSec : idx * 3) +
-                  pcmBuf.length / 48000,
+                : (t.startSec || 0) + pcmBuf.length / 48000,
             pcm: pcmBuf,
           };
         });
         const assembled = assembleStrictTimecodeMasterPcm(
           turnsWithPcm,
-          typeof totalTimelineSec === "number" ? totalTimelineSec : undefined,
+          resolvedTotalVideoDurationSec,
           24000
         );
         masterAudioBase64 = buildWavBuffer(assembled.masterPcm, 24000, 1, 16).toString("base64");
@@ -6208,6 +6235,7 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
       turn: updatedTurn,
       masterAudioBase64,
       totalDurationSeconds,
+      totalVideoDurationSec: totalDurationSeconds,
       srtSubtitles,
     });
   } catch (err: any) {

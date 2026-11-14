@@ -117,10 +117,40 @@ export function normalizeUzbekApostrophes(text: string): string {
 }
 
 /**
- * Normalizes numbers, times, currencies, percentages, and dates in Uzbek text
+ * Formats two integer word parts as a spoken Uzbek decimal:
+ * - style "butun" (default): "besh butun ikki", "o'n besh butun olti"
+ * - style "u":               "besh-u ikki", "o'n besh-u olti", "ikki-yu besh"
  */
-export function normalizeNumbersAndDates(text: string): string {
+export function formatUzbekDecimalWords(
+  intPart: number,
+  fracStr: string,
+  style: "butun" | "u" = "butun"
+): string {
+  const intWords = numberToUzbekWords(intPart);
+  const cleanFrac = fracStr.replace(/^0+/, "");
+  const fracWords =
+    cleanFrac.length === 0
+      ? "nol"
+      : fracStr.startsWith("0")
+        ? "nol " + numberToUzbekWords(parseInt(cleanFrac, 10))
+        : numberToUzbekWords(parseInt(fracStr, 10));
+
+  if (style === "u") {
+    const endsWithVowel = /[aeiou]$/i.test(intWords);
+    return `${intWords}${endsWithVowel ? "-yu" : "-u"} ${fracWords}`;
+  }
+  return `${intWords} butun ${fracWords}`;
+}
+
+/**
+ * Normalizes numbers, times, currencies, percentages, decimals, and dates in Uzbek text
+ */
+export function normalizeNumbersAndDates(
+  text: string,
+  options?: { decimalStyle?: "butun" | "u" }
+): string {
   let normalized = text;
+  const decimalStyle = options?.decimalStyle || "butun";
 
   // 1. Time formats: e.g. "12:30", "12:00", "09:45"
   // "soat 12:30 da" -> "soat o'n ikki yarimda"
@@ -180,18 +210,30 @@ export function normalizeNumbersAndDates(text: string): string {
     return `${numberToUzbekWords(cleanNum)} so'm`;
   });
 
-  // 4. Percentage: "25%", "0%", "15-25%"
+  // 4. Percentage: "25%", "5,2%", "15-25%"
   normalized = normalized.replace(/\b(\d+)\s*-\s*(\d+)%/g, (_, n1, n2) => {
     const w1 = numberToUzbekWords(parseInt(n1, 10));
     const w2 = numberToUzbekWords(parseInt(n2, 10));
     return `${w1} dan ${w2} foizgacha`;
+  });
+  normalized = normalized.replace(/\b(\d+)[.,](\d+)%/g, (_, intStr, fracStr) => {
+    const intPart = parseInt(intStr, 10);
+    return `${formatUzbekDecimalWords(intPart, fracStr, decimalStyle)} foiz`;
   });
   normalized = normalized.replace(/(\d+)%/g, (_, valStr) => {
     const num = parseInt(valStr, 10);
     return `${numberToUzbekWords(num)} foiz`;
   });
 
-  // 5. Ordinal numbers and room counts: e.g. "1-xonali", "2 xonali", "3-qavat"
+  // 5. Decimal numbers with comma or dot: e.g. "5,2", "15,6", "5.2"
+  // (Must run BEFORE generic integer rule so "5,2" is never split into "besh, ikki"!)
+  normalized = normalized.replace(/\b(\d{1,5})[.,](\d{1,2})\b/g, (match, intStr, fracStr) => {
+    const intPart = parseInt(intStr, 10);
+    if (isNaN(intPart)) return match;
+    return formatUzbekDecimalWords(intPart, fracStr, decimalStyle);
+  });
+
+  // 6. Ordinal numbers and room counts: e.g. "1-xonali", "2 xonali", "3-qavat"
   normalized = normalized.replace(/\b(\d+)-?xonali\b/gi, (_, nStr) => {
     const num = parseInt(nStr, 10);
     return `${numberToUzbekWords(num)} xonali`;
@@ -205,7 +247,7 @@ export function normalizeNumbersAndDates(text: string): string {
     return `${numberToUzbekOrdinal(num)} bosqich`;
   });
 
-  // 6. Generic numbers (e.g. "50000", "200")
+  // 7. Generic numbers (e.g. "50000", "200")
   normalized = normalized.replace(/\b\d{1,7}\b/g, (match) => {
     const num = parseInt(match, 10);
     if (!isNaN(num) && num < 10000000) {
@@ -244,14 +286,17 @@ export function preserveVocalTags(text: string): string {
  * Master Uzbek Speech Normalization function
  * Run before sending any script to OvozStudio Speech Synthesizer
  */
-export function normalizeUzbekSpeech(text: string): string {
+export function normalizeUzbekSpeech(
+  text: string,
+  options?: { decimalStyle?: "butun" | "u" }
+): string {
   if (!text || typeof text !== "string") return "";
 
   // 1. Unify apostrophes (o', g')
   let result = normalizeUzbekApostrophes(text);
 
-  // 2. Expand numbers, times, percentages, and currencies into natural words
-  result = normalizeNumbersAndDates(result);
+  // 2. Expand numbers, times, percentages, decimals, and currencies into natural words
+  result = normalizeNumbersAndDates(result, options);
 
   // 3. Format and preserve vocal tags
   result = preserveVocalTags(result);
