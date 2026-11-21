@@ -1,0 +1,41 @@
+{
+  "tts_1794751538238_3cfdb8cd": {
+    "id": "tts_1794751538238_3cfdb8cd",
+    "cacheKey": "c5431f96f1de270b3a8256fbb52c33cd421ff9796db62bab7947e453731dd411",
+    "ownerUid": "test-user",
+    "wavPath": "/app/applet/uploads/tts-audio/tts_1794751538238_3cfdb8cd.wav",
+    "mp3Path": "/app/applet/uploads/tts-audio/tts_1794751538238_3cfdb8cd.mp3",
+    "durationSeconds": 9.9,
+    "finalSpokenText": "Assalomu alaykum! Toshkent shahridagi yangi markazimizga xush kelibsiz 1794751530419.",
+    "styleSummary": "warm, welcoming, clear announcement tone, natural medium pace. Native authentic Uzbek pronunciation (zero foreign accent)",
+    "provider": "google-gemini-tts",
+    "createdAt": "2026-11-15T14:05:39.510Z",
+    "savedToMediaLibrary": false
+  },
+  "tts_1794751539514_86f57677": {
+    "id": "tts_1794751539514_86f57677",
+    "cacheKey": "b1c9993e543ef2da5b91bd6d8aa19b93e8627cba092bee48a4250fc15f9cfde2",
+    "ownerUid": "test-user",
+    "wavPath": "/app/applet/uploads/tts-audio/tts_1794751539514_86f57677.wav",
+    "mp3Path": "/app/applet/uploads/tts-audio/tts_1794751539514_86f57677.mp3",
+    "durationSeconds": 8,
+    "finalSpokenText": "Assalomu alaykum! Bugun do'konimizda yigirma foiz chegirma e'lon qilindi. Kod: 1794751530419.",
+    "styleSummary": "Natural conversational delivery, lively everyday intonation, relaxed human cadence, authentic pronunciation, natural medium pace. Native authentic Uzbek pronunciation (zero foreign accent)",
+    "provider": "kie-gemini-tts",
+    "createdAt": "2026-11-15T14:05:39.661Z",
+    "savedToMediaLibrary": false
+  },
+  "tts_1794862051791_ada90508": {
+    "id": "tts_1794862051791_ada90508",
+    "cacheKey": "2306f1d952327c1947bc2439efc35ea974acaac0d20b3a2b6b2bf80e811e5094",
+    "ownerUid": "test-user",
+    "wavPath": "/app/applet/uploads/tts-audio/tts_1794862051791_ada90508.wav",
+    "mp3Path": "/app/applet/uploads/tts-audio/tts_1794862051791_ada90508.mp3",
+    "durationSeconds": 11.8,
+    "finalSpokenText": "Assalomu alaykum! [pauza 1s] Bu birinchi jumla. [pauza 2s] Bu esa ikkinchi jumla. [pauza 3s] E'tiboringiz uchun rahmat!",
+    "styleSummary": "Natural conversational delivery, lively everyday intonation, relaxed human cadence, authentic pronunciation, natural medium pace. Native authentic Uzbek pronunciation (zero foreign accent)",
+    "provider": "google-gemini-tts",
+    "createdAt": "2026-11-16T20:47:32.852Z",
+    "savedToMediaLibrary": false
+  }
+}

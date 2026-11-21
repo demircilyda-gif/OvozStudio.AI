@@ -111,6 +111,15 @@ export interface DialogueTurn {
   startTime?: number;
   endTime?: number;
   fitStepApplied?: string;
+  originalDurationSec?: number;
+  dubbedDurationSec?: number;
+  atempoApplied?: number;
+  rephraseAttempts?: number;
+  syncStatus?: 'ok' | 'adjusted' | 'overflow';
+  gapAfterSec?: number;
+  targetSyllables?: number;
+  maxSyllables?: number;
+  actualSyllables?: number;
   validationNotes?: string;
   nonSpeechEvents?: string[];
   musicCue?: TurnMusicCue;

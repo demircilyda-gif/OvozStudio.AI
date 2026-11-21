@@ -411,6 +411,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   const [totalVideoDurationSec, setTotalVideoDurationSec] = useState<number>(0);
   const [srtSubtitles, setSrtSubtitles] = useState<string>('');
   const [resynthesizingTurnId, setResynthesizingTurnId] = useState<string | null>(null);
+  const [shorteningTurnId, setShorteningTurnId] = useState<string | null>(null);
+  const [editingTurnId, setEditingTurnId] = useState<string | null>(null);
 
   // Per-User Saved Dubbing Projects History (strictly isolated by user.uid)
   const [userHistory, setUserHistory] = useState<SavedDialogueHistoryItem[]>([]);
@@ -1497,10 +1499,18 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     }
   };
 
-  // Re-synthesize a SINGLE turn and re-stitch master audio
-  const handleResynthesizeSingleTurn = async (turn: DialogueTurn) => {
+  // Re-synthesize a SINGLE turn (optionally rephrasing shorter via "Короче") and re-stitch master audio
+  const handleResynthesizeSingleTurn = async (
+    turn: DialogueTurn,
+    options?: { forceRephraseShorter?: boolean }
+  ) => {
     if (!turn.text.trim()) return;
-    setResynthesizingTurnId(turn.id);
+    const isShortening = Boolean(options?.forceRephraseShorter);
+    if (isShortening) {
+      setShorteningTurnId(turn.id);
+    } else {
+      setResynthesizingTurnId(turn.id);
+    }
     try {
       const host1VoicePayload = {
         voiceId: speaker1Profile?.voiceId || speaker1Profile?.id || 'aziza',
@@ -1530,14 +1540,19 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           ? 'time_aligned'
           : masterAudioMode;
 
+      const currentTurnList = synthesizedTurns.length > 0 ? synthesizedTurns : turns;
+
       const res = await authFetch('/api/podcast/synthesize-single-turn', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           turn,
+          allTurns: currentTurnList,
+          forceRephraseShorter: isShortening,
           host1Voice: host1VoicePayload,
           host2Voice: host2VoicePayload,
           speakers: extraSpeakers,
+          masterAudioMode: effectiveMode,
           totalVideoDurationSec: effectiveVideoDurationSec,
         }),
       });
@@ -1562,19 +1577,32 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   ...t,
                   text: data.turn.text || t.text,
                   fitStepApplied: data.turn.fitStepApplied,
+                  originalDurationSec: data.turn.originalDurationSec,
+                  dubbedDurationSec: data.turn.dubbedDurationSec,
+                  atempoApplied: data.turn.atempoApplied,
+                  rephraseAttempts: data.turn.rephraseAttempts,
+                  syncStatus: data.turn.syncStatus,
                 }
               : t
           )
         );
+
+        if (data.masterAudioBase64) {
+          setMasterAudioBase64(data.masterAudioBase64);
+          if (typeof data.totalDurationSeconds === 'number') {
+            setTotalDuration(data.totalDurationSeconds);
+          }
+          if (data.srtSubtitles) setSrtSubtitles(data.srtSubtitles);
+        }
 
         // Play the newly synthesized turn immediately
         if (data.turn.audioBase64) {
           playSingleTurn(turn.id, data.turn.audioBase64);
         }
 
-        // If all turns already have audioBase64, re-stitch master audio automatically
+        // If all turns already have audioBase64 and masterAudioBase64 wasn't returned yet, re-stitch master audio
         const allHaveAudio = updatedSynthesized.every((st) => Boolean(st.audioBase64));
-        if (allHaveAudio) {
+        if (allHaveAudio && !data.masterAudioBase64) {
           const stitchRes = await authFetch('/api/podcast/stitch-dialogue-turns', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1588,6 +1616,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
             const stitchData = await stitchRes.json();
             setMasterAudioBase64(stitchData.masterAudioBase64);
             setTotalDuration(stitchData.totalDurationSeconds || 0);
+            if (Array.isArray(stitchData.turns)) {
+              setSynthesizedTurns(stitchData.turns);
+            }
             if (stitchData.srtSubtitles) setSrtSubtitles(stitchData.srtSubtitles);
           }
         }
@@ -1596,6 +1627,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       setDialogueNotice(`Ошибка переозвучки: ${e.message}`);
     } finally {
       setResynthesizingTurnId(null);
+      setShorteningTurnId(null);
     }
   };
 
@@ -2107,14 +2139,33 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       role: speaker2Role,
     };
 
-    if (turns.length <= 12) {
+    // Enrich turns with gapAfterSec & nextTurnStartSec across the full timeline before batching
+    const enrichedTurns = turns.map((t, idx) => {
+      const nextStartSec =
+        idx + 1 < turns.length && typeof turns[idx + 1]?.startSec === 'number'
+          ? turns[idx + 1].startSec!
+          : effectiveVideoDurationSec > (t.endSec || 0)
+          ? effectiveVideoDurationSec
+          : t.endSec || 0;
+      const gapAfterSec =
+        typeof t.gapAfterSec === 'number' && t.gapAfterSec >= 0
+          ? t.gapAfterSec
+          : Math.max(0, Math.round((nextStartSec - (t.endSec || 0)) * 100) / 100);
+      return {
+        ...t,
+        gapAfterSec,
+        nextTurnStartSec: nextStartSec,
+      };
+    });
+
+    if (enrichedTurns.length <= 12) {
       try {
         const res = await authFetch('/api/podcast/synthesize-dialogue', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           signal: abortControllerRef.current.signal,
           body: JSON.stringify({
-            turns,
+            turns: enrichedTurns,
             host1Voice: host1VoicePayload,
             host2Voice: host2VoicePayload,
             speakers: extraSpeakers,
@@ -2138,7 +2189,27 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         const data = await res.json();
         setMasterAudioBase64(data.masterAudioBase64);
         setTotalDuration(data.totalDurationSeconds || 0);
-        setSynthesizedTurns(data.turns || []);
+        const resultTurns: DialogueTurn[] = data.turns || [];
+        setSynthesizedTurns(resultTurns);
+        if (resultTurns.length > 0) {
+          setTurns((prev) =>
+            prev.map((pt, i) => {
+              const matched = resultTurns.find((rt) => rt.id === pt.id) || resultTurns[i];
+              return matched
+                ? {
+                    ...pt,
+                    text: matched.text || pt.text,
+                    fitStepApplied: matched.fitStepApplied,
+                    originalDurationSec: matched.originalDurationSec,
+                    dubbedDurationSec: matched.dubbedDurationSec,
+                    atempoApplied: matched.atempoApplied,
+                    rephraseAttempts: matched.rephraseAttempts,
+                    syncStatus: matched.syncStatus,
+                  }
+                : pt;
+            })
+          );
+        }
         if (data.srtSubtitles) setSrtSubtitles(data.srtSubtitles);
         setIsPlaying(false);
         setActiveTurnIndex(-1);
@@ -2161,14 +2232,15 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     }
 
     const BATCH_SIZE = 8;
-    const totalBatches = Math.ceil(turns.length / BATCH_SIZE);
+    const totalBatches = Math.ceil(enrichedTurns.length / BATCH_SIZE);
     const accumulatedTurns: any[] = [];
+    let currentSpeakerPaceState: any = undefined;
 
     setBatchProgress({
       currentBatch: 1,
       totalBatches,
       completedTurns: 0,
-      totalTurns: turns.length,
+      totalTurns: enrichedTurns.length,
       percent: 0,
       statusText: `Запуск генерации по таймкодам (пакет 1/${totalBatches})...`,
     });
@@ -2178,15 +2250,15 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         if (abortControllerRef.current?.signal.aborted) break;
 
         const startIdx = b * BATCH_SIZE;
-        const endIdx = Math.min(turns.length, (b + 1) * BATCH_SIZE);
-        const batchTurns = turns.slice(startIdx, endIdx);
+        const endIdx = Math.min(enrichedTurns.length, (b + 1) * BATCH_SIZE);
+        const batchTurns = enrichedTurns.slice(startIdx, endIdx);
 
         setBatchProgress({
           currentBatch: b + 1,
           totalBatches,
           completedTurns: accumulatedTurns.length,
-          totalTurns: turns.length,
-          percent: Math.round((accumulatedTurns.length / turns.length) * 100),
+          totalTurns: enrichedTurns.length,
+          percent: Math.round((accumulatedTurns.length / enrichedTurns.length) * 100),
           statusText: `Озвучка пакета ${b + 1}/${totalBatches} (реплики ${startIdx + 1}–${endIdx})...`,
         });
 
@@ -2202,6 +2274,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
               body: JSON.stringify({
                 turns: batchTurns,
                 skipMasterStitch: true,
+                speakerPaceState: currentSpeakerPaceState,
                 host1Voice: host1VoicePayload,
                 host2Voice: host2VoicePayload,
                 speakers: extraSpeakers,
@@ -2228,6 +2301,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           throw new Error(`Ошибка в пакете ${b + 1}: ${lastErr?.message || 'сбой сети'}`);
         }
 
+        if (batchData.speakerPaceState) {
+          currentSpeakerPaceState = batchData.speakerPaceState;
+        }
+
         if (typeof batchData.creditsRemaining === 'number') {
           syncCredits(batchData.creditsRemaining);
         }
@@ -2243,7 +2320,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           currentBatch: totalBatches,
           totalBatches,
           completedTurns: accumulatedTurns.length,
-          totalTurns: turns.length,
+          totalTurns: enrichedTurns.length,
           percent: 98,
           statusText: `Сборка всех ${accumulatedTurns.length} реплик строго по таймкодам...`,
         });
@@ -2262,7 +2339,27 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           const stitchData = await stitchRes.json();
           setMasterAudioBase64(stitchData.masterAudioBase64);
           setTotalDuration(stitchData.totalDurationSeconds || 0);
-          setSynthesizedTurns(accumulatedTurns);
+          const finalTurns: DialogueTurn[] = Array.isArray(stitchData.turns)
+            ? stitchData.turns
+            : accumulatedTurns;
+          setSynthesizedTurns(finalTurns);
+          setTurns((prev) =>
+            prev.map((pt, i) => {
+              const matched = finalTurns.find((ft) => ft.id === pt.id) || finalTurns[i];
+              return matched
+                ? {
+                    ...pt,
+                    text: matched.text || pt.text,
+                    fitStepApplied: matched.fitStepApplied,
+                    originalDurationSec: matched.originalDurationSec,
+                    dubbedDurationSec: matched.dubbedDurationSec,
+                    atempoApplied: matched.atempoApplied,
+                    rephraseAttempts: matched.rephraseAttempts,
+                    syncStatus: matched.syncStatus,
+                  }
+                : pt;
+            })
+          );
           if (stitchData.srtSubtitles) setSrtSubtitles(stitchData.srtSubtitles);
           setIsPlaying(false);
           setActiveTurnIndex(-1);
@@ -3496,17 +3593,78 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           </span>
                         )}
 
-                        {(turn.fitStepApplied || synthTurn?.fitStepApplied) && (
-                          <span
-                            className="font-mono text-[10px] px-2 py-0.5 rounded-full bg-[#0E7C86]/10 text-[#0A5A62] border border-[#0E7C86]/30"
-                            title="Статус укладки в хронометраж таймкода"
-                          >
-                            ✓ {synthTurn?.fitStepApplied || turn.fitStepApplied}
-                          </span>
-                        )}
+                        {(() => {
+                          const effSyncStatus = synthTurn?.syncStatus || turn.syncStatus;
+                          const effOrigDur =
+                            synthTurn?.originalDurationSec ??
+                            turn.originalDurationSec ??
+                            turn.durationSec;
+                          const effDubDur =
+                            synthTurn?.dubbedDurationSec ??
+                            turn.dubbedDurationSec ??
+                            synthTurn?.durationSeconds;
+                          const effAtempo =
+                            synthTurn?.atempoApplied ?? turn.atempoApplied;
+                          const effRephrase =
+                            synthTurn?.rephraseAttempts ?? turn.rephraseAttempts;
+
+                          return (
+                            <>
+                              {effSyncStatus && (
+                                <span
+                                  className={`font-mono text-[10.5px] font-bold px-2.5 py-0.5 rounded-full border flex items-center gap-1 ${
+                                    effSyncStatus === 'ok'
+                                      ? 'bg-emerald-500/12 text-emerald-800 border-emerald-500/40'
+                                      : effSyncStatus === 'adjusted'
+                                      ? 'bg-amber-500/15 text-amber-900 border-amber-500/45'
+                                      : 'bg-rose-500/15 text-rose-800 border-rose-500/45'
+                                  }`}
+                                  title="Статус синхронизации реплики: ○ ok | 🟡 adjusted | ● overflow"
+                                >
+                                  <span>
+                                    {effSyncStatus === 'ok'
+                                      ? '○'
+                                      : effSyncStatus === 'adjusted'
+                                      ? '🟡'
+                                      : '●'}
+                                  </span>
+                                  <span>{effSyncStatus}</span>
+                                </span>
+                              )}
+
+                              {(typeof effOrigDur === 'number' || typeof effDubDur === 'number') && (
+                                <span
+                                  className="font-mono text-[10px] px-2 py-0.5 rounded-lg bg-[#FAF8F3] text-[#161511] border border-[rgba(22,21,17,0.14)]"
+                                  title="originalDurationSec → dubbedDurationSec"
+                                >
+                                  Окно: {typeof effOrigDur === 'number' ? `${effOrigDur}s` : '—'} → Дубляж:{' '}
+                                  {typeof effDubDur === 'number' ? `${effDubDur}s` : '—'}
+                                </span>
+                              )}
+
+                              {typeof effAtempo === 'number' && (
+                                <span
+                                  className="font-mono text-[10px] px-2 py-0.5 rounded-lg bg-[#0E7C86]/10 text-[#0A5A62] border border-[#0E7C86]/30"
+                                  title="Коэффициент ускорения atempo"
+                                >
+                                  atempo: {effAtempo}x
+                                </span>
+                              )}
+
+                              {typeof effRephrase === 'number' && (
+                                <span
+                                  className="font-mono text-[10px] px-2 py-0.5 rounded-lg bg-[#C4552D]/10 text-[#C4552D] border border-[#C4552D]/30"
+                                  title="Число перефразирований для укладки в таймкод"
+                                >
+                                  перефраз: {effRephrase}
+                                </span>
+                              )}
+                            </>
+                          );
+                        })()}
                       </div>
 
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex flex-wrap items-center gap-1.5">
                         {turnAudio && (
                           <button
                             type="button"
@@ -3518,11 +3676,51 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           </button>
                         )}
 
+                        {/* Button: "Короче" (rephrase single turn shorter & re-synthesize) */}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleResynthesizeSingleTurn(turn, { forceRephraseShorter: true })
+                          }
+                          disabled={
+                            shorteningTurnId === turn.id || isResynthesizingThis || isSynthesizing
+                          }
+                          className="btn-pill btn-ghost text-[10.5px] py-1 px-2.5 flex items-center gap-1 cursor-pointer border border-[#C4552D]/40 text-[#C4552D] hover:bg-[#C4552D] hover:text-white transition-all"
+                          title="Перефразировать эту реплику короче (сохранив все мысли) и переозвучить"
+                        >
+                          <Wand2
+                            className={`w-3 h-3 ${
+                              shorteningTurnId === turn.id ? 'animate-spin' : ''
+                            }`}
+                          />
+                          <span>{shorteningTurnId === turn.id ? 'Сокращение...' : 'Короче'}</span>
+                        </button>
+
+                        {/* Button: "Изменить" (focus/toggle editing for this turn) */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingTurnId((prev) => (prev === turn.id ? null : turn.id));
+                            const el = document.getElementById(`turn-textarea-${turn.id}`);
+                            if (el) el.focus();
+                          }}
+                          className={`btn-pill btn-ghost text-[10.5px] py-1 px-2.5 flex items-center gap-1 cursor-pointer border transition-all ${
+                            editingTurnId === turn.id
+                              ? 'bg-[#161511] text-white border-[#161511]'
+                              : 'border-[rgba(22,21,17,0.2)] text-[#161511] hover:bg-[#161511] hover:text-white'
+                          }`}
+                          title="Редактировать текст реплики вручную"
+                        >
+                          <span>{editingTurnId === turn.id ? 'Готово' : 'Изменить'}</span>
+                        </button>
+
                         {/* Single-Turn Re-Synthesis Button */}
                         <button
                           type="button"
                           onClick={() => handleResynthesizeSingleTurn(turn)}
-                          disabled={isResynthesizingThis || isSynthesizing}
+                          disabled={
+                            isResynthesizingThis || shorteningTurnId === turn.id || isSynthesizing
+                          }
                           className="btn-pill btn-ghost text-[10.5px] py-1 px-2.5 flex items-center gap-1 cursor-pointer border border-[#0E7C86]/35 text-[#0A5A62] hover:bg-[#0E7C86] hover:text-white transition-all"
                           title="Переозвучить только эту реплику и обновить мастер-дорожку"
                         >
@@ -3563,10 +3761,15 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                     )}
 
                     <textarea
-                      rows={2}
+                      id={`turn-textarea-${turn.id}`}
+                      rows={editingTurnId === turn.id ? 3 : 2}
                       value={turn.text}
                       onChange={(e) => updateTurnText(turn.id, e.target.value)}
-                      className="w-full bg-white border border-[rgba(22,21,17,0.14)] rounded-xl p-3 text-xs sm:text-sm text-[#161511] focus:outline-none focus:border-[#0E7C86] resize-none font-sans leading-relaxed shadow-2xs"
+                      className={`w-full bg-white border rounded-xl p-3 text-xs sm:text-sm text-[#161511] focus:outline-none resize-none font-sans leading-relaxed shadow-2xs transition-all ${
+                        editingTurnId === turn.id
+                          ? 'border-[#0E7C86] ring-2 ring-[#0E7C86]/20'
+                          : 'border-[rgba(22,21,17,0.14)] focus:border-[#0E7C86]'
+                      }`}
                       placeholder="Перевод реплики 1:1 на узбекском языке..."
                     />
 

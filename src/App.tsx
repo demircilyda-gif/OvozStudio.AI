@@ -21,6 +21,7 @@ import { PricingModal } from './components/PricingModal';
 import { LandingPage } from './components/LandingPage';
 import { DocsScreen } from './components/DocsScreen';
 import { AdminDashboardTab } from './components/AdminDashboardTab';
+import { TtsStudio } from './components/TtsStudio';
 import { useAuth } from './context/AuthContext';
 import { PODCAST_CATEGORIES } from './data/categories';
 import { PREBUILT_VOICE_PROFILES, USER_REPLICATED_VOICE, DEFAULT_USER_VOICE } from './data/voices';
@@ -58,6 +59,7 @@ export default function App() {
     if (typeof window !== 'undefined') {
       const h = window.location.hash;
       if (h === '#studio' || h === '#dialogue' || h === '#voiceover') return 'studio';
+      if (h === '#tts') return 'tts';
       if (h === '#agent') return 'agent';
       if (h === '#exclusive') return 'exclusive';
       if (h === '#cms') return 'cms';
@@ -90,6 +92,8 @@ export default function App() {
       } else if (h === '#voiceover') {
         setActiveTab('studio');
         setStudioMode('voiceover');
+      } else if (h === '#tts') {
+        setActiveTab('tts');
       } else if (h === '#agent') {
         setActiveTab('agent');
       } else if (h === '#exclusive') {
@@ -116,7 +120,8 @@ export default function App() {
       let targetHash = '#landing';
       if (activeTab === 'studio') {
         targetHash = studioMode === 'solo' ? '#studio' : studioMode === 'interview' ? '#dialogue' : '#voiceover';
-      } else if (activeTab === 'agent') targetHash = '#agent';
+      } else if (activeTab === 'tts') targetHash = '#tts';
+      else if (activeTab === 'agent') targetHash = '#agent';
       else if (activeTab === 'exclusive') targetHash = '#exclusive';
       else if (activeTab === 'cms') targetHash = '#cms';
       else if (activeTab === 'voices') targetHash = '#voices';
@@ -359,6 +364,7 @@ export default function App() {
     }
     if (activeTab === 'dialogue') return lang === 'uz' ? '2 OVOZLI INTERVYU' : 'ДИАЛОГ';
     if (activeTab === 'voiceover') return lang === 'uz' ? 'VIDEO DUBLYAJ' : 'ДУБЛЯЖ';
+    if (activeTab === 'tts') return lang === 'uz' ? 'TTS OVOZLASH' : 'TTS ОЗВУЧКА';
     if (activeTab === 'agent') return lang === 'uz' ? 'AI QOʻNGʻIROQ AGENTI' : 'ГОЛОСОВОЙ АГЕНТ';
     if (activeTab === 'exclusive') return lang === 'uz' ? 'EKSKLYUZIV VIP HUB' : 'ЭКСКЛЮЗИВ VIP';
     if (activeTab === 'cms') return lang === 'uz' ? 'MENING KUTUBXONAM' : 'МЕДИАТЕКА';
@@ -837,6 +843,42 @@ export default function App() {
                       lang={lang}
                     />
                   ) : null}
+
+                  {/* TAB: TTS OVOZLASH (Standard & AI Agent TTS) */}
+                  {activeTab === 'tts' && (
+                    <TtsStudio
+                      voices={voices}
+                      selectedVoiceId={selectedVoiceId}
+                      onSelectVoiceId={setSelectedVoiceId}
+                      onSaveToCMS={(item: any) => {
+                        const newCmsItem: CMSPodcastItem = {
+                          id: `tts-${Date.now()}`,
+                          title: item.title || 'TTS Ovozlash',
+                          category: item.category || 'TTS Ovozlash',
+                          description: item.description || item.title || 'TTS Ovozlash',
+                          tags: item.tags || ['TTS', 'Ovozlash'],
+                          status: 'published',
+                          episodeNumber: podcasts.length + 1,
+                          script: item.script,
+                          voiceName: item.voiceName || activeVoice.name,
+                          baseVoice: activeVoice.baseVoice,
+                          timbre: 'TTS Studio',
+                          tempo: item.tempo || '1.0x',
+                          style: item.style || 'Auto',
+                          ambientSound: 'none',
+                          ambientVolume: 0,
+                          durationSeconds: item.durationSeconds || 15,
+                          rawAudioWavBase64: item.rawAudioWavBase64,
+                          createdAt: new Date().toISOString(),
+                          ownerUid: user?.uid,
+                          ownerEmail: user?.email || '',
+                        };
+                        savePodcastToDb(newCmsItem);
+                        setAllPodcasts((prev) => [newCmsItem, ...prev]);
+                      }}
+                      lang={lang}
+                    />
+                  )}
 
                   {/* TAB: VOICE AGENT */}
                   {activeTab === 'agent' && (

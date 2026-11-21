@@ -30,8 +30,24 @@ import {
   muxDubbedAudioWithVideoFile,
   sanitizeDocumentedTtsTags,
   countSyllables,
+  rephraseTurnShorterViaLlm,
+  trimTrailingAndLeadingSilencePcm,
+  type TurnSyncStatus,
 } from "./server/services/verbatimStoryboardService.ts";
 import { DUBBING_MODELS_CONFIG } from "./server/config/dubbingModels.ts";
+import { TTS_MODELS_CONFIG } from "./server/config/ttsModels.ts";
+import { translateOrTransliterateTtsText } from "./server/services/tts/ttsTranslate.ts";
+import {
+  generateTtsAgentProposals,
+  refineTtsAgentProposal,
+} from "./server/services/tts/ttsAgent.ts";
+import {
+  synthesizeTtsOvozlash,
+  isTtsRequestCached,
+  getStoredTtsRecord,
+  markTtsRecordSavedToMediaLibrary,
+  cleanupExpiredTtsFiles,
+} from "./server/services/tts/ttsService.ts";
 
 const RUNTIME_ENV_KEYS = {
   API_KEY: (process.env.API_KEY || "").trim(),
@@ -576,6 +592,99 @@ function getShohruxReplicatedSampleBase64(): string | null {
  * - Modulates emotions (laughter, whisper, breath, tempo, volume) strictly via speechMetadata.style
  * - Performs linguistic and phonetic normalization for Uzbek text
  */
+const exhaustedTtsModelsUntil = new Map<string, number>();
+
+async function synthesizeViaGeminiLivePcm(
+  text: string,
+  voiceName: string,
+  effectiveStyle: string
+): Promise<{ pcm: Buffer; rawWav: Buffer }> {
+  const cleanText =
+    text
+      .replace(/<short\s+pause>/gi, ", ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim() || "...";
+
+  const liveModels = [
+    "gemini-3.8-live",
+    "gemini-3.1-flash-live-preview",
+    "gemini-2.5-flash-native-audio-latest",
+  ];
+
+  let lastLiveErr: any = null;
+  for (const liveModel of liveModels) {
+    try {
+      const pcm = await new Promise<Buffer>(async (resolve, reject) => {
+        const chunks: Buffer[] = [];
+        const timer = setTimeout(() => reject(new Error(`Live TTS timeout on ${liveModel}`)), 15000);
+        try {
+          const session = await ai.live.connect({
+            model: liveModel,
+            config: {
+              responseModalities: [Modality.AUDIO],
+              speechConfig: {
+                voiceConfig: { prebuiltVoiceConfig: { voiceName } },
+              },
+              systemInstruction: {
+                parts: [
+                  {
+                    text: `You are a professional native Uzbek dubbing actor. Read the exact Uzbek text provided by the user aloud verbatim. Never answer questions, never add words or greetings, never translate. Voice style: ${effectiveStyle || "Natural expressive Uzbek delivery"}.`,
+                  },
+                ],
+              },
+            },
+            callbacks: {
+              onmessage: (msg: any) => {
+                const parts = msg?.serverContent?.modelTurn?.parts || [];
+                for (const p of parts) {
+                  if (p?.inlineData?.data) {
+                    chunks.push(Buffer.from(p.inlineData.data, "base64"));
+                  }
+                }
+                if (msg?.serverContent?.turnComplete) {
+                  clearTimeout(timer);
+                  try {
+                    session.close();
+                  } catch {}
+                  resolve(Buffer.concat(chunks));
+                }
+              },
+              onerror: (err: any) => {
+                clearTimeout(timer);
+                try {
+                  session.close();
+                } catch {}
+                reject(err);
+              },
+            },
+          });
+
+          session.sendClientContent({
+            turns: [{ role: "user", parts: [{ text: cleanText }] }],
+            turnComplete: true,
+          });
+        } catch (err) {
+          clearTimeout(timer);
+          reject(err);
+        }
+      });
+
+      if (pcm && pcm.length > 0) {
+        const trimmedPcm = trimTrailingAndLeadingSilencePcm(pcm, 24000);
+        const finalPcm = trimmedPcm.length > 0 ? trimmedPcm : pcm;
+        return {
+          pcm: finalPcm,
+          rawWav: buildWavBuffer(finalPcm, 24000, 1, 16),
+        };
+      }
+    } catch (err: any) {
+      lastLiveErr = err;
+    }
+  }
+  throw lastLiveErr || new Error("All Gemini Live audio fallback models failed");
+}
+
 export async function generateGeminiSpeechPcm({
   text,
   voiceName,
@@ -654,9 +763,25 @@ export async function generateGeminiSpeechPcm({
   }
   const effectiveStyle = styleTokens.join(". ");
 
-  // Stage 1.4: Always use flagship gemini-3.8-flash-tts (never Lite)
-  const ttsModels = [DUBBING_MODELS_CONFIG.ttsDubbingModel];
-  const MAX_RETRIES = 3;
+  // 5-model TTS cascade with per-model daily quota (100 RPD) circuit breaker
+  const primaryModel = DUBBING_MODELS_CONFIG.ttsDubbingModel || "gemini-3.8-flash-tts";
+  const allCascadeModels = Array.from(
+    new Set([
+      primaryModel,
+      ...(DUBBING_MODELS_CONFIG.ttsQuotaFallbackModels || [
+        "gemini-3.8-flash-lite-tts",
+        "gemini-3.1-flash-tts-preview",
+        "gemini-2.5-pro-preview-tts",
+        "gemini-2.5-flash-preview-tts",
+      ]),
+    ])
+  );
+  const now = Date.now();
+  const activeModels = allCascadeModels.filter(
+    (m) => (exhaustedTtsModelsUntil.get(m) || 0) <= now
+  );
+  const ttsModels = activeModels.length > 0 ? activeModels : [];
+  const MAX_RETRIES = 2;
 
   const isApiKeyExpired = (err: any) => {
     const msg = (err?.message || "").toLowerCase();
@@ -668,8 +793,18 @@ export async function generateGeminiSpeechPcm({
     );
   };
 
+  const isDailyQuotaExhausted = (err: any) => {
+    const msg = (err?.message || "").toLowerCase();
+    return (
+      msg.includes("generate_requests_per_model_per_day") ||
+      msg.includes("per_model_per_day") ||
+      msg.includes("requests_per_day") ||
+      (msg.includes("quota exceeded") && msg.includes("limit: 100"))
+    );
+  };
+
   const isTransientError = (err: any) => {
-    if (isApiKeyExpired(err)) return false;
+    if (isApiKeyExpired(err) || isDailyQuotaExhausted(err)) return false;
     const msg = (err?.message || "").toLowerCase();
     const status = err?.status || err?.statusCode || err?.code;
     return (
@@ -693,7 +828,14 @@ export async function generateGeminiSpeechPcm({
 
   let lastError: any = null;
 
-  const payloadContents = [
+  const plainTtsText =
+    ttsText
+      .replace(/<short\s+pause>/gi, ", ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim() || "...";
+
+  const payloadWithSpeechMetadata = [
     {
       role: "user",
       parts: effectiveStyle
@@ -709,6 +851,16 @@ export async function generateGeminiSpeechPcm({
         : [{ text: ttsText }],
     },
   ];
+
+  const payloadPlainText = [
+    {
+      role: "user",
+      parts: [{ text: plainTtsText }],
+    },
+  ];
+
+  const modelSupportsSpeechMetadata = (modelName: string) =>
+    modelName === "gemini-3.8-flash-tts" || modelName === "gemini-3.8-flash-lite-tts";
 
   // Build candidate voiceConfigs
   const candidateVoiceConfigs: any[] = [];
@@ -749,18 +901,34 @@ export async function generateGeminiSpeechPcm({
       break;
     }
     const isCustomAttempt = Boolean(voiceCfg.voice || voiceCfg.replicatedVoiceConfig);
-    const modelsForAttempt = isCustomAttempt ? ["gemini-3.8-flash-tts"] : ttsModels;
+    const modelsForAttempt = isCustomAttempt
+      ? (exhaustedTtsModelsUntil.get("gemini-3.8-flash-tts") || 0) <= Date.now()
+        ? ["gemini-3.8-flash-tts"]
+        : []
+      : ttsModels;
 
     for (const model of modelsForAttempt) {
       if (lastError && isApiKeyExpired(lastError)) {
         break;
       }
+      if ((exhaustedTtsModelsUntil.get(model) || 0) > Date.now()) {
+        continue;
+      }
       const retriesForAttempt = isCustomAttempt ? 1 : MAX_RETRIES;
+      let forceReadAloudPrefix = false;
+
       for (let attempt = 0; attempt < retriesForAttempt; attempt++) {
         try {
+          const useMetadata = modelSupportsSpeechMetadata(model) && !forceReadAloudPrefix;
+          const activeContents = useMetadata
+            ? payloadWithSpeechMetadata
+            : forceReadAloudPrefix
+              ? [{ role: "user", parts: [{ text: `Read aloud verbatim in Uzbek: ${plainTtsText}` }] }]
+              : payloadPlainText;
+
           const response = await ai.models.generateContent({
             model,
-            contents: payloadContents,
+            contents: activeContents,
             config: {
               responseModalities: ["AUDIO"],
               speechConfig: {
@@ -782,22 +950,46 @@ export async function generateGeminiSpeechPcm({
           if (isApiKeyExpired(err)) {
             break;
           }
-          if (voiceCfg.voice && /no matching speaker|invalid_argument|not found|400/i.test(err?.message || "")) {
+          const errMsg = String(err?.message || "");
+          if (voiceCfg.voice && /no matching speaker|invalid_argument|not found|400/i.test(errMsg)) {
             unsupportedCustomVoiceIds.add(voiceCfg.voice);
             break;
           }
           if (voiceCfg.replicatedVoiceConfig) {
             break;
           }
+          if (isDailyQuotaExhausted(err)) {
+            exhaustedTtsModelsUntil.set(model, Date.now() + 60 * 60 * 1000);
+            console.warn(
+              `[TTS Quota Cascade] Daily quota (100 RPD) exhausted on ${model}; switching to next TTS model in cascade.`
+            );
+            break;
+          }
+          if (
+            /model tried to generate text|speech metadata is not supported/i.test(errMsg) &&
+            !forceReadAloudPrefix
+          ) {
+            forceReadAloudPrefix = true;
+            continue;
+          }
           const transient = isTransientError(err);
           if (transient && attempt < retriesForAttempt - 1) {
-            const delayMs = Math.round(1200 * Math.pow(1.8, attempt) + Math.random() * 300);
+            const delayMs = Math.round(900 * Math.pow(1.6, attempt) + Math.random() * 250);
             await new Promise((r) => setTimeout(r, delayMs));
             continue;
           }
           break;
         }
       }
+    }
+  }
+
+  // Ultimate fallback: if all generateContent TTS models hit daily 100 RPD quota, synthesize via Gemini Live Audio (bidiGenerateContent)
+  if (!lastError || !isApiKeyExpired(lastError)) {
+    try {
+      return await synthesizeViaGeminiLivePcm(plainTtsText, targetVoice, effectiveStyle);
+    } catch (liveErr: any) {
+      lastError = lastError || liveErr;
     }
   }
 
@@ -1167,10 +1359,11 @@ export const requireCreditBalance = (
       return next();
     }
 
-    const cost = Math.max(1, typeof costOrFn === "function" ? costOrFn(req) : costOrFn);
+    const rawCost = typeof costOrFn === "function" ? costOrFn(req) : costOrFn;
+    const cost = Math.max(0, Number.isFinite(rawCost) ? rawCost : 1);
     const balance = await getUserBalance(uid, userEmail);
 
-    if (balance < cost) {
+    if (cost > 0 && balance < cost) {
       return res.status(402).json({
         error: "insufficient_credits",
         message: `Kreditingiz yetarli emas (Mavjud: ${balance}, Talab qilinadi: ${cost}). Iltimos, hisobingizni to'ldiring.`,
@@ -1183,7 +1376,10 @@ export const requireCreditBalance = (
     (req as any).userBalance = balance;
     (req as any).requiredCreditCost = cost;
     (req as any).deductCredits = async (actualCost?: number) => {
-      const toDeduct = typeof actualCost === "number" ? actualCost : cost;
+      const toDeduct = Math.max(0, typeof actualCost === "number" ? actualCost : cost);
+      if (toDeduct === 0) {
+        return getUserBalance(uid, userEmail);
+      }
       const deductRes = await deductUserCredits(uid, userEmail, toDeduct);
       return deductRes.remaining;
     };
@@ -5459,13 +5655,19 @@ function resolveSpeakerVoiceProfile(
 }
 
 /**
- * Stage 1.3: Duration & Tempo Fitting for a single turn:
- * - Synthesizes the full Uzbek text with flagship `gemini-3.8-flash-tts` (NEVER truncates or shortens text, and NEVER re-synthesizes with "fast_tts").
- * - If synthesized audio exceeds the turn's time window (`windowSec`), applies pitch-preserving ffmpeg `atempo` strictly capped at `<= 1.10` (`DUBBING_MODELS_CONFIG.maxAtempoSpeedRatio`).
- * - Any remaining audio tail naturally spills into the silent pause before the next turn's `startSec`.
+ * Step 4: Real-Audio Duration Verification & Rephrasing Cascade for a single turn:
+ * - Synthesizes the Uzbek text with flagship `gemini-3.8-flash-tts` and trims dead leading/trailing TTS padding silence.
+ * - Computes `available = windowSec + gapAfterSec - 0.05`.
+ * - If `duration / 1.10 > available`, calls `rephraseTurnShorterViaLlm` (translation model, thinking HIGH):
+ *   "Скажи то же самое короче, до N слогов, сохранив все мысли, ничего не добавляя" where `N = floor(available * measuredPace)`
+ *   and re-synthesizes (maximum 2 attempts).
+ * - Applies mild `atempo` up to 1.10 (`DUBBING_MODELS_CONFIG.maxAtempoSpeedRatio`) if needed.
  */
 async function synthesizeTurnWithDurationCascade({
   turn,
+  gapAfterSec = 0,
+  measuredPace = DUBBING_MODELS_CONFIG.PACE || 5.0,
+  forceRephraseShorter = false,
   voiceId,
   baseVoice,
   speakerName,
@@ -5473,6 +5675,9 @@ async function synthesizeTurnWithDurationCascade({
   strictTimeWindow,
 }: {
   turn: any;
+  gapAfterSec?: number;
+  measuredPace?: number;
+  forceRephraseShorter?: boolean;
   voiceId: string;
   baseVoice: string;
   speakerName: string;
@@ -5480,12 +5685,20 @@ async function synthesizeTurnWithDurationCascade({
   strictTimeWindow: boolean;
 }): Promise<{
   pcm: Buffer;
+  rawUnstretchedPcm: Buffer;
   rawWav: Buffer;
   finalText: string;
   fitStepApplied: string;
+  originalDurationSec: number;
+  dubbedDurationSec: number;
+  atempoApplied: number;
+  rephraseAttempts: number;
+  syncStatus: TurnSyncStatus;
+  unscaledSyllables: number;
+  unscaledDurationSec: number;
   failed: boolean;
 }> {
-  const activeText = String(turn.text || "").trim() || "...";
+  let activeText = String(turn.text || "").trim() || "...";
   const hasValidWindow =
     strictTimeWindow &&
     typeof turn.startSec === "number" &&
@@ -5493,36 +5706,149 @@ async function synthesizeTurnWithDurationCascade({
     turn.endSec > turn.startSec;
 
   const windowSec = hasValidWindow
-    ? Math.max(0.8, turn.endSec - turn.startSec)
+    ? Math.round(Math.max(0.8, turn.endSec - turn.startSec) * 100) / 100
+    : 0;
+  const safeGapAfterSec =
+    typeof gapAfterSec === "number" && gapAfterSec >= 0
+      ? gapAfterSec
+      : typeof turn.gapAfterSec === "number" && turn.gapAfterSec >= 0
+      ? turn.gapAfterSec
+      : 0;
+  const available = hasValidWindow
+    ? Math.max(0.5, Math.round((windowSec + safeGapAfterSec - 0.05) * 100) / 100)
     : 0;
 
-  try {
-    const synthRes = await generateGeminiSpeechPcm({
-      text: activeText,
-      voiceName: baseVoice,
-      voiceId,
-      speechStyle: combinedTurnStyle,
-      speakerName,
-    });
-    let pcm = synthRes.pcm;
-    const actualSec = pcm.length / 48000;
-    let fitStepApplied = "original";
+  let rephraseAttempts = Number(turn.rephraseAttempts) || 0;
+  const maxAtempo = DUBBING_MODELS_CONFIG.maxAtempoSpeedRatio || 1.1;
+  const effectivePace =
+    typeof measuredPace === "number" && measuredPace > 1.5 && measuredPace < 10
+      ? measuredPace
+      : DUBBING_MODELS_CONFIG.PACE || 5.0;
 
-    const maxAtempo = DUBBING_MODELS_CONFIG.maxAtempoSpeedRatio || 1.1;
-    if (hasValidWindow && actualSec > windowSec + 0.08) {
-      const neededRatio = Math.min(maxAtempo, actualSec / windowSec);
-      if (neededRatio > 1.01) {
-        pcm = await applyMildAtempoPcm(pcm, neededRatio, 24000);
-        fitStepApplied = `atempo_${neededRatio.toFixed(2)}x`;
+  try {
+    // Optional explicit "Короче" button trigger from UI
+    if (forceRephraseShorter) {
+      const currentSyl = countSyllables(activeText);
+      const targetForButton =
+        available > 0
+          ? Math.min(Math.max(4, currentSyl - 2), Math.max(4, Math.floor(available * effectivePace * 0.88)))
+          : Math.max(4, Math.floor(currentSyl * 0.8));
+      activeText = await rephraseTurnShorterViaLlm(ai, {
+        originalTextRu: turn.originalTextRu || turn.originalText || activeText,
+        currentUzbekText: activeText,
+        targetMaxSyllables: targetForButton,
+        speakerGender: turn.speakerGender,
+        emotion: turn.intonationRu || turn.emotion,
+        inlineTags: turn.inlineTags,
+      });
+      rephraseAttempts += 1;
+    }
+
+    const synthesizeCleanPcm = async (txt: string): Promise<Buffer> => {
+      const res = await generateGeminiSpeechPcm({
+        text: txt,
+        voiceName: baseVoice,
+        voiceId,
+        speechStyle: combinedTurnStyle,
+        speakerName,
+      });
+      return trimTrailingAndLeadingSilencePcm(res.pcm, 24000);
+    };
+
+    let rawUnstretchedPcm = await synthesizeCleanPcm(activeText);
+    let rawDurationSec = rawUnstretchedPcm.length / 48000;
+
+    // Step 4: Check against real synthesized audio duration:
+    // if duration / 1.10 > available -> rephrase up to 2 attempts with thinking HIGH and re-synthesize
+    let autoAttemptsThisCall = 0;
+    while (
+      hasValidWindow &&
+      rawDurationSec / maxAtempo > available &&
+      autoAttemptsThisCall < 2
+    ) {
+      autoAttemptsThisCall += 1;
+      rephraseAttempts += 1;
+
+      const currentSyl = countSyllables(activeText);
+      const rawN = Math.floor(available * effectivePace * (autoAttemptsThisCall === 1 ? 1.0 : 0.85));
+      const N = Math.max(4, Math.min(currentSyl - 2, rawN));
+
+      const shorterUz = await rephraseTurnShorterViaLlm(ai, {
+        originalTextRu: turn.originalTextRu || turn.originalText || activeText,
+        currentUzbekText: activeText,
+        targetMaxSyllables: N,
+        speakerGender: turn.speakerGender,
+        emotion: turn.intonationRu || turn.emotion,
+        inlineTags: turn.inlineTags,
+      });
+
+      if (shorterUz && shorterUz.trim() && shorterUz.trim() !== activeText.trim()) {
+        activeText = shorterUz.trim();
+        rawUnstretchedPcm = await synthesizeCleanPcm(activeText);
+        rawDurationSec = rawUnstretchedPcm.length / 48000;
+      } else {
+        break;
       }
+    }
+
+    const unscaledSyllables = countSyllables(activeText);
+    const unscaledDurationSec = Math.max(0.2, rawDurationSec);
+
+    let pcm = rawUnstretchedPcm;
+    let atempoApplied = 1.0;
+    let fitStepApplied = rephraseAttempts > 0 ? `rephrased_${rephraseAttempts}x` : "original";
+
+    if (hasValidWindow && rawDurationSec > available) {
+      const neededRatio = Math.min(maxAtempo, rawDurationSec / available);
+      if (neededRatio > 1.008) {
+        pcm = await applyMildAtempoPcm(rawUnstretchedPcm, neededRatio, 24000, maxAtempo);
+        atempoApplied = Math.round(neededRatio * 100) / 100;
+        fitStepApplied =
+          rephraseAttempts > 0
+            ? `rephrased_${rephraseAttempts}x+atempo_${atempoApplied}x`
+            : `atempo_${atempoApplied}x`;
+      }
+    } else if (
+      hasValidWindow &&
+      rawDurationSec > windowSec + Math.min(safeGapAfterSec * 0.7, Math.max(0, safeGapAfterSec - 0.05))
+    ) {
+      const comfortTarget =
+        windowSec + Math.min(safeGapAfterSec * 0.7, Math.max(0, safeGapAfterSec - 0.05));
+      const neededRatio = Math.min(maxAtempo, rawDurationSec / Math.max(0.5, comfortTarget));
+      if (neededRatio > 1.008) {
+        pcm = await applyMildAtempoPcm(rawUnstretchedPcm, neededRatio, 24000, maxAtempo);
+        atempoApplied = Math.round(neededRatio * 100) / 100;
+        fitStepApplied =
+          rephraseAttempts > 0
+            ? `rephrased_${rephraseAttempts}x+atempo_${atempoApplied}x`
+            : `atempo_${atempoApplied}x`;
+      }
+    }
+
+    const dubbedDurationSec = Math.round((pcm.length / 48000) * 100) / 100;
+    const originalDurationSec = hasValidWindow ? windowSec : dubbedDurationSec;
+
+    let syncStatus: TurnSyncStatus = "ok";
+    if (hasValidWindow && dubbedDurationSec > available + 0.32) {
+      syncStatus = "overflow";
+    } else if (rephraseAttempts > 0 || atempoApplied > 1.01) {
+      syncStatus = "adjusted";
     }
 
     const finalWav = buildWavBuffer(pcm, 24000, 1, 16);
     return {
       pcm,
+      rawUnstretchedPcm,
       rawWav: finalWav,
       finalText: activeText,
       fitStepApplied,
+      originalDurationSec,
+      dubbedDurationSec,
+      atempoApplied,
+      rephraseAttempts,
+      syncStatus,
+      unscaledSyllables,
+      unscaledDurationSec,
       failed: false,
     };
   } catch (err: any) {
@@ -5530,9 +5856,17 @@ async function synthesizeTurnWithDurationCascade({
     const fallbackPcm = Buffer.alloc(24000); // 0.5s silence
     return {
       pcm: fallbackPcm,
+      rawUnstretchedPcm: fallbackPcm,
       rawWav: buildWavBuffer(fallbackPcm, 24000, 1, 16),
       finalText: activeText,
       fitStepApplied: "failed",
+      originalDurationSec: windowSec || 0.5,
+      dubbedDurationSec: 0.5,
+      atempoApplied: 1.0,
+      rephraseAttempts,
+      syncStatus: "overflow",
+      unscaledSyllables: countSyllables(activeText),
+      unscaledDurationSec: 0.5,
       failed: true,
     };
   }
@@ -5657,8 +5991,11 @@ app.post(
           };
         });
 
-        // Stage 1.4: Use ONLY DUBBING_MODELS_CONFIG.ttsDubbingModel (gemini-3.8-flash-tts, never Lite)
-        for (const modelCandidate of [DUBBING_MODELS_CONFIG.ttsDubbingModel]) {
+        const multiSpeakerCandidates = [
+          DUBBING_MODELS_CONFIG.ttsDubbingModel,
+          DUBBING_MODELS_CONFIG.ttsQuotaFallbackModel || "gemini-3.8-flash-lite-tts",
+        ].filter((m) => (exhaustedTtsModelsUntil.get(m) || 0) <= Date.now());
+        for (const modelCandidate of multiSpeakerCandidates) {
           try {
             const multiResponse = await ai.models.generateContent({
               model: modelCandidate,
@@ -5766,14 +6103,68 @@ app.post(
         }
       }
 
-      // Per-Turn Synthesis with N-speaker support, Cloned Voice support, conversational context, and mild atempo <= 1.10
-      const processedTurnResults = await mapConcurrent(turns, 2, async (turn: any, i: number) => {
+      // Track measuredPace per speaker (Item 4: average syllables/sec across already synthesized turns of this speaker;
+      // use PACE=5.0 until the speaker has at least 3 synthesized turns)
+      const speakerPaceStats = new Map<
+        string,
+        { count: number; totalSyllables: number; totalSec: number }
+      >();
+      if (req.body?.speakerPaceState && typeof req.body.speakerPaceState === "object") {
+        for (const [spId, st] of Object.entries(req.body.speakerPaceState as Record<string, any>)) {
+          if (st && typeof st.count === "number") {
+            speakerPaceStats.set(spId, {
+              count: Number(st.count) || 0,
+              totalSyllables: Number(st.totalSyllables) || 0,
+              totalSec: Number(st.totalSec) || 0,
+            });
+          }
+        }
+      }
+
+      const getMeasuredPaceForSpeaker = (spId: string): number => {
+        const stat = speakerPaceStats.get(spId);
+        if (!stat || stat.count < 3 || stat.totalSec <= 0.5) {
+          return DUBBING_MODELS_CONFIG.PACE || 5.0;
+        }
+        const avg = stat.totalSyllables / stat.totalSec;
+        return Math.max(3.5, Math.min(7.5, Math.round(avg * 100) / 100));
+      };
+
+      const recordSpeakerPace = (spId: string, syllables: number, durationSec: number) => {
+        if (syllables <= 0 || durationSec <= 0.2) return;
+        const prev = speakerPaceStats.get(spId) || { count: 0, totalSyllables: 0, totalSec: 0 };
+        speakerPaceStats.set(spId, {
+          count: prev.count + 1,
+          totalSyllables: prev.totalSyllables + syllables,
+          totalSec: prev.totalSec + durationSec,
+        });
+      };
+
+      // Per-Turn Synthesis with real-audio duration check, speaker measuredPace, and up to 2 rephrase attempts
+      const processedTurnResults: Array<{
+        turn: any;
+        speakerName: string;
+        turnPcm: Buffer;
+        rawUnstretchedPcm: Buffer;
+        turnWavRaw: Buffer;
+        turnFailed: boolean;
+        fitStepApplied: string;
+        originalDurationSec: number;
+        dubbedDurationSec: number;
+        atempoApplied: number;
+        rephraseAttempts: number;
+        syncStatus: TurnSyncStatus;
+      }> = [];
+
+      for (let i = 0; i < turns.length; i++) {
+        const turn = turns[i];
         if (i > 0) {
-          await new Promise((r) => setTimeout(r, 180));
+          await new Promise((r) => setTimeout(r, 120));
         }
 
+        const speakerKey = turn.speakerId || "HOST_1";
         const resolved = resolveSpeakerVoiceProfile(
-          turn.speakerId || "HOST_1",
+          speakerKey,
           turn,
           host1Voice,
           host2Voice,
@@ -5798,8 +6189,25 @@ app.post(
           .filter(Boolean)
           .join(". ");
 
+        const nextStartSec =
+          typeof turn.nextTurnStartSec === "number"
+            ? turn.nextTurnStartSec
+            : i + 1 < turns.length && typeof turns[i + 1]?.startSec === "number"
+            ? turns[i + 1].startSec
+            : resolvedTotalVideoDurationSec && resolvedTotalVideoDurationSec > (turn.endSec || 0)
+            ? resolvedTotalVideoDurationSec
+            : turn.endSec || 0;
+        const gapAfterSec =
+          typeof turn.gapAfterSec === "number" && turn.gapAfterSec >= 0
+            ? turn.gapAfterSec
+            : Math.max(0, Math.round((nextStartSec - (turn.endSec || 0)) * 100) / 100);
+
+        const measuredPace = getMeasuredPaceForSpeaker(speakerKey);
+
         const cascadeResult = await synthesizeTurnWithDurationCascade({
           turn,
+          gapAfterSec,
+          measuredPace,
           voiceId: resolved.voiceId,
           baseVoice: resolved.baseVoice,
           speakerName: resolved.speakerName,
@@ -5807,18 +6215,33 @@ app.post(
           strictTimeWindow: isTimeAlignedMode,
         });
 
-        return {
+        if (!cascadeResult.failed) {
+          recordSpeakerPace(
+            speakerKey,
+            cascadeResult.unscaledSyllables,
+            cascadeResult.unscaledDurationSec
+          );
+        }
+
+        processedTurnResults.push({
           turn: {
             ...turn,
             text: cascadeResult.finalText,
+            gapAfterSec,
           },
           speakerName: resolved.speakerName,
           turnPcm: cascadeResult.pcm,
+          rawUnstretchedPcm: cascadeResult.rawUnstretchedPcm,
           turnWavRaw: cascadeResult.rawWav,
           turnFailed: cascadeResult.failed,
           fitStepApplied: cascadeResult.fitStepApplied,
-        };
-      });
+          originalDurationSec: cascadeResult.originalDurationSec,
+          dubbedDurationSec: cascadeResult.dubbedDurationSec,
+          atempoApplied: cascadeResult.atempoApplied,
+          rephraseAttempts: cascadeResult.rephraseAttempts,
+          syncStatus: cascadeResult.syncStatus,
+        });
+      }
 
       const failedTurns: number[] = [];
       processedTurnResults.forEach((r, idx) => {
@@ -5839,9 +6262,9 @@ app.post(
 
       if (isTimeAlignedMode) {
         if (req.body?.skipMasterStitch) {
-          // Batch mode: return individual synthesized turns preserving their exact startSec & endSec
+          // Batch mode: return individual synthesized turns preserving their exact startSec, endSec & Step 6 metrics
           processedTurnResults.forEach((r, idx) => {
-            const actualDur = Math.round((r.turnPcm.length / 48000) * 100) / 100;
+            const actualDur = r.dubbedDurationSec;
             const finalTurnWav = r.turnWavRaw || buildWavBuffer(r.turnPcm, 24000, 1, 16);
             synthesizedTurns.push({
               ...r.turn,
@@ -5849,6 +6272,11 @@ app.post(
               speakerName: r.turn.speakerName || r.speakerName,
               audioBase64: finalTurnWav.toString("base64"),
               durationSeconds: actualDur,
+              originalDurationSec: r.originalDurationSec,
+              dubbedDurationSec: r.dubbedDurationSec,
+              atempoApplied: r.atempoApplied,
+              rephraseAttempts: r.rephraseAttempts,
+              syncStatus: r.syncStatus,
               startTime: r.turn.startSec,
               endTime: Math.round((r.turn.startSec + actualDur) * 100) / 100,
               fitStepApplied: r.fitStepApplied,
@@ -5856,8 +6284,8 @@ app.post(
             });
           });
         } else {
-          // Strict Timecode Assembly: places every turn at its exact startSec without clamping "Без слов" musical intervals
-          const assembled = assembleStrictTimecodeMasterPcm(
+          // Strict Timecode Assembly (Step 5: never truncates mid-sound, applies up to 1.15x atempo + <=0.3s shift or 120ms fade-out overflow)
+          const assembled = await assembleStrictTimecodeMasterPcm(
             processedTurnResults.map((r) => ({
               startSec: r.turn.startSec,
               endSec:
@@ -5865,6 +6293,9 @@ app.post(
                   ? r.turn.endSec
                   : r.turn.startSec + r.turnPcm.length / 48000,
               pcm: r.turnPcm,
+              rawUnstretchedPcm: r.rawUnstretchedPcm,
+              atempoApplied: r.atempoApplied,
+              rephraseAttempts: r.rephraseAttempts,
             })),
             resolvedTotalVideoDurationSec,
             24000
@@ -5876,13 +6307,18 @@ app.post(
 
           processedTurnResults.forEach((r, idx) => {
             const placement = assembled.actualPlacements[idx];
-            const finalTurnWav = r.turnWavRaw || buildWavBuffer(r.turnPcm, 24000, 1, 16);
+            const finalTurnWav = buildWavBuffer(placement.pcm, 24000, 1, 16);
             synthesizedTurns.push({
               ...r.turn,
               id: r.turn.id || `turn-${idx}`,
               speakerName: r.turn.speakerName || r.speakerName,
               audioBase64: finalTurnWav.toString("base64"),
-              durationSeconds: placement.durationSec,
+              durationSeconds: placement.dubbedDurationSec,
+              originalDurationSec: placement.originalDurationSec,
+              dubbedDurationSec: placement.dubbedDurationSec,
+              atempoApplied: placement.atempoApplied,
+              rephraseAttempts: placement.rephraseAttempts,
+              syncStatus: placement.syncStatus,
               startTime: placement.startSec,
               endTime: placement.endSec,
               fitStepApplied: r.fitStepApplied,
@@ -5898,8 +6334,8 @@ app.post(
         let currentMasterTime = 0;
 
         for (let i = 0; i < processedTurnResults.length; i++) {
-          const { turn, speakerName, turnPcm, turnWavRaw, turnFailed, fitStepApplied } =
-            processedTurnResults[i];
+          const r = processedTurnResults[i];
+          const { turn, speakerName, turnPcm, turnWavRaw, turnFailed, fitStepApplied } = r;
           const turnDuration = Math.max(0.5, Math.round((turnPcm.length / 48000) * 10) / 10);
           const turnStartTime = currentMasterTime;
           const turnEndTime = currentMasterTime + turnDuration;
@@ -5915,6 +6351,11 @@ app.post(
             speakerName: turn.speakerName || speakerName,
             audioBase64: finalTurnWav.toString("base64"),
             durationSeconds: turnDuration,
+            originalDurationSec: r.originalDurationSec,
+            dubbedDurationSec: r.dubbedDurationSec,
+            atempoApplied: r.atempoApplied,
+            rephraseAttempts: r.rephraseAttempts,
+            syncStatus: r.syncStatus,
             startTime: turnStartTime,
             endTime: turnEndTime,
             fitStepApplied,
@@ -5941,11 +6382,20 @@ app.post(
         } catch {}
       }
 
+      const serializedSpeakerPaceState: Record<
+        string,
+        { count: number; totalSyllables: number; totalSec: number }
+      > = {};
+      speakerPaceStats.forEach((v, k) => {
+        serializedSpeakerPaceState[k] = v;
+      });
+
       res.json({
         masterAudioBase64: masterAudioBase64 || undefined,
         totalDurationSeconds: totalDuration || undefined,
         totalVideoDurationSec: totalDuration || resolvedTotalVideoDurationSec,
         turns: synthesizedTurns,
+        speakerPaceState: serializedSpeakerPaceState,
         srtSubtitles: generateSrtFromTurns(synthesizedTurns),
         failedTurns: failedTurns.length > 0 ? failedTurns : undefined,
         creditsRemaining,
@@ -6018,18 +6468,37 @@ app.post("/api/podcast/stitch-dialogue-turns", requireCreditBalance(1), async (r
       };
     });
 
+    let updatedTurnsWithPlacement = turns;
+
     if (isTimeAligned) {
-      const assembled = assembleStrictTimecodeMasterPcm(
+      const assembled = await assembleStrictTimecodeMasterPcm(
         extractedTurns.map((et) => ({
           startSec: et.startSec,
           endSec: et.endSec,
           pcm: et.pcm,
+          atempoApplied: et.turn.atempoApplied,
+          rephraseAttempts: et.turn.rephraseAttempts,
         })),
         resolvedTotalVideoDurationSec,
         24000
       );
       totalPcm = assembled.masterPcm;
       totalDurationSeconds = assembled.totalDurationSec;
+
+      updatedTurnsWithPlacement = extractedTurns.map((et, idx) => {
+        const placement = assembled.actualPlacements[idx];
+        return {
+          ...et.turn,
+          durationSeconds: placement.dubbedDurationSec,
+          originalDurationSec: placement.originalDurationSec,
+          dubbedDurationSec: placement.dubbedDurationSec,
+          atempoApplied: placement.atempoApplied,
+          rephraseAttempts: placement.rephraseAttempts,
+          syncStatus: placement.syncStatus,
+          startTime: placement.startSec,
+          endTime: placement.endSec,
+        };
+      });
     } else {
       const DIALOGUE_PAUSE_SECONDS = 0.35;
       const pauseBuffer = Buffer.alloc(Math.round(24000 * 2 * DIALOGUE_PAUSE_SECONDS));
@@ -6043,7 +6512,7 @@ app.post("/api/podcast/stitch-dialogue-turns", requireCreditBalance(1), async (r
     }
 
     const masterWavBuffer = buildWavBuffer(totalPcm, 24000, 1, 16);
-    const srtSubtitles = generateSrtFromTurns(turns);
+    const srtSubtitles = generateSrtFromTurns(updatedTurnsWithPlacement);
 
     let creditsRemaining = (req as any).userBalance;
     if (typeof (req as any).deductCredits === "function") {
@@ -6057,6 +6526,7 @@ app.post("/api/podcast/stitch-dialogue-turns", requireCreditBalance(1), async (r
       masterAudioBase64: masterWavBuffer.toString("base64"),
       totalDurationSeconds,
       totalVideoDurationSec: totalDurationSeconds,
+      turns: updatedTurnsWithPlacement,
       srtSubtitles,
       totalTurnsStitched: turns.length,
       creditsRemaining,
@@ -6122,6 +6592,8 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
       masterAudioMode = "time_aligned",
       totalVideoDurationSec,
       totalTimelineSec,
+      forceRephraseShorter = false,
+      measuredPace,
     } = req.body;
 
     const resolvedTotalVideoDurationSec =
@@ -6159,8 +6631,27 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
       .filter(Boolean)
       .join(". ");
 
+    let computedGapAfterSec = typeof turn.gapAfterSec === "number" ? turn.gapAfterSec : 0;
+    if (Array.isArray(allTurns) && allTurns.length > 0) {
+      const idxInAll = allTurns.findIndex((t: any) => t.id === turn.id);
+      if (idxInAll !== -1 && idxInAll + 1 < allTurns.length && typeof allTurns[idxInAll + 1]?.startSec === "number") {
+        computedGapAfterSec = Math.max(
+          0,
+          Math.round((allTurns[idxInAll + 1].startSec - (turn.endSec || 0)) * 100) / 100
+        );
+      } else if (idxInAll === allTurns.length - 1 && resolvedTotalVideoDurationSec) {
+        computedGapAfterSec = Math.max(
+          0,
+          Math.round((resolvedTotalVideoDurationSec - (turn.endSec || 0)) * 100) / 100
+        );
+      }
+    }
+
     const cascadeResult = await synthesizeTurnWithDurationCascade({
       turn,
+      gapAfterSec: computedGapAfterSec,
+      measuredPace: Number(measuredPace) || DUBBING_MODELS_CONFIG.PACE || 5.0,
+      forceRephraseShorter: Boolean(forceRephraseShorter),
       voiceId: resolved.voiceId,
       baseVoice: resolved.baseVoice,
       speakerName: resolved.speakerName,
@@ -6172,16 +6663,18 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
       return res.status(502).json({ error: "Не удалось переозвучить выбранную реплику." });
     }
 
-    const updatedTurnDuration = Math.max(
-      0.4,
-      Math.round((cascadeResult.pcm.length / 48000) * 100) / 100
-    );
-    const updatedTurn = {
+    let updatedTurn = {
       ...turn,
       text: cascadeResult.finalText,
+      actualSyllables: countSyllables(cascadeResult.finalText),
       speakerName: turn.speakerName || resolved.speakerName,
       audioBase64: cascadeResult.rawWav.toString("base64"),
-      durationSeconds: updatedTurnDuration,
+      durationSeconds: cascadeResult.dubbedDurationSec,
+      originalDurationSec: cascadeResult.originalDurationSec,
+      dubbedDurationSec: cascadeResult.dubbedDurationSec,
+      atempoApplied: cascadeResult.atempoApplied,
+      rephraseAttempts: cascadeResult.rephraseAttempts,
+      syncStatus: cascadeResult.syncStatus,
       fitStepApplied: cascadeResult.fitStepApplied,
       synthesisFailed: false,
     };
@@ -6218,15 +6711,31 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
                 ? t.endSec
                 : (t.startSec || 0) + pcmBuf.length / 48000,
             pcm: pcmBuf,
+            atempoApplied: t.atempoApplied,
+            rephraseAttempts: t.rephraseAttempts,
           };
         });
-        const assembled = assembleStrictTimecodeMasterPcm(
+        const assembled = await assembleStrictTimecodeMasterPcm(
           turnsWithPcm,
           resolvedTotalVideoDurationSec,
           24000
         );
         masterAudioBase64 = buildWavBuffer(assembled.masterPcm, 24000, 1, 16).toString("base64");
         totalDurationSeconds = assembled.totalDurationSec;
+
+        const targetIdx = mergedTurns.findIndex((t: any) => t.id === updatedTurn.id);
+        if (targetIdx !== -1 && assembled.actualPlacements[targetIdx]) {
+          const pl = assembled.actualPlacements[targetIdx];
+          updatedTurn = {
+            ...updatedTurn,
+            durationSeconds: pl.dubbedDurationSec,
+            originalDurationSec: pl.originalDurationSec,
+            dubbedDurationSec: pl.dubbedDurationSec,
+            atempoApplied: pl.atempoApplied,
+            rephraseAttempts: pl.rephraseAttempts,
+            syncStatus: pl.syncStatus,
+          };
+        }
       }
       srtSubtitles = generateSrtFromTurns(mergedTurns);
     }
@@ -8587,6 +9096,394 @@ Qoidalar:
       .json({
         error: error.message || "Hujjatni tahlil qilishda xatolik yuz berdi",
       });
+  }
+});
+
+// =============================================================
+// Вкладка «TTS Ovozlash» (Обычный режим и AI Агент) — Раздел 5
+// =============================================================
+const ttsAgentRefineCountByUid = new Map<string, number>();
+
+// 1. POST /api/tts/translate — Перевод или транслитерация до озвучки (0 кредитов)
+app.post(
+  "/api/tts/translate",
+  requireAuth,
+  requireCreditBalance(0),
+  generationLimiter,
+  async (req, res) => {
+    try {
+      const { text = "", targetLanguage = "uz" } = req.body || {};
+      const cleanText = String(text || "").trim();
+      if (!cleanText) {
+        return res.status(400).json({ error: "Matn bo'sh bo'lmasligi kerak" });
+      }
+      if (cleanText.length > TTS_MODELS_CONFIG.maxTextChars) {
+        return res.status(400).json({
+          error: `Максимальная длина текста — ${TTS_MODELS_CONFIG.maxTextChars} знаков.`,
+        });
+      }
+
+      const validLang = ["uz", "ru", "en"].includes(targetLanguage) ? targetLanguage : "uz";
+      const result = await translateOrTransliterateTtsText(ai, {
+        text: cleanText,
+        targetLanguage: validLang as "uz" | "ru" | "en",
+      });
+
+      return res.json(result);
+    } catch (error: any) {
+      console.error("[/api/tts/translate] Error:", error);
+      return res.status(500).json({
+        error: error?.message || "Ошибка при переводе текста для озвучки",
+      });
+    }
+  }
+);
+
+// 2. POST /api/tts/agent-propose — Генерация сценария (1 полного монолога или 3 вариантов, 0 кредитов)
+app.post(
+  "/api/tts/agent-propose",
+  requireAuth,
+  requireCreditBalance(0),
+  generationLimiter,
+  async (req, res) => {
+    try {
+      const {
+        task = "",
+        durationSec = 0,
+        language = "uz",
+        voiceId,
+        outputMode,
+        workflowMode,
+        pauseCadence,
+        customSystemRules,
+      } = req.body || {};
+      const cleanTask = String(task || "").trim();
+      if (!cleanTask) {
+        return res.status(400).json({ error: "Опишите задачу для агента" });
+      }
+      if (cleanTask.length > TTS_MODELS_CONFIG.maxAgentTaskChars) {
+        return res.status(400).json({
+          error: `Описание задачи не должно превышать ${TTS_MODELS_CONFIG.maxAgentTaskChars} знаков (~10 000 слов).`,
+        });
+      }
+
+      const validLang = ["uz", "ru", "en"].includes(language) ? language : "uz";
+      const parsedDuration =
+        durationSec === 0 || durationSec === "0" || durationSec === "auto"
+          ? 0
+          : Number(durationSec) > 0
+            ? Number(durationSec)
+            : 0;
+
+      const result = await generateTtsAgentProposals(ai, {
+        task: cleanTask,
+        durationSec: parsedDuration,
+        language: validLang as "uz" | "ru" | "en",
+        voiceId: voiceId ? String(voiceId) : undefined,
+        outputMode:
+          outputMode === "single_monologue" || outputMode === "three_variants"
+            ? outputMode
+            : undefined,
+        workflowMode:
+          workflowMode === "create" ||
+          workflowMode === "format_procedure" ||
+          workflowMode === "expand_monologue"
+            ? workflowMode
+            : undefined,
+        pauseCadence:
+          pauseCadence === "auto" ||
+          pauseCadence === "1s" ||
+          pauseCadence === "1_2_3s" ||
+          pauseCadence === "none"
+            ? pauseCadence
+            : undefined,
+        customSystemRules: customSystemRules ? String(customSystemRules) : undefined,
+      });
+
+      return res.json(result);
+    } catch (error: any) {
+      console.error("[/api/tts/agent-propose] Error:", error);
+      return res.status(500).json({
+        error: error?.message || "Ошибка генерации сценария агентом",
+      });
+    }
+  }
+);
+
+// 3. POST /api/tts/agent-refine — Доработка варианта (1 кредит за каждые 3 доработки)
+app.post(
+  "/api/tts/agent-refine",
+  requireAuth,
+  requireCreditBalance((req) => {
+    const uid = (req as any).uid || "anon";
+    const nextCount = (ttsAgentRefineCountByUid.get(uid) || 0) + 1;
+    return nextCount % 3 === 0 ? 1 : 0;
+  }),
+  generationLimiter,
+  async (req, res) => {
+    try {
+      const {
+        proposalText = "",
+        instruction = "",
+        language = "uz",
+        customSystemRules,
+      } = req.body || {};
+      const cleanProposal = String(proposalText || "").trim();
+      const cleanInstruction = String(instruction || "").trim();
+
+      if (!cleanProposal || !cleanInstruction) {
+        return res.status(400).json({
+          error: "Укажите исходный текст и команду для доработки",
+        });
+      }
+      if (cleanProposal.length > TTS_MODELS_CONFIG.maxTextChars) {
+        return res.status(400).json({
+          error: `Максимальная длина текста — ${TTS_MODELS_CONFIG.maxTextChars} знаков.`,
+        });
+      }
+
+      const validLang = ["uz", "ru", "en"].includes(language) ? language : "uz";
+      const result = await refineTtsAgentProposal(ai, {
+        proposalText: cleanProposal,
+        instruction: cleanInstruction,
+        language: validLang as "uz" | "ru" | "en",
+        customSystemRules: customSystemRules ? String(customSystemRules) : undefined,
+      });
+
+      const uid = (req as any).uid || "anon";
+      const nextCount = (ttsAgentRefineCountByUid.get(uid) || 0) + 1;
+      ttsAgentRefineCountByUid.set(uid, nextCount);
+      const creditsCost = nextCount % 3 === 0 ? 1 : 0;
+      const creditsRemaining = await (req as any).deductCredits(creditsCost);
+
+      return res.json({
+        ...result,
+        creditsUsed: creditsCost,
+        creditsRemaining,
+      });
+    } catch (error: any) {
+      console.error("[/api/tts/agent-refine] Error:", error);
+      return res.status(500).json({
+        error: error?.message || "Ошибка доработки текста агентом",
+      });
+    }
+  }
+);
+
+// 4. POST /api/tts/synthesize — Озвучка текста (1 кредит за каждую начатую минуту; кэш = 0 кредитов)
+app.post(
+  "/api/tts/synthesize",
+  requireAuth,
+  requireCreditBalance((req) => {
+    const {
+      text = "",
+      voiceId = "charon-news",
+      language = "uz",
+      preset = "auto",
+      speed = 1.0,
+    } = req.body || {};
+    const cleanText = String(text || "").trim();
+    if (
+      isTtsRequestCached({
+        text: cleanText,
+        voiceId: String(voiceId || "charon-news"),
+        language: (["uz", "ru", "en"].includes(language) ? language : "uz") as any,
+        preset: (["auto", "conversational", "confident", "energetic", "warm"].includes(preset)
+          ? preset
+          : "auto") as any,
+        speed: Number(speed) || 1.0,
+      })
+    ) {
+      return 0;
+    }
+    const wordCount = cleanText ? cleanText.split(/\s+/).filter(Boolean).length : 1;
+    const estSeconds = Math.max(1, wordCount / TTS_MODELS_CONFIG.wordsPerSecondEstimate);
+    return Math.max(1, Math.ceil(estSeconds / 60));
+  }),
+  generationLimiter,
+  async (req, res) => {
+    req.setTimeout(180000);
+    res.setTimeout(180000);
+    try {
+      const {
+        text = "",
+        voiceId = "charon-news",
+        language = "uz",
+        preset = "auto",
+        speed = 1.0,
+        replicatedVoiceConfig,
+      } = req.body || {};
+
+      const cleanText = String(text || "").trim();
+      if (!cleanText) {
+        return res.status(400).json({ error: "Введите текст для озвучки" });
+      }
+      if (cleanText.length > TTS_MODELS_CONFIG.maxTextChars) {
+        return res.status(400).json({
+          error: `Максимальная длина текста — ${TTS_MODELS_CONFIG.maxTextChars} знаков.`,
+        });
+      }
+
+      const validLang = (["uz", "ru", "en"].includes(language) ? language : "uz") as
+        | "uz"
+        | "ru"
+        | "en";
+      const validPreset = (
+        ["auto", "conversational", "confident", "energetic", "warm"].includes(preset)
+          ? preset
+          : "auto"
+      ) as "auto" | "conversational" | "confident" | "energetic" | "warm";
+
+      const uid = (req as any).uid;
+      const userEmail = (req as any).userEmail;
+
+      const synthResult = await synthesizeTtsOvozlash(ai, {
+        text: cleanText,
+        voiceId: String(voiceId || "charon-news"),
+        language: validLang,
+        preset: validPreset,
+        speed: Number(speed) || 1.0,
+        ownerUid: uid,
+        replicatedVoiceConfig,
+      });
+
+      // Кредиты списываются ТОЛЬКО после успешного синтеза (0 при кэше, иначе 1 за каждую начатую минуту)
+      const creditsUsed = synthResult.cached ? 0 : synthResult.creditsCost;
+      const creditsRemaining = await (req as any).deductCredits(creditsUsed);
+
+      if (!synthResult.cached && uid) {
+        try {
+          localStore.logGeneration(uid, {
+            id: synthResult.id,
+            userId: uid,
+            userEmail: (userEmail || "").trim().toLowerCase(),
+            type: "solo_podcast",
+            title: `TTS Ovozlash (${cleanText.slice(0, 42)})`,
+            creditsCost: isEmailAdmin(userEmail) ? 0 : creditsUsed,
+            status: "completed",
+            voiceName: String(voiceId),
+            durationSeconds: synthResult.durationSeconds,
+            details: `Provider: ${synthResult.provider} | Preset: ${validPreset}`,
+            createdAt: new Date().toISOString(),
+          });
+        } catch {}
+      }
+
+      return res.json({
+        id: synthResult.id,
+        audioUrl: synthResult.audioUrl,
+        mp3Url: synthResult.mp3Url,
+        durationSeconds: synthResult.durationSeconds,
+        finalSpokenText: synthResult.finalSpokenText,
+        styleSummary: synthResult.styleSummary,
+        provider: synthResult.provider,
+        cached: synthResult.cached,
+        creditsUsed,
+        creditsRemaining,
+        synthesisWallTimeMs: synthResult.synthesisWallTimeMs,
+      });
+    } catch (error: any) {
+      console.error("[/api/tts/synthesize] Error:", error?.message || error);
+      // Если выбран клон, а Google вернул 429 — возвращаем точное сообщение без подмены голоса
+      if (error?.code === "CLONED_VOICE_QUOTA_EXCEEDED" || error?.status === 429) {
+        return res.status(429).json({
+          error: "cloned_voice_quota_exceeded",
+          message: "Лимит исчерпан, попробуйте позже или выберите другой голос",
+          message_ru: "Лимит исчерпан, попробуйте позже или выберите другой голос",
+        });
+      }
+      return res.status(500).json({
+        error: error?.message || "Ошибка синтеза речи",
+      });
+    }
+  }
+);
+
+// 5. GET /api/tts/audio/:id — Отдать файл (MP3/WAV) только владельцу
+app.get("/api/tts/audio/:id", async (req, res) => {
+  try {
+    cleanupExpiredTtsFiles();
+    const authHeader = req.headers.authorization;
+    const bearerToken =
+      authHeader && authHeader.startsWith("Bearer ")
+        ? authHeader.split("Bearer ")[1]?.trim()
+        : undefined;
+    const queryToken = typeof req.query.token === "string" ? req.query.token.trim() : undefined;
+    const token = bearerToken || queryToken;
+
+    if (!token) {
+      return res.status(401).json({
+        error: "unauthorized",
+        message_ru: "Для доступа к аудиофайлу требуется авторизация.",
+      });
+    }
+
+    const verified = await verifyRequestToken(token);
+    if (!verified || !verified.uid) {
+      return res.status(401).json({
+        error: "unauthorized",
+        message_ru: "Недействительный токен авторизации.",
+      });
+    }
+
+    const record = getStoredTtsRecord(req.params.id);
+    if (!record) {
+      return res.status(404).json({
+        error: "not_found",
+        message_ru: "Аудиофайл не найден или срок его хранения истёк.",
+      });
+    }
+
+    if (record.ownerUid !== verified.uid && !isEmailAdmin(verified.email)) {
+      return res.status(403).json({
+        error: "forbidden",
+        message_ru: "Доступ разрешён только владельцу записи.",
+      });
+    }
+
+    const format = String(req.query.format || "wav").toLowerCase() === "mp3" ? "mp3" : "wav";
+    const filePath = format === "mp3" ? record.mp3Path : record.wavPath;
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: "Файл отсутствует на диске" });
+    }
+
+    const download = req.query.download === "1" || req.query.download === "true";
+    res.setHeader("Content-Type", format === "mp3" ? "audio/mpeg" : "audio/wav");
+    if (download) {
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="ovozstudio_${record.id}.${format}"`
+      );
+    }
+    return res.sendFile(filePath);
+  } catch (error: any) {
+    console.error("[/api/tts/audio/:id] Error:", error);
+    return res.status(500).json({ error: "Ошибка чтения аудиофайла" });
+  }
+});
+
+// 6. POST /api/tts/keep/:id — Пометить запись сохранённой в Медиатеку (не удалять через 7 дней)
+app.post("/api/tts/keep/:id", requireAuth, async (req, res) => {
+  try {
+    const uid = (req as any).uid;
+    const email = (req as any).userEmail;
+    const record = getStoredTtsRecord(req.params.id);
+    if (!record) {
+      return res.status(404).json({ error: "Аудиофайл не найден" });
+    }
+    if (record.ownerUid !== uid && !isEmailAdmin(email)) {
+      return res.status(403).json({ error: "Доступ запрещён" });
+    }
+    markTtsRecordSavedToMediaLibrary(req.params.id);
+    const wavBuf = fs.readFileSync(record.wavPath);
+    return res.json({
+      success: true,
+      id: record.id,
+      rawAudioWavBase64: wavBuf.toString("base64"),
+    });
+  } catch (error: any) {
+    return res.status(500).json({ error: error?.message || "Ошибка сохранения в Медиатеку" });
   }
 });
 

@@ -14,6 +14,7 @@ import {
 export type AppTab =
   | 'landing'
   | 'studio'
+  | 'tts'
   | 'dialogue'
   | 'voiceover'
   | 'agent'
@@ -65,6 +66,21 @@ export const SlimIconRail: React.FC<SlimIconRailProps> = ({
       onClick: () => {
         setActiveTab('studio');
         setStudioMode('solo');
+        setIsMobileDrawerOpen(false);
+      },
+    },
+    {
+      id: 'tts-ovozlash',
+      labelUz: 'TTS Ovozlash',
+      labelRu: 'TTS Ovozlash',
+      icon: (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M2.5 6.5v3M5.5 4v8M8.5 2.5v11M11.5 5v6M14 7v2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        </svg>
+      ),
+      active: activeTab === 'tts',
+      onClick: () => {
+        setActiveTab('tts');
         setIsMobileDrawerOpen(false);
       },
     },

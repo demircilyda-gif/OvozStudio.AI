@@ -152,6 +152,36 @@ export function normalizeNumbersAndDates(
   let normalized = text;
   const decimalStyle = options?.decimalStyle || "butun";
 
+  const UZ_MONTHS = [
+    "",
+    "yanvar",
+    "fevral",
+    "mart",
+    "aprel",
+    "may",
+    "iyun",
+    "iyul",
+    "avgust",
+    "sentabr",
+    "oktabr",
+    "noyabr",
+    "dekabr",
+  ];
+
+  // 0a. Dates in DD.MM.YYYY format: e.g. "15.05.2026" -> "o'n beshinchi may ikki ming yigirma oltinchi yil"
+  normalized = normalized.replace(/\b(0?[1-9]|[12]\d|3[01])\.(0?[1-9]|1[0-2])\.(\d{4})\b/g, (match, dStr, mStr, yStr) => {
+    const d = parseInt(dStr, 10);
+    const m = parseInt(mStr, 10);
+    const y = parseInt(yStr, 10);
+    if (!UZ_MONTHS[m]) return match;
+    return `${numberToUzbekOrdinal(d)} ${UZ_MONTHS[m]} ${numberToUzbekOrdinal(y)} yil`;
+  });
+
+  // 0b. Join space-separated thousand groups: e.g. "250 000" -> "250000", "1 500 000" -> "1500000"
+  normalized = normalized.replace(/\b(\d{1,3})((?:\s\d{3})+)\b/g, (_, head, tail) => {
+    return head + tail.replace(/\s+/g, "");
+  });
+
   // 1. Time formats: e.g. "12:30", "12:00", "09:45"
   // "soat 12:30 da" -> "soat o'n ikki yarimda"
   normalized = normalized.replace(/\bsoat\s+(\d{1,2}):(\d{2})\s*(da)?\b/gi, (_, hStr, mStr, suffix) => {
@@ -260,12 +290,40 @@ export function normalizeNumbersAndDates(
 }
 
 /**
+ * Canonicalizes all human/AI pause markers:
+ * [pauza 1s], [pauza 2 soniya], [пауза 2с], [пауза 3 сек], [pause 1.5s], <pause 2s>, [1s], [2s], [3s]
+ * into standardized `[pauza Ns]` markers (clamped between 0.2s and 15s).
+ */
+export function canonicalizeTimedPauseTags(text: string): string {
+  if (!text) return "";
+  return text
+    // Match [pauza 2s], [пауза 2 сек], [pause 1.5 sec], <pause 2s>, <pauza 3s>
+    .replace(
+      /(?:\[|<)\s*(?:pauza|pause|пауза)\s*[:=]?\s*(\d+(?:[.,]\d+)?)\s*(?:s|sec|sek|soniya|с|сек|секунд|секунды)?\s*(?:\]|>)/gi,
+      (_, numStr) => {
+        const val = Math.max(0.2, Math.min(15, parseFloat(String(numStr).replace(",", "."))));
+        const cleanVal = Number.isInteger(val) ? String(val) : val.toFixed(1).replace(/\.0$/, "");
+        return ` [pauza ${cleanVal}s] `;
+      }
+    )
+    // Match shorthand [1s], [2s], [3s], [1.5s], [2 сек]
+    .replace(
+      /\[\s*(\d+(?:[.,]\d+)?)\s*(?:s|sec|sek|soniya|с|сек)\s*\]/gi,
+      (_, numStr) => {
+        const val = Math.max(0.2, Math.min(15, parseFloat(String(numStr).replace(",", "."))));
+        const cleanVal = Number.isInteger(val) ? String(val) : val.toFixed(1).replace(/\.0$/, "");
+        return ` [pauza ${cleanVal}s] `;
+      }
+    );
+}
+
+/**
  * Validates and preserves inline vocal tags supported by modern TTS:
- * <laugh>, <short pause>, <sigh>, <whisper>
+ * <laugh>, <short pause>, <sigh>, <whisper>, and timed pauses [pauza Ns]
  */
 export function preserveVocalTags(text: string): string {
   // Normalize whitespace around known vocal and acoustic emotion tags
-  return text
+  return canonicalizeTimedPauseTags(text)
     .replace(/<\s*(?:breath|nafas|chuqur_nafas)\s*>/gi, " <breath> ")
     .replace(/<\s*deep_breath\s*>/gi, " <deep_breath> ")
     .replace(/<\s*(?:gasp|hansirash|hayrat)\s*>/gi, " <gasp> ")
@@ -276,7 +334,6 @@ export function preserveVocalTags(text: string): string {
     .replace(/<\s*(?:whisper|pichirlash|shivir)\s*>/gi, " <whisper> ")
     .replace(/<\s*short\s+pause\s*>/gi, " <short pause> ")
     .replace(/<\s*(?:throat_clear|tomoq_qirish)\s*>/gi, " <throat_clear> ")
-    .replace(/\[\s*Pauza\s+([^\]]+)\]/gi, " [Pauza $1] ")
     .replace(/\|\s*(ha|mhm|rostanam|rosti|aha|albatta|xoʻsh|xosh|voy|ana|bilasizmi)\s*\|/gi, " |$1| ")
     .replace(/\s{2,}/g, " ")
     .trim();
@@ -292,11 +349,27 @@ export function normalizeUzbekSpeech(
 ): string {
   if (!text || typeof text !== "string") return "";
 
+  // 0. Canonicalize and shield timed pause tags [pauza Ns] so digits inside them are NOT turned into words
+  const pauseTokens: string[] = [];
+  let result = canonicalizeTimedPauseTags(text).replace(
+    /\[pauza\s+\d+(?:\.\d+)?s\]/gi,
+    (match) => {
+      const idx = pauseTokens.length;
+      pauseTokens.push(match);
+      return `__PAUSE_TOKEN_${idx}__`;
+    }
+  );
+
   // 1. Unify apostrophes (o', g')
-  let result = normalizeUzbekApostrophes(text);
+  result = normalizeUzbekApostrophes(result);
 
   // 2. Expand numbers, times, percentages, decimals, and currencies into natural words
   result = normalizeNumbersAndDates(result, options);
+
+  // 2b. Restore shielded timed pause tags
+  result = result.replace(/__PAUSE_TOKEN_(\d+)__/g, (_, idxStr) => {
+    return pauseTokens[Number(idxStr)] || "";
+  });
 
   // 3. Format and preserve vocal tags
   result = preserveVocalTags(result);

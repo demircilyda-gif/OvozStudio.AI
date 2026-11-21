@@ -4,6 +4,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 import { DUBBING_MODELS_CONFIG } from "../config/dubbingModels.ts";
+import { normalizeUzbekSpeech } from "../../src/utils/uzbekNormalizer.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -57,6 +58,9 @@ export interface VerbatimTurn {
   pace: "slow" | "normal" | "fast";
   inlineTags: string[];
   nonSpeechEvents?: string[];
+  windowSec?: number;
+  gapAfterSec?: number;
+  targetSyllables?: number;
   maxSyllables: number;
   actualSyllables: number;
   validationPassed: boolean;
@@ -170,12 +174,21 @@ export function formatSecToSrtTime(sec: number): string {
  * - apostrophes (', ʻ, ’, `) are never counted as vowels
  */
 export function countSyllables(text: string): number {
-  const withoutTags = String(text || "")
+  let withoutTags = String(text || "")
     .replace(/<[^>]+>/g, " ")
     .replace(/\([^)]*\)/g, " ")
     .replace(/\[[^\]]*\]/g, " ")
     .trim();
   if (!withoutTags) return 0;
+
+  // Expand digits into spoken Uzbek words before counting syllables so numbers ("5,2", "500") count accurately
+  if (/\d/.test(withoutTags)) {
+    try {
+      withoutTags = normalizeUzbekSpeech(withoutTags, {
+        decimalStyle: DUBBING_MODELS_CONFIG.decimalPronunciationStyle,
+      });
+    } catch {}
+  }
 
   const normalized = withoutTags
     .replace(/[‘`‛’′ʻ']/g, "'")
@@ -867,11 +880,41 @@ export async function translateTurns1To1WithVerification(
     throw new Error("В видео или тексте не обнаружено речевых реплик для озвучки.");
   }
 
-  const buildInputItem = (
-    t: Omit<VerbatimTurn, "text" | "actualSyllables" | "validationPassed" | "validationNotes">
-  ) => ({
+  const PACE = DUBBING_MODELS_CONFIG.PACE || 5.0;
+  const PACE_MAX = DUBBING_MODELS_CONFIG.PACE_MAX || 5.5;
+
+  const maxTurnEnd = Math.max(
+    0,
+    ...rawTurns.map((t) => t.endSec),
+    ...noSpeechIntervals.map((n) => n.endSec)
+  );
+
+  // Compute windowSec, gapAfterSec (to startSec of the next speech turn), targetSyllables, maxSyllables for each turn (Item 1)
+  const turnsWithBudget = rawTurns.map((t, idx) => {
+    const windowSec = Math.round(Math.max(0.8, t.endSec - t.startSec) * 100) / 100;
+    const nextStartSec =
+      idx + 1 < rawTurns.length
+        ? rawTurns[idx + 1].startSec
+        : Math.max(t.endSec, maxTurnEnd);
+    const gapAfterSec = Math.max(0, Math.round((nextStartSec - t.endSec) * 100) / 100);
+    const targetSyllables = Math.round(windowSec * PACE);
+    const maxSyllables = Math.round((windowSec + 0.7 * gapAfterSec) * PACE_MAX);
+
+    return {
+      ...t,
+      windowSec,
+      gapAfterSec,
+      targetSyllables,
+      maxSyllables,
+    };
+  });
+
+  const buildInputItem = (t: (typeof turnsWithBudget)[number]) => ({
     id: t.id,
-    timeWindowSec: t.durationSec,
+    windowSec: t.windowSec,
+    gapAfterSec: t.gapAfterSec,
+    targetSyllables: t.targetSyllables,
+    maxSyllables: t.maxSyllables,
     speakerName: t.speakerName,
     speakerGender: t.speakerGender,
     emotion: t.intonationRu || t.emotion || "",
@@ -879,39 +922,30 @@ export async function translateTurns1To1WithVerification(
     text_original: t.cleanedRuForTranslation,
   });
 
-  const translationInput = rawTurns.map(buildInputItem);
+  const translationInput = turnsWithBudget.map(buildInputItem);
 
-  const translationSystemPrompt = `Ты — ведущий автор и режиссёр живого узбекского дубляжа (Ташкентская студия дубляжа и авто/лайфстайл-блогов).
+  const translationSystemPrompt = `Ты — ведущий автор и редактор узбекского дубляжа.
 Твоя задача — перевести массив реплик (text_original) напрямую на ЖИВОЙ, ЕСТЕСТВЕННЫЙ РАЗГОВОРНЫЙ УЗБЕКСКИЙ ЯЗЫК (латиница) СТРОГО 1-в-1 по числу реплик и смыслу.
 
-ГЛАВНЫЕ ПРАВИЛА ЖИВОГО ДУБЛЯЖА:
-1. ПОЛНОТА СМЫСЛА БЕЗ ОБРУБКОВ И БЕЗ ОТСЕБЯТИНЫ:
-   - Переводи КАЖДУЮ мысль и каждое предложение внутри реплики! КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО выбрасывать вводные фразы («Лучше скажи», «Ты знаешь», «это видно сразу», «Но», «Давай начнем с...», «Слушай, ну...», «Подожди, подожди», «Как раз то, что нужно») или превращать живую фразу в сухой телеграфный обрубок из двух слов.
-   - Сколько реплик на входе — ровно столько же на выходе с теми же самыми id. Ничего не выдумывай от себя.
-2. ЖИВОЙ РАЗГОВОРНЫЙ УЗБЕКСКИЙ ЯЗЫК (КАК ГОВОРЯТ ЖИВЫЕ ЛЮДИ, А НЕ КНИГА):
-   - Используй естественные разговорные частицы и связки: -chi, -ku, -da, -yu, -a, xo'sh, qara, bilasanmi, undan ko'ra ayt-chi, to'g'risi, ayni muddao, bemalol.
-   - Примеры ПЛОХО (обрубленный/роботизированный) -> ХОРОШО (живой разговорный):
-     * Оригинал: «Ну как она на ходу? Машина-то крупная.»
-       ПЛОХО: «Yurishi-chi? Katta-ku.» (обрубок!)
-       ХОРОШО: «Xo'sh, yurishi qalay ekan? Mashina ancha salobatli-ku.»
-     * Оригинал: «Лучше скажи, как тебе на пассажирском?»
-       ПЛОХО: «Yo'lovchi o'rnida qalay?» (потеряно «Лучше скажи»!)
-       ХОРОШО: «Undan ko'ra ayt-chi, yo'lovchi o'rindig'ida o'zingni qanday his qilyapsan?»
-     * Оригинал: «Салон здесь красивый, это видно сразу. Но что помогает здесь водителю меньше уставать?»
-       ПЛОХО: «Saloni chiroyli ekan. Haydovchi kamroq charchashi uchun nima bor?» (потеряно «это видно сразу. Но...»!)
-       ХОРОШО: «Saloni juda chiroyli ekan, bu darrov ko'zga tashlanadi. Lekin haydovchi yo'lda kamroq charchashi uchun bu yerda nimalar o'ylangan?»
-     * Оригинал: «Давай начнем с кресла. У водительского кресла регулировка в восьми направлениях плюс память сидений и поясничный подпор, и дополнительно массаж в передних сиденьях.» (14.4 сек)
-       ПЛОХО: «O'rindiqdan boshlaylik. Haydovchi o'rindig'i sakkiz yo'nalishda sozlanadi, xotirasi va bel tirgagi bor, oldingi o'rindiqlarda esa massaj ham bor.» (слишком сухо и коротко для 14 секунд!)
-       ХОРОШО: «Keling, avvalo o'rindiqdan boshlaylik. <short pause> Haydovchi o'rindig'i sakkiz xil yo'nalishda sozlanadi, ustiga-ustak o'rindiq xotirasi va bel tirgagi ham bor, <short pause> oldingi o'rindiqlarda esa qo'shimcha massaj funksiyasi ham mavjud.»
-     * Оригинал: «Как раз то, что нужно нам на грунте.»
-       ПЛОХО: «Tuproq yo'lga ayni kerak.» (ломаная фраза!)
-       ХОРОШО: «Tuproq yo'lda bizga ayni kerakli narsa ekan!»
-     * Оригинал: «Давай!» (1 сек) -> «Ketdik!» или «Qani!» (без русизма «Davay»).
-3. ЕСТЕСТВЕННОЕ ДЫХАНИЕ И ПАУЗЫ В ДЛИННЫХ РЕПЛИКАХ:
-   - В длинных репликах (где timeWindowSec >= 7 секунд и несколько смысловых частей) ставь между предложениями или смысловыми частями тег <short pause>, чтобы диктор делал живую естественную паузу и речь органично ложилась в таймкод без пустоты.
-4. БЕЗ ТЕКСТОВЫХ РЕМАРОК В СКОБКАХ:
+ГЛАВНЫЕ ПРАВИЛА ПЕРЕВОДА И БЮДЖЕТА ДЛИНЫ:
+1. Сохрани весь смысл и все мысли оригинала. Уложись в targetSyllables, никогда не превышай maxSyllables — выбирай короткие слова и обороты. Не добавляй ничего, чего нет в оригинале. Цифры оставляй цифрами.
+2. ЖИВОЙ РАЗГОВОРНЫЙ УЗБЕКСКИЙ ЯЗЫК (ЛАКОНИЧНО И ЕСТЕСТВЕННО):
+   - Используй естественные разговорные частицы и связки там, где они есть по интонации: -chi, -ku, -da, -yu, -a, xo'sh, qara, bilasanmi, undan ko'ra ayt-chi, to'g'risi, bemalol.
+   - Выбирай ёмкие, короткие разговорные синонимы вместо длинных канцелярских конструкций, чтобы перевод укладывался в targetSyllables и никогда не превышал maxSyllables без потери мыслей оригинала.
+   - Не используй штампы и лишние слова, которых нет в оригинале (не добавляй «ayni muddao», «ustiga-ustak», «his qilyapsan», «qo'shimcha funksiyasi»). Короткую реплику из одного слова переводи одним словом (например, «Давай!» -> «Ketdik!»).
+   - Примеры ПЛОХО -> ХОРОШО:
+     * Пример 1:
+       Оригинал: «Ну как она на ходу? Машина-то крупная.»
+       ПЛОХО: «Yurishi-chi? Katta-ku.» (обрубок, потеряна связка)
+       ХОРОШО: «Xo'sh, yurishi qalay? Mashina katta-ku.» (весь смысл сохранён, коротко и живо)
+     * Пример 2:
+       Оригинал: «Лучше скажи, как тебе на пассажирском?»
+       ПЛОХО: «Yo'lovchi o'rnida qalay?» (потеряно «Лучше скажи»)
+       ХОРОШО: «Undan ko'ra ayt-chi, yo'lovchi joyida qalay?» (сохранён весь смысл, без придуманных слов)
+     * TODO: добавить примеры из других тем (интервью, образование, наука, кулинария, путешествия).
+3. БЕЗ ТЕКСТОВЫХ РЕМАРОК В СКОБКАХ:
    - НИКОГДА не пиши слова в скобках вроде (kulib), (смеется), (вздыхает) внутри uzbekText.
-   - Разрешены только документированные теги: <laugh>, <sigh>, <short pause>, <breath>, <cough>.`;
+   - Разрешены только документированные теги из nonSpeechEvents: <laugh>, <sigh>, <short pause>, <breath>, <cough>.`;
 
   const requestTranslationBatch = async (
     itemsToTranslate: ReturnType<typeof buildInputItem>[]
@@ -920,12 +954,13 @@ export async function translateTurns1To1WithVerification(
       try {
         const response = await ai.models.generateContent({
           model: candidate.model,
-          contents: `${translationSystemPrompt}\n\nВходной массив реплик диалога для живого перевода 1:1 (${itemsToTranslate.length} шт.):\n${JSON.stringify(
+          contents: `${translationSystemPrompt}\n\nВходной массив реплик диалога для перевода 1:1 (${itemsToTranslate.length} шт.):\n${JSON.stringify(
             itemsToTranslate,
             null,
             2
           )}`,
           config: {
+            temperature: candidate.temperature ?? DUBBING_MODELS_CONFIG.translationTemperature ?? 0.5,
             ...(candidate.thinkingLevel
               ? { thinkingConfig: { thinkingLevel: candidate.thinkingLevel } }
               : {}),
@@ -960,7 +995,6 @@ export async function translateTurns1To1WithVerification(
     return [];
   };
 
-  // Translate in full dialogue context (up to 45 turns per batch so the entire 3-min video is translated in 1 coherent request!)
   const CHUNK_SIZE = 45;
   const translationMap = new Map<string, string>();
 
@@ -976,13 +1010,11 @@ export async function translateTurns1To1WithVerification(
     });
   }
 
-  // Verification in code: check that segment count and every segment `id` match the original;
-  // otherwise repeat translation for missing segments
   for (let retryPass = 0; retryPass < 2; retryPass++) {
-    const missingTurns = rawTurns.filter(
+    const missingTurns = turnsWithBudget.filter(
       (t) => !translationMap.has(t.id) || !translationMap.get(t.id)?.trim()
     );
-    if (missingTurns.length === 0 && translationMap.size === rawTurns.length) {
+    if (missingTurns.length === 0 && translationMap.size === turnsWithBudget.length) {
       break;
     }
     if (missingTurns.length === 0) break;
@@ -1001,11 +1033,7 @@ export async function translateTurns1To1WithVerification(
     });
   }
 
-  // Stage 1.2: NO automatic shortening (`turnsNeedingShortening` removed!).
-  // Only mark a soft note ("Длинновато") if the turn exceeds ~6 syllables per second.
-  const warnThreshold = DUBBING_MODELS_CONFIG.syllablesPerSecWarningThreshold;
-
-  const validatedTurns: VerbatimTurn[] = rawTurns.map((turn) => {
+  const validatedTurns: VerbatimTurn[] = turnsWithBudget.map((turn) => {
     const rawTranslated =
       translationMap.get(turn.id) || turn.cleanedRuForTranslation;
     let sanitizedUz = sanitizeDocumentedTtsTags(rawTranslated);
@@ -1020,26 +1048,18 @@ export async function translateTurns1To1WithVerification(
     }
 
     const actualSyllables = countSyllables(sanitizedUz);
-    const safeDur = Math.max(0.8, turn.durationSec);
-    const syllablesPerSec = actualSyllables / safeDur;
-    const isLongish = syllablesPerSec > warnThreshold;
+    const isOverMax = actualSyllables > turn.maxSyllables;
 
     return {
       ...turn,
       text: sanitizedUz,
       actualSyllables,
-      validationPassed: !isLongish,
-      validationNotes: isLongish
-        ? `Длинновато (~${syllablesPerSec.toFixed(1)} слог/с, ${actualSyllables} слогов на ${turn.durationSec}с)`
+      validationPassed: !isOverMax,
+      validationNotes: isOverMax
+        ? `Длинновато (${actualSyllables} слогов при бюджете target=${turn.targetSyllables}, max=${turn.maxSyllables})`
         : undefined,
     };
   });
-
-  const maxTurnEnd = Math.max(
-    0,
-    ...validatedTurns.map((t) => t.endSec),
-    ...noSpeechIntervals.map((n) => n.endSec)
-  );
 
   const translationUsd = Math.max(0.01, Math.round(validatedTurns.length * 0.0015 * 100) / 100);
   const ttsUsd = Math.max(0.02, Math.round(validatedTurns.length * 0.01 * 100) / 100);
@@ -1057,6 +1077,73 @@ export async function translateTurns1To1WithVerification(
       totalUsd: Math.round((translationUsd + ttsUsd) * 100) / 100,
     },
   };
+}
+
+/**
+ * Item 4: Rephrases a single turn shorter when its synthesized audio duration / 1.10 > available.
+ * Uses the translation model with thinkingLevel HIGH:
+ * "Скажи то же самое короче, до N слогов, сохранив все мысли, ничего не добавляя"
+ */
+export async function rephraseTurnShorterViaLlm(
+  ai: GoogleGenAI,
+  params: {
+    originalTextRu: string;
+    currentUzbekText: string;
+    targetMaxSyllables: number;
+    speakerGender?: "female" | "male";
+    emotion?: string;
+    inlineTags?: string[];
+  }
+): Promise<string> {
+  const N = Math.max(4, Math.floor(params.targetMaxSyllables));
+  const prompt = `Скажи то же самое короче, до ${N} слогов, сохранив все мысли, ничего не добавляя.
+Правила:
+- Язык: живой разговорный узбекский (латиница).
+- Сохрани ВСЕ мысли и весь смысл оригинала, не выбрасывай части предложения, но замени длинные слова и обороты на короткие разговорные синонимы, чтобы уложиться строго до ${N} слогов.
+- Не добавляй ничего, чего нет в оригинале. Цифры оставляй цифрами.
+- Не пиши ремарки в скобках.
+
+Оригинал: «${params.originalTextRu}»
+Текущий перевод (${countSyllables(params.currentUzbekText)} слогов — слишком длинно для таймкода): «${params.currentUzbekText}»`;
+
+  for (const candidate of DUBBING_MODELS_CONFIG.rephraseModels) {
+    try {
+      const response = await ai.models.generateContent({
+        model: candidate.model,
+        contents: prompt,
+        config: {
+          temperature: candidate.temperature ?? 0.4,
+          ...(candidate.thinkingLevel
+            ? { thinkingConfig: { thinkingLevel: candidate.thinkingLevel } }
+            : {}),
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              uzbekText: { type: Type.STRING },
+            },
+            required: ["uzbekText"],
+          },
+        },
+      });
+      const parsed = JSON.parse(response.text || "{}");
+      if (typeof parsed?.uzbekText === "string" && parsed.uzbekText.trim().length > 0) {
+        let cleaned = sanitizeDocumentedTtsTags(parsed.uzbekText.trim());
+        for (const tag of params.inlineTags || []) {
+          if (
+            (tag === "<laugh>" || tag === "<sigh>" || tag === "<breath>" || tag === "<cough>") &&
+            !cleaned.toLowerCase().includes(tag.toLowerCase())
+          ) {
+            cleaned = `${cleaned} ${tag}`.trim();
+          }
+        }
+        return cleaned;
+      }
+    } catch (err: any) {
+      console.warn(`[rephraseTurnShorterViaLlm] ${candidate.model} notice:`, err?.message);
+    }
+  }
+  return params.currentUzbekText;
 }
 
 /**
@@ -1440,17 +1527,86 @@ export async function parseAndTranslateVerbatimStoryboard(
 }
 
 /**
- * Stage 1.3: Applies pitch-preserving ffmpeg atempo filter strictly bounded to [1.00, 1.10]
- * (DUBBING_MODELS_CONFIG.maxAtempoSpeedRatio) on 24kHz 16-bit mono PCM.
+ * Trims dead leading/trailing silence added by TTS models (threshold ~180 amplitude on int16 PCM),
+ * preserving a natural 25ms leading pad and 45ms trailing release with smooth micro-fade
+ * so measured spoken duration is accurate and no word edge is ever clipped.
+ */
+export function trimTrailingAndLeadingSilencePcm(
+  pcmBuffer: Buffer,
+  sampleRate = 24000
+): Buffer {
+  const bytesPerSample = 2;
+  const totalSamples = Math.floor(pcmBuffer.length / bytesPerSample);
+  if (totalSamples < sampleRate * 0.15) return pcmBuffer;
+
+  const silenceThreshold = 180;
+  let firstActiveSample = 0;
+  let lastActiveSample = totalSamples - 1;
+
+  while (firstActiveSample < totalSamples) {
+    const val = Math.abs(pcmBuffer.readInt16LE(firstActiveSample * bytesPerSample));
+    if (val > silenceThreshold) break;
+    firstActiveSample++;
+  }
+
+  while (lastActiveSample > firstActiveSample) {
+    const val = Math.abs(pcmBuffer.readInt16LE(lastActiveSample * bytesPerSample));
+    if (val > silenceThreshold) break;
+    lastActiveSample--;
+  }
+
+  if (firstActiveSample >= lastActiveSample) return pcmBuffer;
+
+  const leadPadSamples = Math.round(sampleRate * 0.02); // 20ms
+  const trailPadSamples = Math.round(sampleRate * 0.04); // 40ms
+  const startSample = Math.max(0, firstActiveSample - leadPadSamples);
+  const endSample = Math.min(totalSamples, lastActiveSample + trailPadSamples);
+
+  const sliced = Buffer.from(
+    pcmBuffer.subarray(startSample * bytesPerSample, endSample * bytesPerSample)
+  );
+  return sliced.length > 0 ? sliced : pcmBuffer;
+}
+
+/**
+ * Applies a smooth 120 ms linear fade-out on the last pause / tail of a PCM buffer (Item 5)
+ * without truncating any spoken word.
+ */
+export function applyFadeOutOnLastPausePcm(
+  pcmBuffer: Buffer,
+  fadeMs = 120,
+  sampleRate = 24000
+): Buffer {
+  const bytesPerSample = 2;
+  const totalSamples = Math.floor(pcmBuffer.length / bytesPerSample);
+  const fadeSamples = Math.min(totalSamples, Math.max(1, Math.round((sampleRate * fadeMs) / 1000)));
+  if (fadeSamples <= 1) return pcmBuffer;
+
+  const out = Buffer.from(pcmBuffer);
+  const startFadeSample = totalSamples - fadeSamples;
+  for (let i = 0; i < fadeSamples; i++) {
+    const sampleIdx = startFadeSample + i;
+    const gain = 1 - i / fadeSamples;
+    const orig = out.readInt16LE(sampleIdx * bytesPerSample);
+    const scaled = Math.max(-32768, Math.min(32767, Math.round(orig * gain)));
+    out.writeInt16LE(scaled, sampleIdx * bytesPerSample);
+  }
+  return out;
+}
+
+/**
+ * Applies pitch-preserving ffmpeg atempo filter bounded to [1.00, maxAllowedRatio]
+ * (default 1.10 in step 4, up to 1.15 in step 5) on 24kHz 16-bit mono PCM.
  */
 export async function applyMildAtempoPcm(
   pcmBuffer: Buffer,
   speedRatio: number,
-  sampleRate = 24000
+  sampleRate = 24000,
+  maxAllowedRatio?: number
 ): Promise<Buffer> {
-  const maxRatio = DUBBING_MODELS_CONFIG.maxAtempoSpeedRatio || 1.1;
+  const maxRatio = maxAllowedRatio || DUBBING_MODELS_CONFIG.maxAtempoSpeedRatio || 1.1;
   const clampedRatio = Math.min(maxRatio, Math.max(1.0, Math.round(speedRatio * 1000) / 1000));
-  if (clampedRatio <= 1.01 || !fs.existsSync("/usr/bin/ffmpeg")) {
+  if (clampedRatio <= 1.008 || !fs.existsSync("/usr/bin/ffmpeg")) {
     return pcmBuffer;
   }
 
@@ -1491,74 +1647,199 @@ export async function applyMildAtempoPcm(
   }
 }
 
+export type TurnSyncStatus = "ok" | "adjusted" | "overflow";
+
+export interface AssembledTurnPlacement {
+  startSec: number;
+  endSec: number;
+  durationSec: number;
+  originalDurationSec: number;
+  dubbedDurationSec: number;
+  atempoApplied: number;
+  rephraseAttempts: number;
+  syncStatus: TurnSyncStatus;
+  shiftedStartBySec: number;
+  pcm: Buffer;
+}
+
 /**
- * Stage 1.6: Assembles individual turn PCM buffers onto an exact second-by-second master timeline buffer
+ * Item 5: Assembles individual turn PCM buffers onto an exact second-by-second master timeline buffer
  * (24000 Hz, 16-bit mono = 48000 bytes per second).
- * - Places each turn strictly at its `startSec`.
- * - Leaves `Без слов` musical intervals untouched (pure silence on the voice track).
- * - Never overlaps consecutive turns; any turn tail naturally spills into the silent pause before `nextStartSec`.
- * - Track length always equals `totalVideoDurationSec` (or the end of the last turn if longer).
+ * - NEVER truncates a turn in the middle of sound ("никогда не обрезать реплику посреди звука").
+ * - If after Step 4 a turn is still longer than available space before the next turn:
+ *   applies atempo up to 1.15 and shifts the next turn's start by at most 0.3 s.
+ * - If even that is not enough: lays down the entire turn with a 120 ms fade-out on the last pause
+ *   and marks `turn.syncStatus = "overflow"`.
+ * - Master track length always equals `totalVideoDurationSec`.
  */
-export function assembleStrictTimecodeMasterPcm(
+export async function assembleStrictTimecodeMasterPcm(
   turnsWithPcm: Array<{
     startSec: number;
     endSec: number;
     pcm: Buffer;
+    rawUnstretchedPcm?: Buffer;
+    atempoApplied?: number;
+    rephraseAttempts?: number;
   }>,
   totalVideoDurationSec?: number,
   sampleRate = 24000
-): {
+): Promise<{
   masterPcm: Buffer;
   totalDurationSec: number;
-  actualPlacements: Array<{ startSec: number; endSec: number; durationSec: number }>;
-} {
+  actualPlacements: AssembledTurnPlacement[];
+}> {
   const bytesPerSample = 2;
   const bytesPerSec = sampleRate * bytesPerSample;
+  const maxFallbackAtempo = DUBBING_MODELS_CONFIG.maxAtempoFallbackRatio || 1.15;
+  const maxShiftSec = DUBBING_MODELS_CONFIG.maxNextTurnShiftSec || 0.3;
 
-  let maxEndSec = typeof totalVideoDurationSec === "number" && totalVideoDurationSec > 0 ? totalVideoDurationSec : 0;
+  let maxEndSec =
+    typeof totalVideoDurationSec === "number" && totalVideoDurationSec > 0
+      ? totalVideoDurationSec
+      : 0;
   for (const t of turnsWithPcm) {
-    const durSec = t.pcm.length / bytesPerSec;
-    maxEndSec = Math.max(maxEndSec, (t.startSec || 0) + durSec, t.endSec || 0);
+    maxEndSec = Math.max(maxEndSec, t.endSec || 0, t.startSec || 0);
+  }
+  if (maxEndSec <= 0) {
+    for (const t of turnsWithPcm) {
+      const durSec = t.pcm.length / bytesPerSec;
+      maxEndSec = Math.max(maxEndSec, (t.startSec || 0) + durSec);
+    }
   }
 
   const totalSamples = Math.max(sampleRate, Math.round(maxEndSec * sampleRate));
   const masterPcm = Buffer.alloc(totalSamples * bytesPerSample, 0);
-  const actualPlacements: Array<{ startSec: number; endSec: number; durationSec: number }> = [];
+  const actualPlacements: AssembledTurnPlacement[] = [];
+
+  let nextTurnShiftSec = 0;
 
   for (let i = 0; i < turnsWithPcm.length; i++) {
     const current = turnsWithPcm[i];
-    const nextStartSec =
+    const origStartSec = Math.max(0, current.startSec || 0);
+    const origEndSec =
+      typeof current.endSec === "number" && current.endSec > origStartSec
+        ? current.endSec
+        : origStartSec + current.pcm.length / bytesPerSec;
+    const originalDurationSec = Math.round((origEndSec - origStartSec) * 100) / 100;
+
+    const nextOrigStartSec =
       i + 1 < turnsWithPcm.length && typeof turnsWithPcm[i + 1].startSec === "number"
         ? turnsWithPcm[i + 1].startSec
         : maxEndSec;
 
-    const targetStartSec = Math.max(0, current.startSec || 0);
-    const startSample = Math.floor(targetStartSec * sampleRate);
-    const startByte = startSample * bytesPerSample;
+    const appliedShiftHere = Math.min(maxShiftSec, Math.max(0, nextTurnShiftSec));
+    const effectiveStartSec = origStartSec + appliedShiftHere;
 
-    // Allow turn tail to flow into any silent pause before next turn's startSec (leaving 40ms gap before next turn)
-    const maxAllowedEndSec =
-      i + 1 < turnsWithPcm.length
-        ? Math.max(targetStartSec + 0.3, nextStartSec - 0.04)
-        : maxEndSec;
-    const maxAllowedBytes =
-      Math.floor((maxAllowedEndSec - targetStartSec) * sampleRate) * bytesPerSample;
+    let currentPcm = current.pcm;
+    let atempoApplied =
+      typeof current.atempoApplied === "number" && current.atempoApplied >= 1.0
+        ? current.atempoApplied
+        : 1.0;
+    const rephraseAttempts = current.rephraseAttempts || 0;
 
-    const bytesToCopy = Math.min(
-      current.pcm.length - (current.pcm.length % 2),
-      maxAllowedBytes,
-      masterPcm.length - startByte
+    let dubbedDurationSec = currentPcm.length / bytesPerSec;
+    const availableWithoutShiftSec = Math.max(0.2, nextOrigStartSec - effectiveStartSec - 0.02);
+    const maxNextShiftAllowed = i + 1 < turnsWithPcm.length ? maxShiftSec : 0;
+    const availableWithMaxShiftSec = Math.max(
+      0.2,
+      nextOrigStartSec + maxNextShiftAllowed - effectiveStartSec - 0.02
     );
 
-    if (bytesToCopy > 0 && startByte >= 0 && startByte < masterPcm.length) {
-      current.pcm.copy(masterPcm, startByte, 0, bytesToCopy);
+    // Step 5: If after Step 4 the turn is still longer than available space,
+    // apply atempo up to 1.15 and shift the next turn by up to 0.3 s
+    if (dubbedDurationSec > availableWithoutShiftSec + 0.02 && atempoApplied < maxFallbackAtempo) {
+      const sourcePcm = current.rawUnstretchedPcm || currentPcm;
+      const baseRatio = current.rawUnstretchedPcm ? 1.0 : atempoApplied;
+      const unscaledDurSec = (sourcePcm.length / bytesPerSec) * (current.rawUnstretchedPcm ? 1.0 : atempoApplied);
+
+      // First try to fit without shifting next turn if <= 1.15, otherwise use up to 1.15
+      const desiredTotalRatio = Math.min(
+        maxFallbackAtempo,
+        Math.max(atempoApplied, unscaledDurSec / availableWithoutShiftSec)
+      );
+      const ratioToApplyOnSource = desiredTotalRatio / baseRatio;
+      if (ratioToApplyOnSource > 1.008) {
+        currentPcm = await applyMildAtempoPcm(
+          sourcePcm,
+          ratioToApplyOnSource,
+          sampleRate,
+          maxFallbackAtempo
+        );
+        atempoApplied = Math.round(desiredTotalRatio * 100) / 100;
+        dubbedDurationSec = currentPcm.length / bytesPerSec;
+      }
     }
 
-    const actualDurSec = Math.round((Math.max(0, bytesToCopy) / bytesPerSec) * 100) / 100;
+    let syncStatus: TurnSyncStatus = "ok";
+    const endAfterPlacementSec = effectiveStartSec + dubbedDurationSec;
+
+    if (endAfterPlacementSec > nextOrigStartSec + maxNextShiftAllowed + 0.02) {
+      // Even with atempo up to 1.15 and shifting next turn by 0.3s, it still overflows:
+      // Lay down the full turn (never cut mid-word!) with a 120 ms fade-out on the last pause and mark "overflow"
+      currentPcm = applyFadeOutOnLastPausePcm(currentPcm, 120, sampleRate);
+      dubbedDurationSec = currentPcm.length / bytesPerSec;
+      syncStatus = "overflow";
+      nextTurnShiftSec = maxNextShiftAllowed;
+    } else {
+      // Fits within window + gap + <=0.3s shift
+      if (endAfterPlacementSec > nextOrigStartSec - 0.02 && i + 1 < turnsWithPcm.length) {
+        nextTurnShiftSec = Math.min(
+          maxShiftSec,
+          Math.max(0, endAfterPlacementSec + 0.02 - nextOrigStartSec)
+        );
+      } else {
+        nextTurnShiftSec = 0;
+      }
+
+      const usedShift = appliedShiftHere > 0.02 || nextTurnShiftSec > 0.02;
+      const usedAtempo = atempoApplied > 1.01;
+      const usedRephrase = rephraseAttempts > 0;
+
+      if (usedRephrase || usedAtempo || usedShift) {
+        syncStatus = "adjusted";
+      } else {
+        syncStatus = "ok";
+      }
+    }
+
+    // Never cut a turn in the middle of sound: mix full currentPcm onto masterPcm
+    const startSample = Math.max(0, Math.floor(effectiveStartSec * sampleRate));
+    const numTurnSamples = Math.floor(currentPcm.length / bytesPerSample);
+    const maxSamplesInMaster = Math.max(0, totalSamples - startSample);
+    const samplesToWrite = Math.min(numTurnSamples, maxSamplesInMaster);
+
+    // If the very last turn reaches the absolute end of the video buffer, apply 120ms fade-out at the boundary
+    if (samplesToWrite < numTurnSamples && samplesToWrite > 0) {
+      currentPcm = applyFadeOutOnLastPausePcm(
+        currentPcm.subarray(0, samplesToWrite * bytesPerSample),
+        120,
+        sampleRate
+      );
+    }
+
+    for (let s = 0; s < samplesToWrite; s++) {
+      const masterByteOffset = (startSample + s) * bytesPerSample;
+      const existingSample = masterPcm.readInt16LE(masterByteOffset);
+      const turnSample = currentPcm.readInt16LE(s * bytesPerSample);
+      const mixed = Math.max(-32768, Math.min(32767, existingSample + turnSample));
+      masterPcm.writeInt16LE(mixed, masterByteOffset);
+    }
+
+    const roundedDubbedDur = Math.round((samplesToWrite / sampleRate) * 100) / 100;
+    const roundedStart = Math.round(effectiveStartSec * 100) / 100;
+    const roundedEnd = Math.round((effectiveStartSec + roundedDubbedDur) * 100) / 100;
+
     actualPlacements.push({
-      startSec: targetStartSec,
-      endSec: Math.round((targetStartSec + actualDurSec) * 100) / 100,
-      durationSec: actualDurSec,
+      startSec: roundedStart,
+      endSec: roundedEnd,
+      durationSec: roundedDubbedDur,
+      originalDurationSec,
+      dubbedDurationSec: roundedDubbedDur,
+      atempoApplied: Math.round(atempoApplied * 100) / 100,
+      rephraseAttempts,
+      syncStatus,
+      shiftedStartBySec: Math.round(appliedShiftHere * 100) / 100,
+      pcm: currentPcm.subarray(0, samplesToWrite * bytesPerSample),
     });
   }
 
