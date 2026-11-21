@@ -4,29 +4,75 @@ import {
   normalizeUzbekApostrophes,
   canonicalizeTimedPauseTags,
 } from "../../../src/utils/uzbekNormalizer.ts";
+import {
+  verifyWordsUnchanged,
+  sanitizeAllowedAutoTags,
+} from "./ttsAutoStyle.ts";
 import type {
+  TtsAgentDecision,
   TtsAgentProposal,
   TtsAgentProposeResponse,
-  TtsAgentOutputMode,
-  TtsAgentWorkflowMode,
-  TtsPauseCadence,
+  TtsAgentWorkflow,
 } from "../../../src/types/tts.ts";
 
-const TIMED_PAUSE_TAG_EXACT_REGEX = /^\[pauza\s+(\d+(?:\.\d+)?)s\]$/i;
-const TIMED_PAUSE_TAG_GLOBAL_REGEX = /\[pauza\s+(\d+(?:\.\d+)?)s\]/gi;
+const TIMED_PAUSE_TAG_EXACT_REGEX = /^\[pauza\s+([1-3])s\]$/i;
+const TIMED_PAUSE_TAG_ANY_REGEX = /\[pauza\s+(\d+(?:\.\d+)?)s\]/gi;
 
-/**
- * Проверяет, является ли выражение в квадратных скобках тегом паузы ([pauza 1s], [пауза 2 сек], [2s]),
- * а НЕ незаполненным плейсхолдером факта ([telefon], [manzil]).
- */
 export function isTimedPauseBracketToken(token: string): boolean {
   const clean = canonicalizeTimedPauseTags(token || "").trim();
-  return TIMED_PAUSE_TAG_EXACT_REGEX.test(clean);
+  return /^\[pauza\s+(\d+(?:\.\d+)?)s\]$/i.test(clean);
 }
 
 /**
- * Подсчитывает слова, суммарное время пауз ([pauza 1s], [pauza 2s], [pauza 3s])
- * и общую длительность по правилу ~2.2 слова/сек + сумма пауз (без потолка в 60 секунд).
+ * Раздел 1.3 (п.1): Канонизирует паузы строго в [pauza 1s], [pauza 2s], [pauza 3s] (N от 1 до 3)
+ * и оставляет только разрешённые английские вокальные теги (<short pause>, <breath>, <sigh>, <laugh>).
+ */
+export function enforceAllowedPauseAndVocalTags(text: string): string {
+  const withCanonicalPauses = canonicalizeTimedPauseTags(text || "")
+    .replace(/([oOgG])[\u02BB\u02BC\u2018\u2019`´]/g, "$1'")
+    .replace(
+      TIMED_PAUSE_TAG_ANY_REGEX,
+      (_m, numStr) => {
+        const n = Math.max(1, Math.min(3, Math.round(parseFloat(numStr) || 1)));
+        return `[pauza ${n}s]`;
+      }
+    );
+  return sanitizeAllowedAutoTags(withCanonicalPauses);
+}
+
+/**
+ * Раздел 1.3 (п.4): Проверяет отсутствие выдуманных телефонов, адресов/ссылок и цен, которых не было в задании.
+ */
+function stripHallucinatedContacts(
+  proposalText: string,
+  originalTask: string,
+  isCommercialAd: boolean
+): string {
+  const taskDigits = (originalTask.match(/\d{4,}/g) || []).join(" ");
+  let cleaned = proposalText;
+
+  // Выдуманные телефонные номера (например +998 90 123-45-67), которых нет в задании
+  cleaned = cleaned.replace(
+    /(?:\+?\s*998|8\s*\(\d{3}\)|\+\d{1,3})[\s\-()]*\d{2,3}[\s\-()]*\d{3}[\s\-()]*\d{2}[\s\-()]*\d{2}/g,
+    (match) => {
+      const digitsOnly = match.replace(/\D/g, "");
+      if (digitsOnly.length >= 6 && taskDigits.includes(digitsOnly.slice(-6))) {
+        return match;
+      }
+      return isCommercialAd ? "[telefon]" : "";
+    }
+  );
+
+  // В некоммерческих жанрах убираем навязанные [telefon], [manzil], [narx], если их не было в задаче
+  if (!isCommercialAd) {
+    cleaned = cleaned.replace(/\[(telefon|manzil|narx)\]/gi, "");
+  }
+
+  return cleaned.replace(/\s{2,}/g, " ").trim();
+}
+
+/**
+ * Подсчитывает слова, суммарное время пауз ([pauza 1s/2s/3s]), длительность и плейсхолдеры.
  */
 export function computeWordAndDurationStats(text: string): {
   wordCount: number;
@@ -34,12 +80,11 @@ export function computeWordAndDurationStats(text: string): {
   estimatedSeconds: number;
   placeholders: string[];
 } {
-  const canonical = canonicalizeTimedPauseTags(text || "").trim();
+  const canonical = enforceAllowedPauseAndVocalTags(text || "").trim();
 
-  // Суммируем длительность всех явных пауз [pauza Ns]
   let pauseTotalSeconds = 0;
   let match: RegExpExecArray | null;
-  const pauseRegex = new RegExp(TIMED_PAUSE_TAG_GLOBAL_REGEX.source, "gi");
+  const pauseRegex = new RegExp(TIMED_PAUSE_TAG_ANY_REGEX.source, "gi");
   while ((match = pauseRegex.exec(canonical)) !== null) {
     const sec = parseFloat(match[1]);
     if (!isNaN(sec) && sec > 0) {
@@ -48,7 +93,6 @@ export function computeWordAndDurationStats(text: string): {
   }
   pauseTotalSeconds = Math.round(pauseTotalSeconds * 10) / 10;
 
-  // Ищем только реальные плейсхолдеры пропущенных фактов ([telefon], [manzil] и т.д.), исключая [pauza Ns]
   const allBrackets = canonical.match(/\[[^\][]{1,40}\]/g) || [];
   const placeholders = Array.from(
     new Set(
@@ -58,9 +102,8 @@ export function computeWordAndDurationStats(text: string): {
     )
   );
 
-  // Для подсчёта произносимых слов убираем теги пауз [pauza Ns] и вокальные теги <...>
   const spokenOnly = canonical
-    .replace(TIMED_PAUSE_TAG_GLOBAL_REGEX, " ")
+    .replace(TIMED_PAUSE_TAG_ANY_REGEX, " ")
     .replace(/<[^>]+>/g, " ")
     .trim();
 
@@ -76,7 +119,7 @@ export function computeWordAndDurationStats(text: string): {
 }
 
 /**
- * Быстрая проверка: слишком ли пустое задание (нет ни сути, ни объекта, например просто «реклама» или «сделай озвучку»).
+ * Быстрая проверка: слишком пустое задание (нет ни темы, ни названия, ни текста).
  */
 function isTaskTooVagueHeuristic(task: string): boolean {
   const trimmed = (task || "").trim();
@@ -92,145 +135,69 @@ function isTaskTooVagueHeuristic(task: string): boolean {
 }
 
 /**
- * Определяет, просит ли пользователь в тексте задания один большой монолог/рассказ/процедуру или паузы 1-2-3 секунды.
+ * Раздел 1.3: Вычисляет Jaccard-сходство двух текстов (0..1) для проверки разнообразия 3 вариантов.
  */
-function detectTaskIntentHeuristics(task: string): {
-  wantsSingleMonologue: boolean;
-  wantsMeasuredPauses: boolean;
-  explicitTargetWords: number | null;
-} {
-  const lower = (task || "").toLowerCase();
-  const wantsSingleMonologue =
-    /(монолог|рассказ|истори[яю]|процедур[ауы]|регламент|лекци[яю]|сказк[ау]|глав[ау]|повествовани|bitta\s+matn|hikoya|monolog|jarayon|tartib)/i.test(
-      lower
-    ) || task.trim().split(/\s+/).length > 120;
-
-  const wantsMeasuredPauses =
-    /(пауз[аыу]|pauza|pause|1\s*,\s*2\s*,\s*3|секунд[ыу]?|soniya)/i.test(lower);
-
-  const wordMatch = lower.match(/(\d{2,5})\s*(?:слов|so'z|words)/i);
-  const explicitTargetWords = wordMatch ? Math.min(10000, Math.max(20, parseInt(wordMatch[1], 10))) : null;
-
-  return { wantsSingleMonologue, wantsMeasuredPauses, explicitTargetWords };
+function computeTextSimilarity(a: string, b: string): number {
+  const toSet = (s: string) =>
+    new Set(
+      s
+        .toLowerCase()
+        .replace(/\[pauza\s+\d+s\]|<[^>]+>/gi, " ")
+        .replace(/[^a-zа-яё0-9o'g'\s]/gi, " ")
+        .split(/\s+/)
+        .filter((w) => w.length > 2)
+    );
+  const setA = toSet(a);
+  const setB = toSet(b);
+  if (setA.size === 0 || setB.size === 0) return 0;
+  let inter = 0;
+  for (const w of setA) {
+    if (setB.has(w)) inter++;
+  }
+  const union = setA.size + setB.size - inter;
+  return union > 0 ? inter / union : 0;
 }
 
-/**
- * Возвращает эталонную промпт-инженерную архитектуру AI-Режиссёра OvozStudio
- * (объединяющую лучшие практики ElevenLabs Studio, Hume Octave, Murf AI и Descript).
- */
-export function buildAgentSystemPrompt(params: {
-  language: "uz" | "ru" | "en";
-  outputMode: TtsAgentOutputMode;
-  workflowMode: TtsAgentWorkflowMode;
-  pauseCadence: TtsPauseCadence;
-  durationSec: number; // 0 = без ограничения (по объёму темы/процедуры, до 10 000 слов)
-  explicitTargetWords: number | null;
-  customSystemRules?: string;
-}): string {
-  const targetLangDesc =
-    params.language === "uz"
-      ? "живой разговорный литературно-естественный узбекский язык (латиница, апостроф ' в o' и g', без канцелярита и машинных калек)"
-      : params.language === "ru"
-        ? "живой естественный русский язык (разговорная дикторская подача, без штампов и канцелярита)"
-        : "natural conversational studio English";
-
-  const isUnlimited = params.durationSec <= 0;
-  const targetWords = params.explicitTargetWords
-    ? params.explicitTargetWords
-    : isUnlimited
-      ? 0
-      : Math.round(params.durationSec * TTS_MODELS_CONFIG.wordsPerSecondEstimate);
-
-  const minWords = targetWords > 0 ? Math.ceil(targetWords * 0.85) : 0;
-  const maxWords = targetWords > 0 ? Math.floor(targetWords * 1.18) : 10000;
-
-  const pauseInstruction =
-    params.pauseCadence === "1_2_3s"
-      ? `ПАРТИТУРА ТОЧНЫХ ПАУЗ (ОБЯЗАТЕЛЬНО):
-- Внутри непрерывной речи расставляй точные тайминг-паузы в квадратных скобках: [pauza 1s], [pauza 2s], [pauza 3s].
-- Правило чередования пауз:
-  • [pauza 1s] — после короткой законченной мысли или перечисления внутри абзаца (чтобы слушатель усвоил деталь).
-  • [pauza 2s] — между смысловыми абзацами, шагами процедуры или после риторического вопроса.
-  • [pauza 3s] — перед ключевым выводом, сменой главы рассказа, кульминацией или новым этапом процедуры.
-- Дополнительно используй микро-дыхание <breath> перед длинными фразами и <short pause> внутри сложных предложений.`
-      : params.pauseCadence === "1s"
-        ? `ПАРТИТУРА ПАУЗ:
-- Между смысловыми блоками и важными фразами ставь точные паузы [pauza 1s] (и [pauza 2s] между крупными абзацами), а также естественное дыхание <breath>.`
-        : params.pauseCadence === "none"
-          ? `ПАРТИТУРА ПАУЗ:
-- Не вставляй теги [pauza Ns], если пользователь явно не попросил об этом в тексте задачи.`
-          : `ПАРТИТУРА ПАУЗ (АВТО-РЕЖИССУРА):
-- Если пользователь просит паузы (например, 1, 2, 3 секунды) или если это монолог, рассказ, инструкция или процедура — обязательно расставляй точные студийные паузы [pauza 1s], [pauza 2s], [pauza 3s] между смысловыми частями и шагами!
-- Аудио-движок синтезирует [pauza 1s], [pauza 2s], [pauza 3s] как настоящую студийную тишину ровно в 1, 2 и 3 секунды.`;
-
-  const workflowInstruction =
-    params.workflowMode === "format_procedure"
-      ? `РЕЖИМ РАБОТЫ — ПОЛНАЯ ОБРАБОТКА ПРОЦЕДУРЫ / ТЕКСТА ПОЛЬЗОВАТЕЛЯ:
-- Пользователь передал процедуру, регламент, сценарий или текст.
-- СОХРАНИ 100% смысла, все шаги, все детали и последовательность процедуры! Ничего не выбрасывай и не урезай до 1 минуты.
-- Преврати сухой текст в живую дикторскую речь, разбей на удобные для дыхания фразы и расставь точные паузы [pauza 1s], [pauza 2s], [pauza 3s] между шагами и мыслями.`
-      : params.workflowMode === "expand_monologue"
-        ? `РЕЖИМ РАБОТЫ — РАЗВЁРНУТЫЙ МОНОЛОГ / РАССКАЗ / СТОРИТЕЛЛИНГ:
-- Напиши один глубокий, цельный, захватывающий монолог или рассказ с продуманной драматургией (завязка → развитие → кульминация → послевкусие).
-- Используй кинематографичную ритмику речи: чередуй темп фраз и обязательно ставь студийные паузы [pauza 1s], [pauza 2s], [pauza 3s] для погружения слушателя.`
-        : `РЕЖИМ РАБОТЫ — СЦЕНАРНЫЙ AI-АГЕНТ OVOZSTUDIO:
-- Создай готовый к озвучке дикторский сценарий по заданию пользователя.`;
-
-  const outputCountInstruction =
-    params.outputMode === "single_monologue"
-      ? `ФОРМАТ ВЫДАЧИ — РОВНО 1 ПОЛНЫЙ СЦЕНАРИЙ (proposals.length = 1):
-- Верни в массиве proposals РОВНО 1 элемент — полный, глубоко проработанный мастер-текст (монолог, рассказ, процедуру или ролик). Не дроби ответ на 3 мелких варианта!`
-      : `ФОРМАТ ВЫДАЧИ — 3 ВАРИАНТА ПОДАЧИ (proposals.length = 3):
-- Если тон в задаче НЕ указан — выдай 3 разных тона: 1) Разговорный (conversational), 2) Деловой/уверенный (confident), 3) Энергичный/выразительный (energetic).
-- Если тон в задаче УКАЗАН — все 3 варианта должны быть в этом тоне, но с разной композицией и заходом.`;
-
-  const durationInstruction = isUnlimited
-    ? `КОНТРОЛЬ ДЛИНЫ И ОБЪЁМА (БЕЗ ОГРАНИЧЕНИЯ В 60 СЕКУНД):
-- Ограничения в 60 секунд НЕТ! Длина текста определяется полнотой раскрытия темы, процедуры или рассказа (вплоть до 10 000 слов).
-- Если пользователь передал длинную процедуру или просит большой рассказ/монолог — пиши полный, подробный текст без сокращений.`
-    : `КОНТРОЛЬ ДЛИНЫ И ТАЙМИНГА:
-- Целевая длительность речи: ~${params.durationSec} секунд (скорость речи ~2.2 слова в секунду + время пауз [pauza Ns]).
-- Целевой объём каждого сценария: от ${minWords} до ${maxWords} слов (оптимально около ${targetWords} слов).`;
-
-  return `Ты — главный AI-режиссёр озвучки, сценарист и акустический продюсер OvozStudio (Prompt Engineering уровня ElevenLabs Studio / Hume Octave / Descript).
-Язык сценария: ${targetLangDesc}.
-
-${workflowInstruction}
-
-${outputCountInstruction}
-
-${pauseInstruction}
-
-${durationInstruction}
-
-ПРАВИЛА ПРОМПТ-ИНЖИНИРИНГА ДЛЯ ЖИВОЙ ОЗВУЧКИ (VOICE-FIRST COPYWRITING):
-1. ПИШИ ДЛЯ УХА, А НЕ ДЛЯ БУМАГИ:
-   - Каждая фраза должна легко произноситься на одном дыхании (7–15 слов).
-   - Избегай канцелярских штампов, скобок, сложных причастных оборотов и табличных сокращений.
-   - На узбекском языке используй живые разговорные связки («Bilasizmi», «Tasavvur qiling», «Keling, navbatdagi qadamga o'tamiz», «Eng muhimi shundaki»), правильный порядок слов и чистую латиницу с апострофом ' в o' и g'.
-2. ЗАПРЕТ НА ЛИШНИЕ ПЛЕЙСХОЛДЕРЫ И «ТРИ ТЕЛЕФОНА»:
-   - НИКОГДА не вставляй [telefon], [manzil], [narx] в рассказы, монологи, процедуры, инструкции, истории или поздравления!
-   - Плейсхолдеры вроде [telefon] или [manzil] допустимы ТОЛЬКО в том случае, если пользователь явно заказал коммерческую рекламу услуги/магазина с призывом позвонить/приехать и сам не указал номер или адрес. Никогда не выдумывай фальшивые номера телефонов (+998 90 123-45-67).
-3. УТОЧНЯЮЩИЙ ВОПРОС (needsClarification):
-   - Задавай ОДИН уточняющий вопрос (needsClarification: true, proposals: []) ТОЛЬКО если в задаче вообще нет ни темы, ни сути, ни текста (например, просто «сделай озвучку»). Во всех остальных случаях сразу выдавай готовый сценарий (needsClarification: false).${
-     params.customSystemRules?.trim()
-       ? `\n\nДОПОЛНИТЕЛЬНЫЕ АВТОРСКИЕ ПРАВИЛА ПОЛЬЗОВАТЕЛЯ:\n${params.customSystemRules.trim()}`
-       : ""
-   }`;
-}
-
-const PROPOSAL_SCHEMA = {
+const AUTONOMOUS_AGENT_SCHEMA = {
   type: Type.OBJECT,
   properties: {
+    decision: {
+      type: Type.OBJECT,
+      properties: {
+        genre: {
+          type: Type.STRING,
+          description:
+            "Detected genre (e.g. 'Реклама', 'Приветствие / IVR', 'Поздравление', 'Рассказ / Монолог', 'Инструкция / Процедура', 'Reels').",
+        },
+        workflow: {
+          type: Type.STRING,
+          description: "Exactly one of: 'create', 'format', 'expand'.",
+        },
+        variantsCount: {
+          type: Type.INTEGER,
+          description: "Number of variants returned: 1, 2, or 3.",
+        },
+        targetSeconds: {
+          type: Type.INTEGER,
+          description:
+            "Target audio duration in seconds (from prompt, genre default, or full natural length for long texts; 0 if purely determined by pasted text).",
+        },
+        reasonShort: {
+          type: Type.STRING,
+          description:
+            "One short human-readable summary in the UI/task language, e.g. 'Рекламный текст для Instagram, ~20 с, 3 варианта' or 'Готовая процедура с паузами 1–3 с, 1 вариант'.",
+        },
+      },
+      required: ["genre", "workflow", "variantsCount", "targetSeconds", "reasonShort"],
+    },
     needsClarification: {
       type: Type.BOOLEAN,
       description:
-        "True ONLY if the user prompt has zero subject/context (e.g. just 'make a voiceover' without saying for what).",
+        "True ONLY if the prompt has zero essence/subject/name (e.g. just 'сделай рекламу').",
     },
     clarifyingQuestion: {
       type: Type.STRING,
-      description:
-        "One short clarifying question if needsClarification is true; otherwise empty string.",
+      description: "One short clarifying question if needsClarification is true; otherwise empty string.",
     },
     proposals: {
       type: Type.ARRAY,
@@ -243,125 +210,103 @@ const PROPOSAL_SCHEMA = {
           text: {
             type: Type.STRING,
             description:
-              "Ready-to-voice script in the target language. May include acoustic pause tags [pauza 1s], [pauza 2s], [pauza 3s] and vocal tags <breath>, <short pause>, <sigh>, <laugh>.",
+              "Ready-to-voice script. Short intra-phrase pauses: ONLY <short pause> and <breath>. Exact pauses: ONLY [pauza 1s], [pauza 2s], [pauza 3s] where needed by meaning or requested.",
           },
-          recommendedPreset: {
+          preset: {
             type: Type.STRING,
             description: "One of: conversational, confident, energetic, warm",
           },
           recommendedVoiceId: {
             type: Type.STRING,
             description:
-              "Recommended voice id, e.g. charon-news, kore-podcast, fenrir-narrator, aoede-story",
+              "Recommended voice id from catalog, e.g. ulugbek-history, aziza-ai, jasur-business, dilnoza-blogger, shahnoza-speech, rayhon-art.",
           },
           reason: {
             type: Type.STRING,
-            description: "One short sentence explaining the director's choice of tone, pacing, and pauses.",
+            description: "One short sentence explaining the choice of tone, pacing, and pauses.",
           },
         },
-        required: [
-          "id",
-          "title",
-          "badge",
-          "text",
-          "recommendedPreset",
-          "recommendedVoiceId",
-          "reason",
-        ],
+        required: ["id", "title", "badge", "text", "preset", "recommendedVoiceId", "reason"],
       },
     },
   },
-  required: ["needsClarification", "proposals"],
+  required: ["decision", "needsClarification", "proposals"],
 };
 
 /**
- * Генерация сценария (1 полного монолога/процедуры или 3 вариантов подачи) по задаче пользователя.
- * Поддерживает любую длительность (от 15 сек до 10 000 слов без потолка в 60 секунд) и точные паузы [pauza 1s], [pauza 2s], [pauza 3s].
+ * Разделы 1.2 и 1.3: Полностью автономный AI-Агент (1 вызов gemini-4-hydrogen с responseSchema)
+ * + детерминированная самопроверка кодом (без лишних вызовов модели).
  */
 export async function generateTtsAgentProposals(
   ai: GoogleGenAI,
   params: {
     task: string;
-    durationSec?: number; // 0 = Авто / Без ограничений (до 10 000 слов)
     language: "uz" | "ru" | "en";
     voiceId?: string;
-    outputMode?: TtsAgentOutputMode;
-    workflowMode?: TtsAgentWorkflowMode;
-    pauseCadence?: TtsPauseCadence;
-    customSystemRules?: string;
   }
 ): Promise<TtsAgentProposeResponse> {
-  const cleanTask = (params.task || "").trim().slice(0, TTS_MODELS_CONFIG.maxAgentTaskChars);
-  const rawDuration = Number(params.durationSec);
-  const targetSec = isNaN(rawDuration) ? 30 : Math.max(0, Math.min(7200, rawDuration));
+  const cleanTask = (params.task || "").trim();
+  const inputWords = cleanTask ? cleanTask.split(/\s+/).filter(Boolean).length : 0;
+
+  // Раздел 1.1: Лимит поля 3 000 слов (~20 минут речи)
+  if (inputWords > TTS_MODELS_CONFIG.maxAgentWords) {
+    const err: any = new Error("Разбейте текст на части (лимит поля — 3 000 слов)");
+    err.status = 400;
+    err.code = "TEXT_TOO_LONG";
+    throw err;
+  }
 
   if (isTaskTooVagueHeuristic(cleanTask)) {
     return {
       needsClarification: true,
       clarifyingQuestion:
         params.language === "uz"
-          ? "Qaysi mavzu, hikoya, jarayon yoki mahsulot uchun ovozli ssenariy tayyorlash kerak?"
-          : "Уточните, пожалуйста: для какого рассказа, процедуры, темы или продукта нужно подготовить озвучку?",
+          ? "Qaysi mahsulot, mavzu, jarayon yoki tadbir uchun ovozli matn tayyorlash kerak?"
+          : "Уточните, пожалуйста: для какого продукта, темы, события или текста нужно подготовить озвучку?",
       proposals: [],
     };
   }
 
-  const intent = detectTaskIntentHeuristics(cleanTask);
+  const targetLangDesc =
+    params.language === "uz"
+      ? "живой естественный узбекский язык (латиница, строго единый апостроф ' в o' и g', без канцелярита)"
+      : params.language === "ru"
+        ? "живой естественный русский язык (разговорная дикторская подача, без канцелярита)"
+        : "natural conversational studio English";
 
-  const effectiveOutputMode: TtsAgentOutputMode =
-    params.outputMode ||
-    (intent.wantsSingleMonologue ||
-    targetSec === 0 ||
-    targetSec > 90 ||
-    params.workflowMode === "format_procedure" ||
-    params.workflowMode === "expand_monologue"
-      ? "single_monologue"
-      : "three_variants");
+  const systemInstruction = `Ты — автономный AI-режиссёр озвучки OvozStudio. Пользователь дал тебе обычное задание в одном поле ввода без дополнительных настроек. ТЫ САМ принимаешь все режиссёрские решения.
 
-  const effectiveWorkflowMode: TtsAgentWorkflowMode =
-    params.workflowMode ||
-    (cleanTask.split(/\s+/).length > 140
-      ? "format_procedure"
-      : intent.wantsSingleMonologue
-        ? "expand_monologue"
-        : "create");
+Целевой язык озвучки: ${targetLangDesc}.
 
-  const effectivePauseCadence: TtsPauseCadence =
-    params.pauseCadence || (intent.wantsMeasuredPauses ? "1_2_3s" : "auto");
-
-  const systemInstruction = buildAgentSystemPrompt({
-    language: params.language,
-    outputMode: effectiveOutputMode,
-    workflowMode: effectiveWorkflowMode,
-    pauseCadence: effectivePauseCadence,
-    durationSec: targetSec,
-    explicitTargetWords: intent.explicitTargetWords,
-    customSystemRules: params.customSystemRules,
-  });
-
-  const targetWords = intent.explicitTargetWords
-    ? intent.explicitTargetWords
-    : targetSec > 0
-      ? Math.round(targetSec * TTS_MODELS_CONFIG.wordsPerSecondEstimate)
-      : 0;
-  const minWords = targetWords > 0 ? Math.ceil(targetWords * 0.82) : 0;
-  const maxWords = targetWords > 0 ? Math.floor(targetWords * 1.18) : 10000;
-
-  const userPrompt =
-    targetSec > 0 && effectiveOutputMode === "three_variants"
-      ? `Задача пользователя:\n"""\n${cleanTask}\n"""\nЦелевая длительность каждого из 3 вариантов: ~${targetSec} сек (${minWords}–${maxWords} слов).`
-      : targetSec > 0 && effectiveOutputMode === "single_monologue"
-        ? `Задача пользователя:\n"""\n${cleanTask}\n"""\nПодготовь 1 полный сценарий/монолог длительностью ~${targetSec} сек (около ${targetWords} слов).`
-        : `Задача / процедура пользователя:\n"""\n${cleanTask}\n"""\nПодготовь полный, детальный сценарий без ограничения в 60 секунд, сохранив все этапы и расставив естественные паузы [pauza 1s], [pauza 2s], [pauza 3s].`;
+ПРАВИЛА АВТОНОМНОГО ПРИНЯТИЯ РЕШЕНИЙ (заполни объект decision):
+1. ТИП ЗАДАНИЯ (decision.workflow):
+   - "format": если пользователь вставил готовый текст/процедуру/объявление/рассказ и просит его озвучить, оформить или расставить паузы — ТОЛЬКО расставь теги пауз и дыхания, НЕ МЕНЯЙ, НЕ ДОБАВЛЯЙ И НЕ УДАЛЯЙ НИ ОДНОГО СЛОВА исходного текста!
+   - "expand": если пользователь дал короткий текст/тезисы и явно просит «подробнее», «разверни», «дополни», «сделай большой рассказ».
+   - "create": если пользователь описал тему или задачу своими словами.
+2. ЧИСЛО ВАРИАНТОВ (decision.variantsCount и длина массива proposals):
+   - Открытая задача (реклама, приветствие, Reels, объявление, поздравление) -> 3 принципиально разных варианта с разной подачей, заходом и структурой (НЕ копируй один текст трижды!).
+   - Готовый текст ("format"), длинная процедура, инструкция или явный запрос на «один монолог/рассказ» -> 1 цельный мастер-вариант.
+   - Если пользователь сам назвал число вариантов («дай 2 варианта», «сделай 1 вариант») -> верни ровно столько.
+3. ДЛИТЕЛЬНОСТЬ (decision.targetSeconds):
+   - Бери из задания («20 секунд», «на 2 минуты»).
+   - Если не указана — подбирай по жанру: реклама 15–30 с, приветствие/автоответчик 10–15 с, поздравление 20–40 с, инструкция/процедура/рассказ — по полному естественному объёму (ПОТОЛКА В 60 СЕКУНД НЕТ!). Скорость речи ~2.2 слова/сек + паузы.
+4. ПАУЗЫ И ТЕГИ (СТРОГО АНГЛИЙСКИЕ ТЕГИ):
+   - Короткие паузы и дыхание внутри фраз: ТОЛЬКО английские теги <short pause> и <breath> (допустимы также <sigh>, <laugh> если уместно). НИКОГДА не пиши русские теги в угловых скобках!
+   - Точные длинные паузы: ТОЛЬКО [pauza 1s], [pauza 2s], [pauza 3s] (N от 1 до 3) — ставь только там, где они нужны по смыслу (между шагами процедуры, абзацами, сменой темы) или если пользователь сам просит паузы.
+5. ЧЕГО НЕ ХВАТАЕТ И ЗАПРЕТ НА ВЫДУМКУ:
+   - Если задачу невозможно выполнить без сути/названия (например, «сделай рекламу» без предмета) -> needsClarification: true, один короткий вопрос, proposals: [].
+   - НИКОГДА не выдумывай номера телефонов (+998 90 123-45-67), адреса или цены! Если это коммерческая реклама и в задании нет контакта/цены — поставь строго [telefon], [manzil], [narx]. В некоммерческие тексты (рассказы, процедуры, поздравления, монологи) [telefon]/[manzil]/[narx] НЕ вставляй!
+6. reasonShort:
+   - Одна короткая понятная строка о твоём решении, например: «Рекламный текст для Instagram, ~20 с, 3 варианта» или «Готовая процедура с паузами 1–3 с, 1 вариант».`;
 
   const response = await ai.models.generateContent({
     model: TTS_MODELS_CONFIG.textModel,
-    contents: userPrompt,
+    contents: `Задание пользователя:\n"""\n${cleanTask}\n"""`,
     config: {
       systemInstruction,
       thinkingConfig: { thinkingLevel: TTS_MODELS_CONFIG.textThinkingLevel },
       responseMimeType: "application/json",
-      responseSchema: PROPOSAL_SCHEMA,
+      responseSchema: AUTONOMOUS_AGENT_SCHEMA,
     },
   });
 
@@ -375,55 +320,82 @@ export async function generateTtsAgentProposals(
       needsClarification: true,
       clarifyingQuestion:
         String(parsed.clarifyingQuestion || "").trim() ||
-        "Уточните, пожалуйста, о каком продукте, процедуре или событии должна быть озвучка?",
+        "Уточните, пожалуйста, о каком продукте, теме или событии должна быть озвучка?",
       proposals: [],
     };
   }
 
-  const maxSlice = effectiveOutputMode === "single_monologue" ? 1 : 3;
-  const rawProposals: any[] = Array.isArray(parsed.proposals)
-    ? parsed.proposals.slice(0, maxSlice)
+  const rawDecision = parsed.decision || {};
+  const workflow: TtsAgentWorkflow =
+    rawDecision.workflow === "format" || rawDecision.workflow === "expand"
+      ? rawDecision.workflow
+      : "create";
+  const targetSeconds = Math.max(0, Math.round(Number(rawDecision.targetSeconds) || 0));
+  const decision: TtsAgentDecision = {
+    genre: String(rawDecision.genre || "Озвучка").trim(),
+    workflow,
+    variantsCount: Math.max(1, Math.min(3, Number(rawDecision.variantsCount) || (Array.isArray(parsed.proposals) ? parsed.proposals.length : 1))),
+    targetSeconds,
+    reasonShort: String(rawDecision.reasonShort || "").trim(),
+  };
+
+  let rawProposals: any[] = Array.isArray(parsed.proposals)
+    ? parsed.proposals.slice(0, 3)
     : [];
 
-  // Авто-коррекция длины применяется ТОЛЬКО для коротких фиксированных роликов (15–90 сек) без ручных пауз,
-  // чтобы никогда не обрезать длинные монологи, рассказы и процедуры пользователя!
-  if (
-    targetSec > 0 &&
-    targetSec <= 90 &&
-    !intent.wantsSingleMonologue &&
-    effectiveWorkflowMode === "create"
-  ) {
-    const minAllowedSec = targetSec * 0.8;
-    const maxAllowedSec = targetSec * 1.22;
+  const isCommercialAd = /(реклам|промо|акци|скидк|магазин|услуг|instagram|reels|reklama|sotuv|aksiya)/i.test(
+    `${decision.genre} ${cleanTask}`
+  );
 
-    const indicesToRewrite: number[] = [];
+  // =========================================================================
+  // Раздел 1.3: САМОПРОВЕРКА КОДОМ (без лишних вызовов модели)
+  // =========================================================================
+
+  // 1.3 (п.1, 2, 3, 4): нормализация тегов, апострофов, проверка format (0 изменённых слов) и запрет выдуманных телефонов
+  const sanitizeProposalText = (rawTxt: string): string => {
+    let txt = enforceAllowedPauseAndVocalTags(String(rawTxt || "").trim());
+    if (params.language === "uz") {
+      txt = normalizeUzbekApostrophes(txt);
+    }
+    txt = stripHallucinatedContacts(txt, cleanTask, isCommercialAd);
+
+    // Для типа format: текст без тегов ДОЛЖЕН 1:1 совпадать с исходным. Если не совпал — разметка отбрасывается!
+    if (workflow === "format") {
+      if (!verifyWordsUnchanged(cleanTask, txt)) {
+        return params.language === "uz" ? normalizeUzbekApostrophes(cleanTask) : cleanTask;
+      }
+    }
+    return txt;
+  };
+
+  rawProposals = rawProposals.map((p) => ({
+    ...p,
+    text: sanitizeProposalText(p?.text || ""),
+  }));
+
+  // 1.3 (п.5): Длительность отличается от targetSeconds > 20% -> ровно 1 автоматическая переделка (только для create)
+  if (workflow === "create" && targetSeconds >= 10 && targetSeconds <= 180 && rawProposals.length > 0) {
+    const minSec = targetSeconds * 0.8;
+    const maxSec = targetSeconds * 1.2;
+    const targetWords = Math.max(8, Math.round(targetSeconds * TTS_MODELS_CONFIG.wordsPerSecondEstimate));
+    const outOfRangeIdx: number[] = [];
+
     rawProposals.forEach((p, idx) => {
-      const txt = String(p?.text || "").trim();
-      const { wordCount, estimatedSeconds } = computeWordAndDurationStats(txt);
-      if (
-        estimatedSeconds < minAllowedSec ||
-        estimatedSeconds > maxAllowedSec ||
-        wordCount < minWords ||
-        wordCount > maxWords
-      ) {
-        indicesToRewrite.push(idx);
+      const { estimatedSeconds } = computeWordAndDurationStats(p.text);
+      if (estimatedSeconds < minSec || estimatedSeconds > maxSec) {
+        outOfRangeIdx.push(idx);
       }
     });
 
-    if (indicesToRewrite.length > 0 && rawProposals.length > 0) {
+    if (outOfRangeIdx.length > 0) {
       try {
-        const rewritePrompt = indicesToRewrite
-          .map((i) => {
-            const p = rawProposals[i];
-            const { wordCount } = computeWordAndDurationStats(String(p?.text || ""));
-            return `Вариант #${i + 1} (${p?.badge || p?.title}, сейчас ${wordCount} слов): "${p?.text}"`;
-          })
+        const listStr = outOfRangeIdx
+          .map((i) => `Вариант #${i + 1} (${rawProposals[i]?.title}): "${rawProposals[i]?.text}"`)
           .join("\n\n");
 
         const rewriteResp = await ai.models.generateContent({
           model: TTS_MODELS_CONFIG.textModel,
-          contents: `Скорректируй объём указанных вариантов для задачи "${cleanTask.slice(0, 500)}", чтобы в КАЖДОМ было от ${minWords} до ${maxWords} слов (около ${targetWords} слов = ${targetSec} сек при 2.2 слова/сек).
-Сохрани тон варианта, паузы [pauza Ns], все факты из задачи и не добавляй лишних [telefon]:\n\n${rewritePrompt}`,
+          contents: `Скорректируй объём указанных вариантов для задачи "${cleanTask.slice(0, 600)}", чтобы каждый звучал около ${targetSeconds} сек (~${targetWords} слов при 2.2 слова/сек, допуск ±15%). Сохрани язык, теги (<short pause>, <breath>, [pauza 1s/2s/3s]), смысл и уникальную подачу каждого варианта:\n\n${listStr}`,
           config: {
             thinkingConfig: { thinkingLevel: TTS_MODELS_CONFIG.textThinkingLevel },
             responseMimeType: "application/json",
@@ -432,41 +404,76 @@ export async function generateTtsAgentProposals(
               properties: {
                 rewrittenTexts: {
                   type: Type.ARRAY,
-                  items: {
-                    type: Type.STRING,
-                  },
+                  items: { type: Type.STRING },
                 },
               },
               required: ["rewrittenTexts"],
             },
           },
         });
-
-        const rewriteParsed = JSON.parse((rewriteResp.text || "{}").trim());
-        if (Array.isArray(rewriteParsed.rewrittenTexts)) {
-          indicesToRewrite.forEach((propIdx, arrIdx) => {
-            const candidate = String(rewriteParsed.rewrittenTexts[arrIdx] || "").trim();
-            if (candidate) {
-              rawProposals[propIdx].text = candidate;
+        const rewritten = JSON.parse((rewriteResp.text || "{}").trim());
+        if (Array.isArray(rewritten.rewrittenTexts)) {
+          outOfRangeIdx.forEach((propIdx, k) => {
+            const cand = String(rewritten.rewrittenTexts[k] || "").trim();
+            if (cand) {
+              rawProposals[propIdx].text = sanitizeProposalText(cand);
             }
           });
         }
-      } catch (e) {
-        // В случае сбоя оставляем исходный вариант
+      } catch {}
+    }
+  }
+
+  // 1.3 (п.6): Второй вызов модели ТОЛЬКО для create и ТОЛЬКО если 3 варианта похожи > 70%
+  if (workflow === "create" && rawProposals.length >= 2) {
+    let maxSim = 0;
+    for (let i = 0; i < rawProposals.length; i++) {
+      for (let j = i + 1; j < rawProposals.length; j++) {
+        maxSim = Math.max(maxSim, computeTextSimilarity(rawProposals[i].text, rawProposals[j].text));
       }
+    }
+
+    if (maxSim > 0.7) {
+      try {
+        const diffResp = await ai.models.generateContent({
+          model: TTS_MODELS_CONFIG.textModel,
+          contents: `Варианты получились слишком похожими друг на друга (сходство ${Math.round(maxSim * 100)}%). Перепиши варианты #2${rawProposals.length >= 3 ? " и #3" : ""} для задачи "${cleanTask.slice(0, 600)}" так, чтобы у каждого был принципиально другой заход, ритм и угол подачи (вариант #1 оставь как ориентир: "${rawProposals[0].text}"). Язык: ${targetLangDesc}.`,
+          config: {
+            thinkingConfig: { thinkingLevel: TTS_MODELS_CONFIG.textThinkingLevel },
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                distinctTexts: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+              },
+              required: ["distinctTexts"],
+            },
+          },
+        });
+        const diffParsed = JSON.parse((diffResp.text || "{}").trim());
+        if (Array.isArray(diffParsed.distinctTexts)) {
+          for (let i = 1; i < rawProposals.length; i++) {
+            const alt = String(diffParsed.distinctTexts[i - 1] || "").trim();
+            if (alt) {
+              rawProposals[i].text = sanitizeProposalText(alt);
+            }
+          }
+        }
+      } catch {}
     }
   }
 
   const validPresets = new Set(["conversational", "confident", "energetic", "warm"]);
 
   const proposals: TtsAgentProposal[] = rawProposals.map((p, idx) => {
-    const rawText = canonicalizeTimedPauseTags(String(p?.text || "").trim());
-    const cleanText =
-      params.language === "uz" ? normalizeUzbekApostrophes(rawText) : rawText;
+    const cleanText = p.text;
     const { wordCount, pauseTotalSeconds, estimatedSeconds, placeholders } =
       computeWordAndDurationStats(cleanText);
-    const presetRaw = String(p?.recommendedPreset || "conversational").toLowerCase();
-    const recommendedPreset = (
+    const presetRaw = String(p?.preset || p?.recommendedPreset || "conversational").toLowerCase();
+    const resolvedPreset = (
       validPresets.has(presetRaw)
         ? presetRaw
         : idx === 1
@@ -474,20 +481,15 @@ export async function generateTtsAgentProposals(
           : idx === 2
             ? "energetic"
             : "conversational"
-    ) as TtsAgentProposal["recommendedPreset"];
+    ) as TtsAgentProposal["preset"];
 
     return {
       id: String(p?.id || `prop-${idx + 1}`),
-      title: String(
-        p?.title ||
-          (effectiveOutputMode === "single_monologue"
-            ? "Полный режиссёрский сценарий"
-            : `Вариант ${idx + 1}`)
-      ).trim(),
+      title: String(p?.title || (rawProposals.length === 1 ? "Готовый сценарий" : `Вариант ${idx + 1}`)).trim(),
       badge: String(
         p?.badge ||
-          (effectiveOutputMode === "single_monologue"
-            ? "Мастер-монолог"
+          (rawProposals.length === 1
+            ? decision.genre
             : idx === 0
               ? "Разговорный"
               : idx === 1
@@ -495,9 +497,10 @@ export async function generateTtsAgentProposals(
                 : "Энергичный")
       ).trim(),
       text: cleanText,
-      recommendedPreset,
-      recommendedVoiceId: String(params.voiceId || p?.recommendedVoiceId || "charon-news"),
-      reason: String(p?.reason || "Оптимальная режиссёрская подача и ритмика пауз").trim(),
+      preset: resolvedPreset,
+      recommendedPreset: resolvedPreset,
+      recommendedVoiceId: String(params.voiceId || p?.recommendedVoiceId || "ulugbek-history"),
+      reason: String(p?.reason || "Оптимальная подача и ритмика").trim(),
       estimatedSeconds,
       wordCount,
       pauseTotalSeconds,
@@ -505,19 +508,26 @@ export async function generateTtsAgentProposals(
     };
   });
 
+  decision.variantsCount = proposals.length;
+  if (!decision.reasonShort) {
+    const avgSec =
+      proposals.length > 0
+        ? Math.round(proposals.reduce((a, b) => a + b.estimatedSeconds, 0) / proposals.length)
+        : targetSeconds;
+    decision.reasonShort = `${decision.genre}, ~${avgSec} с, ${proposals.length} ${
+      proposals.length === 1 ? "вариант" : "варианта"
+    }`;
+  }
+
   return {
+    decision,
     needsClarification: false,
     proposals,
-    appliedPromptArchitecture: systemInstruction,
   };
 }
 
 /**
- * Доработка выбранного сценария по любой команде пользователя:
- * - «расставь паузы 1, 2, 3 секунды между абзацами и фразами»
- * - «разверни в большой подробный монолог на 3 минуты»
- * - «сделай живым разговорным»
- * - «добавь дыхание и эмоции»
+ * Раздел 1.4: Доработка выбранной карточки по короткой фразе («короче», «спокойнее», «паузы по 2 секунды»).
  */
 export async function refineTtsAgentProposal(
   ai: GoogleGenAI,
@@ -525,7 +535,6 @@ export async function refineTtsAgentProposal(
     proposalText: string;
     instruction: string;
     language: "uz" | "ru" | "en";
-    customSystemRules?: string;
   }
 ): Promise<{
   refinedText: string;
@@ -535,7 +544,7 @@ export async function refineTtsAgentProposal(
   placeholders: string[];
 }> {
   const baseText = (params.proposalText || "").trim().slice(0, TTS_MODELS_CONFIG.maxTextChars);
-  const instruction = (params.instruction || "").trim().slice(0, 2000);
+  const instruction = (params.instruction || "").trim().slice(0, 1000);
 
   const targetLangDesc =
     params.language === "uz"
@@ -546,33 +555,21 @@ export async function refineTtsAgentProposal(
 
   const response = await ai.models.generateContent({
     model: TTS_MODELS_CONFIG.textModel,
-    contents: `Исходный текст сценария:\n"""\n${baseText}\n"""\n\nКоманда режиссёру на доработку: "${instruction}"`,
+    contents: `Исходный текст:\n"""\n${baseText}\n"""\n\nКоманда на доработку: "${instruction}"`,
     config: {
-      systemInstruction: `Ты — главный AI-режиссёр голосовых сценариев и монологов OvozStudio (${targetLangDesc}).
+      systemInstruction: `Ты — AI-режиссёр озвучки OvozStudio (${targetLangDesc}).
 Выполни команду пользователя над исходным текстом.
-
-СТРОГИЕ ПРАВИЛА ПРОМПТ-ИНЖИНИРИНГА:
-1. ТОЧНЫЕ ПАУЗЫ:
-   - Если пользователь просит расставить паузы (например, 1, 2, 3 секунды или паузы по смыслу), используй точные теги: [pauza 1s], [pauza 2s], [pauza 3s] (а также <breath>, <short pause>, <sigh>, <laugh>).
-   - Аудио-движок синтезирует [pauza 1s], [pauza 2s], [pauza 3s] как реальную студийную тишину ровно в 1, 2 и 3 секунды.
-2. ОБЪЁМ И ПРОДОЛЖИТЕЛЬНОСТЬ:
-   - Ограничения в 60 секунд НЕТ! Если пользователь просит расширить монолог, добавить детали или сохранить всю процедуру — пиши полный текст любой нужной длины (до 10 000 слов).
-3. БЕЗ НАВЯЗАННЫХ ТЕЛЕФОНОВ:
-   - Не вставляй [telefon] или [manzil], если пользователь сам об этом не попросил, и никогда не выдумывай номера телефонов.${
-     params.customSystemRules?.trim()
-       ? `\n4. АВТОРСКИЕ ПРАВИЛА ПОЛЬЗОВАТЕЛЯ:\n${params.customSystemRules.trim()}`
-       : ""
-   }`,
+Правила:
+- Короткие паузы: только английские теги <short pause> и <breath> (также допустимы <sigh>, <laugh>).
+- Точные паузы: только [pauza 1s], [pauza 2s], [pauza 3s].
+- Потолка в 60 секунд нет.
+- Не выдумывай телефоны, адреса и цены; не вставляй [telefon] если его не просили.`,
       thinkingConfig: { thinkingLevel: TTS_MODELS_CONFIG.textThinkingLevel },
       responseMimeType: "application/json",
       responseSchema: {
         type: Type.OBJECT,
         properties: {
-          refinedText: {
-            type: Type.STRING,
-            description:
-              "Обновлённый текст для озвучки с учётом команды (может содержать [pauza 1s], [pauza 2s], [pauza 3s], <breath>, <short pause>).",
-          },
+          refinedText: { type: Type.STRING },
         },
         required: ["refinedText"],
       },
@@ -580,7 +577,7 @@ export async function refineTtsAgentProposal(
   });
 
   const parsed = JSON.parse((response.text || "{}").trim());
-  const rawOut = canonicalizeTimedPauseTags(String(parsed.refinedText || baseText).trim());
+  const rawOut = enforceAllowedPauseAndVocalTags(String(parsed.refinedText || baseText).trim());
   const refinedText =
     params.language === "uz" ? normalizeUzbekApostrophes(rawOut) : rawOut;
   const stats = computeWordAndDurationStats(refinedText);

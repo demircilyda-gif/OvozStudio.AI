@@ -72,24 +72,19 @@ export const DUBBING_MODELS_CONFIG = {
   ],
 
   /**
-   * Флагманская модель озвучки диалогов (gemini-3.8-flash-tts)
-   * и каскад резервных TTS-моделей с отдельными пулами дневных квот (при 429 RPD limit: 100).
+   * Флагманская модель озвучки диалогов — СТРОГО gemini-3.8-flash-tts.
+   * Модель gemini-3.8-flash-lite-tts не используется нигде, в том числе как запасная.
    */
   ttsDubbingModel: process.env.DUBBING_TTS_MODEL || "gemini-3.8-flash-tts",
-  ttsQuotaFallbackModel: process.env.DUBBING_TTS_FALLBACK_MODEL || "gemini-3.8-flash-lite-tts",
-  ttsQuotaFallbackModels: [
-    "gemini-3.8-flash-lite-tts",
-    "gemini-3.1-flash-tts-preview",
-    "gemini-2.5-flash-preview-tts",
-    "gemini-2.5-pro-preview-tts",
-  ],
+  ttsDailyQuotaLimit: Number(process.env.GEMINI_TTS_DAILY_LIMIT || 100),
 
   /**
-   * Базовое ускорение atempo (до 1.10) на шаге 4 и предельное ускорение (до 1.15) на шаге 5.
+   * Единое предельное ускорение ffmpeg atempo (до 1.10x) при укладке в таймкоды (раздел 2.6).
    */
   maxAtempoSpeedRatio: Number(process.env.DUBBING_MAX_ATEMPO || 1.1),
-  maxAtempoFallbackRatio: Number(process.env.DUBBING_MAX_ATEMPO_FALLBACK || 1.15),
+  maxAtempoFallbackRatio: Number(process.env.DUBBING_MAX_ATEMPO || 1.1),
   maxNextTurnShiftSec: Number(process.env.DUBBING_MAX_SHIFT_SEC || 0.3),
+  overflowFadeOutMs: 120,
 
   /**
    * Порог слогов в секунду для информационной пометки в таблице.

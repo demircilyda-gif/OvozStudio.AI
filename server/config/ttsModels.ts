@@ -27,16 +27,17 @@ export const TTS_MODELS_CONFIG = {
 
   /**
    * Ограничения и параметры расчёта длительности:
-   * - Текст в обычном режиме и в AI Агенте: до 65 000 знаков (~10 000 слов)
-   * - Порог нарезки длинного текста: 2 800 знаков
+   * - Агент: лимит 3 000 слов (~20 минут речи)
+   * - Порог нарезки длинного текста на вызовы TTS: ~3 000 знаков (паузы [pauza] НЕ режут вызовы!)
    * - Пауза между склеенными кусками по умолчанию: 250 мс
    * - Скорость речи для оценки длительности: ~2.2 слова/сек
    * - Допустимый диапазон темпа: 0.9x – 1.15x (по умолчанию 1.0x)
    * - Срок хранения несохранённых в Медиатеку файлов: 7 дней
    */
-  maxTextChars: Number(process.env.TTS_MAX_TEXT_CHARS || 65000),
-  maxAgentTaskChars: Number(process.env.TTS_MAX_AGENT_TASK_CHARS || 65000),
-  chunkSplitThresholdChars: Number(process.env.TTS_CHUNK_THRESHOLD_CHARS || 2800),
+  maxTextChars: Number(process.env.TTS_MAX_TEXT_CHARS || 30000),
+  maxAgentTaskChars: Number(process.env.TTS_MAX_AGENT_TASK_CHARS || 30000),
+  maxAgentWords: Number(process.env.TTS_MAX_AGENT_WORDS || 3000),
+  chunkSplitThresholdChars: Number(process.env.TTS_CHUNK_THRESHOLD_CHARS || 3000),
   interChunkSilenceMs: Number(process.env.TTS_CHUNK_SILENCE_MS || 250),
   wordsPerSecondEstimate: Number(process.env.TTS_WORDS_PER_SEC || 2.2),
   minSpeed: 0.9,

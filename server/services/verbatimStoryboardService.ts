@@ -1690,7 +1690,7 @@ export async function assembleStrictTimecodeMasterPcm(
 }> {
   const bytesPerSample = 2;
   const bytesPerSec = sampleRate * bytesPerSample;
-  const maxFallbackAtempo = DUBBING_MODELS_CONFIG.maxAtempoFallbackRatio || 1.15;
+  const maxFallbackAtempo = DUBBING_MODELS_CONFIG.maxAtempoFallbackRatio || 1.1;
   const maxShiftSec = DUBBING_MODELS_CONFIG.maxNextTurnShiftSec || 0.3;
 
   let maxEndSec =

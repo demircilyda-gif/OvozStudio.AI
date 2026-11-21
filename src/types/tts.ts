@@ -6,17 +6,22 @@ export type TtsPreset = 'auto' | 'conversational' | 'confident' | 'energetic' | 
 
 export type TtsProcessingStage = 'idle' | 'translating' | 'analyzing_intonation' | 'synthesizing' | 'done';
 
-export type TtsAgentOutputMode = 'single_monologue' | 'three_variants';
+export type TtsAgentWorkflow = 'create' | 'format' | 'expand';
 
-export type TtsAgentWorkflowMode = 'create' | 'format_procedure' | 'expand_monologue';
-
-export type TtsPauseCadence = 'auto' | '1s' | '1_2_3s' | 'none';
+export interface TtsAgentDecision {
+  genre: string;
+  workflow: TtsAgentWorkflow;
+  variantsCount: number;
+  targetSeconds: number;
+  reasonShort: string;
+}
 
 export interface TtsAgentProposal {
   id: string;
   title: string;
   badge: string;
   text: string;
+  preset: Exclude<TtsPreset, 'auto'>;
   recommendedPreset: Exclude<TtsPreset, 'auto'>;
   recommendedVoiceId: string;
   reason: string;
@@ -27,10 +32,10 @@ export interface TtsAgentProposal {
 }
 
 export interface TtsAgentProposeResponse {
+  decision?: TtsAgentDecision;
   needsClarification: boolean;
   clarifyingQuestion?: string;
   proposals: TtsAgentProposal[];
-  appliedPromptArchitecture?: string;
 }
 
 export interface TtsTranslateResponse {
@@ -38,6 +43,15 @@ export interface TtsTranslateResponse {
   sourceLanguage: 'uz_latn' | 'uz_cyrl' | 'ru' | 'en' | 'mixed';
   wasTransliterated: boolean;
   wasTranslated: boolean;
+}
+
+export interface TtsQuotaStatus {
+  limit: number;
+  used: number;
+  remaining: number;
+  dayKey: string;
+  resetLabelRu: string;
+  resetLabelUz: string;
 }
 
 export interface TtsSynthesisResult {
@@ -49,6 +63,9 @@ export interface TtsSynthesisResult {
   styleSummary: string;
   provider: 'google-gemini-tts' | 'kie-gemini-tts' | 'cache';
   cached: boolean;
+  ttsCallsUsed?: number;
+  quotaRemaining?: number;
+  quotaLimit?: number;
   creditsUsed: number;
   creditsRemaining?: number;
   synthesisWallTimeMs?: number;

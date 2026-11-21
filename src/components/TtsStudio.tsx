@@ -14,9 +14,6 @@ import {
   Volume2,
   Languages,
   Clock,
-  Sliders,
-  ChevronDown,
-  ChevronUp,
   FileText,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
@@ -37,10 +34,9 @@ import type {
   TtsPreset,
   TtsProcessingStage,
   TtsAgentProposal,
+  TtsAgentDecision,
   TtsSynthesisResult,
-  TtsAgentOutputMode,
-  TtsAgentWorkflowMode,
-  TtsPauseCadence,
+  TtsQuotaStatus,
 } from '../types/tts';
 
 interface TtsStudioProps {
@@ -62,7 +58,16 @@ interface TtsStudioProps {
 
 type DetectedClientLang = 'uz_latn' | 'uz_cyrl' | 'ru' | 'en' | 'mixed';
 
-const MAX_STUDIO_CHARS = 65000; // ~10 000 слов
+const MAX_STUDIO_CHARS = 30000;
+const MAX_AGENT_WORDS = 3000;
+
+function estimateTtsCallsForText(rawText: string): number {
+  const clean = canonicalizeTimedPauseTags(rawText || '')
+    .replace(/\[pauza\s+\d+(?:\.\d+)?s\]/gi, '<short pause>')
+    .trim();
+  if (!clean) return 0;
+  return Math.max(1, Math.ceil(clean.length / 3000));
+}
 
 function detectClientTextLanguage(text: string): DetectedClientLang {
   const clean = (text || '').trim();
@@ -207,94 +212,58 @@ function autoInsertCadencePausesInText(rawText: string): string {
   return processedParagraphs.join(' [pauza 3s]\n\n');
 }
 
-const AGENT_TEMPLATES: Array<{
+// Примеры-подсказки над полем ввода: нажатие ТОЛЬКО подставляет текст, не переключая никаких настроек
+const AGENT_EXAMPLES: Array<{
   id: string;
   labelUz: string;
   labelRu: string;
-  promptUz: string;
-  promptRu: string;
-  duration: number; // 0 = Авто / Без ограничений
-  outputMode: TtsAgentOutputMode;
-  workflowMode: TtsAgentWorkflowMode;
-  pauseCadence: TtsPauseCadence;
+  textUz: string;
+  textRu: string;
 }> = [
   {
-    id: 'monologue_story',
-    labelUz: 'Katta monolog / Hikoya (1-2-3s pauza)',
-    labelRu: 'Большой монолог / Рассказ (с паузами 1–2–3с)',
-    promptUz:
-      "Inson qalbi, muvaffaqiyat va sabr haqida ta'sirli, chuqur badiiy monolog-hikoya yozing. Har bir tugallangan fikr va xatboshi orasiga [pauza 1s], [pauza 2s], [pauza 3s] pauzalarini qo'ying.",
-    promptRu:
-      'Напиши глубокий, живой авторский монолог-рассказ о пути к цели, внутреннем спокойствии и силе решений. Между непрерывными фразами и абзацами расставь студийные паузы [pauza 1s], [pauza 2s], [pauza 3s].',
-    duration: 180,
-    outputMode: 'single_monologue',
-    workflowMode: 'expand_monologue',
-    pauseCadence: '1_2_3s',
-  },
-  {
-    id: 'full_procedure',
-    labelUz: 'Jarayon / Reglament (10 000 so‘zgacha)',
-    labelRu: 'Вся процедура / Регламент (с паузами 1–3с)',
-    promptUz:
-      "Mijozlarga xizmat ko'rsatish va buyurtmani qabul qilish bo'yicha to'liq bosqichma-bosqich jarayon (procedura). Har bir qadamdan keyin [pauza 2s] va bo'limlar orasida [pauza 3s] qo'ying.",
-    promptRu:
-      'Полная пошаговая процедура проведения рабочего процесса и инструктажа от начала до конца. Между шагами ставь точные паузы [pauza 1s], [pauza 2s], [pauza 3s], чтобы слушатель успевал воспринимать каждый этап.',
-    duration: 0,
-    outputMode: 'single_monologue',
-    workflowMode: 'format_procedure',
-    pauseCadence: '1_2_3s',
-  },
-  {
-    id: 'ad',
+    id: 'ad_coffee',
     labelUz: 'Reklama',
     labelRu: 'Реклама',
-    promptUz:
-      "Toshkentdagi yangi qahvaxona uchun 20% chegirma haqida qisqa va jalb qiluvchi audio reklama.",
-    promptRu:
-      'Яркий рекламный ролик для новой кофейни в Ташкенте: скидка 20% на всё меню утреннего кофе, живой разговорный заход.',
-    duration: 30,
-    outputMode: 'three_variants',
-    workflowMode: 'create',
-    pauseCadence: 'auto',
+    textUz:
+      "Toshkentdagi yangi qahvaxona uchun 20% ertalabki chegirma haqida 30 soniyalik jonli audio reklama yozing.",
+    textRu:
+      'Сделай 30-секундный рекламный ролик для новой кофейни в Ташкенте: скидка 20% на утренний кофе до 11:00.',
   },
   {
     id: 'announcement',
     labelUz: "E'lon",
     labelRu: 'Объявление',
-    promptUz:
-      "Savdo markazi mijozlari uchun rasmiy e'lon: do'konimiz har kuni soat 09:00 dan 22:00 gacha ishlaydi.",
-    promptRu:
-      'Информационное голосовое объявление для посетителей торгового центра о графике работы с 09:00 до 22:00 и акциях на 2-м этаже.',
-    duration: 30,
-    outputMode: 'single_monologue',
-    workflowMode: 'create',
-    pauseCadence: '1s',
+    textUz:
+      "Savdo markazi mijozlari uchun e'lon: do'konimiz har kuni 09:00 dan 22:00 gacha ishlaydi, 2-qavatda yangi kolleksiya.",
+    textRu:
+      'Голосовое объявление для торгового центра: график работы с 09:00 до 22:00 и новая коллекция на втором этаже.',
   },
   {
     id: 'greeting',
     labelUz: 'Tabrik',
     labelRu: 'Поздравление',
-    promptUz:
-      'Hamkorlar va mijozlarni bayram bilan samimiy va iliq ohangda tabriklash nutqi.',
-    promptRu:
-      'Тёплое душевное поздравление с днём рождения или праздником для близкого человека или коллектива компании.',
-    duration: 60,
-    outputMode: 'single_monologue',
-    workflowMode: 'create',
-    pauseCadence: '1_2_3s',
+    textUz:
+      'Jamoamiz va mijozlarimizni bayram bilan samimiy, iliq ohangda tabriklovchi qisqa nutq.',
+    textRu:
+      'Тёплое искреннее поздравление с днём рождения для коллеги или клиента на 45 секунд.',
   },
   {
     id: 'instruction',
     labelUz: "Yo'riqnoma",
     labelRu: 'Инструкция',
-    promptUz:
-      "Mobil ilovada ro'yxatdan o'tish va buyurtma berish bo'yicha tushunarli ovozli yo'riqnoma, har bir qadam orasida [pauza 2s] bo'lsin.",
-    promptRu:
-      'Пошаговая голосовая инструкция: как оформить заказ в приложении, с паузами [pauza 2s] между шагами.',
-    duration: 60,
-    outputMode: 'single_monologue',
-    workflowMode: 'create',
-    pauseCadence: '1_2_3s',
+    textUz:
+      "Mobil ilovada ro'yxatdan o'tish va buyurtma berish bo'yicha qadam-baqadam yo'riqnoma, qadamlar orasida 2 soniyali pauza bo'lsin.",
+    textRu:
+      'Пошаговая голосовая инструкция: как оформить заказ в приложении, с паузами 2 секунды между шагами.',
+  },
+  {
+    id: 'story_monologue',
+    labelUz: 'Monolog / Hikoya',
+    labelRu: 'Монолог-рассказ',
+    textUz:
+      "Sabr va maqsad sari intilish haqida ta'sirli monolog-hikoya, har bir fikr orasida 1, 2 va 3 soniyali pauzalar bilan.",
+    textRu:
+      'Напиши один большой авторский монолог-рассказ о пути к цели с паузами 1, 2 и 3 секунды между мыслями.',
   },
 ];
 
@@ -331,16 +300,10 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
   const [transliterationNotice, setTransliterationNotice] = useState<string | null>(null);
   const [lastTranslatedSnapshot, setLastTranslatedSnapshot] = useState<string | null>(null);
 
-  // Agent Mode State
+  // Agent Mode State (полностью автономный агент — одно поле ввода)
   const [agentTask, setAgentTask] = useState<string>('');
   const agentTextareaRef = useRef<HTMLTextAreaElement | null>(null);
-  // 0 = Авто (Без ограничения в 60 секунд / до 10 000 слов)
-  const [agentDurationSec, setAgentDurationSec] = useState<number>(0);
-  const [agentOutputMode, setAgentOutputMode] = useState<TtsAgentOutputMode>('single_monologue');
-  const [agentWorkflowMode, setAgentWorkflowMode] = useState<TtsAgentWorkflowMode>('create');
-  const [agentPauseCadence, setAgentPauseCadence] = useState<TtsPauseCadence>('1_2_3s');
-  const [customSystemRules, setCustomSystemRules] = useState<string>('');
-  const [isPromptStudioOpen, setIsPromptStudioOpen] = useState<boolean>(false);
+  const [agentDecision, setAgentDecision] = useState<TtsAgentDecision | null>(null);
 
   const [isProposing, setIsProposing] = useState<boolean>(false);
   const [clarifyingQuestion, setClarifyingQuestion] = useState<string | null>(null);
@@ -350,6 +313,9 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
   const [refineInstructionById, setRefineInstructionById] = useState<Record<string, string>>({});
   const [refiningProposalId, setRefiningProposalId] = useState<string | null>(null);
   const [editingProposalId, setEditingProposalId] = useState<string | null>(null);
+
+  // Google TTS 100 RPD quota status
+  const [quotaStatus, setQuotaStatus] = useState<TtsQuotaStatus | null>(null);
 
   // Processing & Synthesis Result State
   const [stage, setStage] = useState<TtsProcessingStage>('idle');
@@ -410,16 +376,35 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
 
   const isAgentWorking = isProposing || Boolean(refiningProposalId);
   const estimatedAgentGenSeconds = useMemo(() => {
-    if (agentDurationSec >= 180 || agentTaskStats.words > 250) return 14;
-    if (agentDurationSec === 0) return 11;
+    if (agentTaskStats.words > 300) return 14;
     return 8;
-  }, [agentDurationSec, agentTaskStats.words]);
+  }, [agentTaskStats.words]);
   const agentScriptCountdown = useGenerationCountdown(
     isAgentWorking,
     estimatedAgentGenSeconds,
     lang,
     'script_solo'
   );
+
+  // Fetch daily Gemini TTS quota status on mount
+  const refreshQuotaStatus = async () => {
+    try {
+      const res = await authFetch('/api/tts/quota');
+      if (res.ok) {
+        const data = await res.json();
+        if (typeof data?.remaining === 'number') {
+          setQuotaStatus(data);
+        }
+      }
+    } catch {}
+  };
+
+  useEffect(() => {
+    refreshQuotaStatus();
+  }, []);
+
+  const standardEstCalls = useMemo(() => estimateTtsCallsForText(text), [text]);
+  const isAgentTaskTooLong = agentTaskStats.words > MAX_AGENT_WORDS;
 
   // Attach token to audio URLs when result changes
   useEffect(() => {
@@ -456,29 +441,6 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
     const insertion = `${needLeadingSpace ? ' ' : ''}${tag}${needTrailingSpace ? ' ' : ''}`;
     const updated = `${before}${insertion}${after}`.slice(0, MAX_STUDIO_CHARS);
     setText(updated);
-    setTimeout(() => {
-      el.focus();
-      const nextPos = Math.min(updated.length, start + insertion.length);
-      el.setSelectionRange(nextPos, nextPos);
-    }, 10);
-  };
-
-  // Insert pause or vocal tag into Agent Task Textarea
-  const insertTagIntoAgentTask = (tag: string) => {
-    const el = agentTextareaRef.current;
-    if (!el) {
-      setAgentTask((prev) => `${prev.trim()} ${tag} `.slice(0, MAX_STUDIO_CHARS));
-      return;
-    }
-    const start = el.selectionStart ?? agentTask.length;
-    const end = el.selectionEnd ?? agentTask.length;
-    const before = agentTask.slice(0, start);
-    const after = agentTask.slice(end);
-    const needLeadingSpace = before.length > 0 && !/\s$/.test(before);
-    const needTrailingSpace = after.length === 0 || !/^\s/.test(after);
-    const insertion = `${needLeadingSpace ? ' ' : ''}${tag}${needTrailingSpace ? ' ' : ''}`;
-    const updated = `${before}${insertion}${after}`.slice(0, MAX_STUDIO_CHARS);
-    setAgentTask(updated);
     setTimeout(() => {
       el.focus();
       const nextPos = Math.min(updated.length, start + insertion.length);
@@ -592,6 +554,18 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
       if (typeof data.creditsRemaining === 'number') {
         syncCredits(data.creditsRemaining);
       }
+      if (typeof data.quotaRemaining === 'number' && typeof data.quotaLimit === 'number') {
+        setQuotaStatus((prev) => ({
+          dayKey: prev?.dayKey || '',
+          used: Math.max(0, data.quotaLimit - data.quotaRemaining),
+          limit: data.quotaLimit,
+          remaining: data.quotaRemaining,
+          resetLabelRu: prev?.resetLabelRu || 'после 13:00 по Ташкенту',
+          resetLabelUz: prev?.resetLabelUz || 'Toshkent vaqti bilan 13:00 dan keyin',
+        }));
+      } else {
+        refreshQuotaStatus();
+      }
     } catch (err: any) {
       setStage('idle');
       setErrorMessage(err?.message || 'Не удалось выполнить синтез речи');
@@ -696,16 +670,26 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
     });
   };
 
-  // Agent Mode: Generate Script (1 Full Monologue/Procedure or 3 Variants)
+  // Agent Mode: Autonomous AI Director (решает сам: жанр, число вариантов, длительность, паузы)
   const handleProposeVariants = async (overrideTask?: string) => {
     if (!requireAuth(() => {}, 'TTS AI Agent')) return;
     const taskToUse = (overrideTask ?? agentTask).trim();
     if (!taskToUse) return;
+    const wc = taskToUse.split(/\s+/).filter(Boolean).length;
+    if (wc > MAX_AGENT_WORDS) {
+      setErrorMessage(
+        lang === 'uz'
+          ? `Matnni qismlarga bo'ling (maksimum ${MAX_AGENT_WORDS} so'z).`
+          : `Разбейте текст на части (максимум ${MAX_AGENT_WORDS} слов, сейчас ${wc}).`
+      );
+      return;
+    }
 
     setIsProposing(true);
     setErrorMessage(null);
     setPlaceholderWarning(null);
     setClarifyingQuestion(null);
+    setAgentDecision(null);
 
     try {
       const res = await authFetch('/api/tts/agent-propose', {
@@ -713,18 +697,17 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           task: taskToUse,
-          durationSec: agentDurationSec,
           language: targetLang,
           voiceId: userExplicitlyPickedVoice ? selectedVoiceId : undefined,
-          outputMode: agentOutputMode,
-          workflowMode: agentWorkflowMode,
-          pauseCadence: agentPauseCadence,
-          customSystemRules: customSystemRules.trim() || undefined,
         }),
       });
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data?.error || 'Ошибка генерации сценария');
+      }
+
+      if (data.decision) {
+        setAgentDecision(data.decision);
       }
 
       if (data.needsClarification && data.clarifyingQuestion) {
@@ -741,7 +724,7 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
     }
   };
 
-  // Agent Mode: Refine a specific proposal (via custom command or quick AI Director chip)
+  // Agent Mode: Refine a specific proposal
   const handleRefineProposal = async (proposal: TtsAgentProposal, overrideInstruction?: string) => {
     const instruction = (overrideInstruction ?? refineInstructionById[proposal.id] ?? '').trim();
     if (!instruction) return;
@@ -756,7 +739,6 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
           proposalText: proposal.text,
           instruction,
           language: targetLang,
-          customSystemRules: customSystemRules.trim() || undefined,
         }),
       });
       const data = await res.json();
@@ -1120,15 +1102,15 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                 />
               </div>
 
-              {/* Footer Bar: Character/Word/Pause Counter, Duration & Credit Estimate, and «Ozvuchit'» CTA */}
+              {/* Footer Bar: Counter, Quota Forecast (1.6), and «Ozvuchit'» CTA */}
               <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                 <div className="flex flex-wrap items-center gap-2 text-xs font-mono tabular-nums text-[#5D594E]">
                   <span>
-                    {textStats.words.toLocaleString()} / 10 000 {lang === 'uz' ? "so'z" : 'слов'}
+                    {textStats.words.toLocaleString()} {lang === 'uz' ? "so'z" : 'слов'}
                   </span>
                   <span>·</span>
                   <span>
-                    {textStats.charCount.toLocaleString()} {lang === 'uz' ? 'belgi' : 'зн.'}
+                    {textStats.charCount.toLocaleString()} / {MAX_STUDIO_CHARS.toLocaleString()} {lang === 'uz' ? 'belgi' : 'зн.'}
                   </span>
                   {textStats.pauseSeconds > 0 && (
                     <>
@@ -1142,10 +1124,22 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                   <span className="text-[#161511] font-semibold">
                     ≈ {formatDurationHuman(textStats.estSeconds, lang)} ({textStats.estSeconds}s)
                   </span>
-                  <span>·</span>
-                  <span className="text-[#0A5A62] font-semibold">
-                    {textStats.estCredits} {lang === 'uz' ? 'kredit' : 'кред.'}
-                  </span>
+                  {quotaStatus && standardEstCalls > 0 && (
+                    <>
+                      <span>·</span>
+                      <span
+                        className={`font-semibold ${
+                          standardEstCalls > quotaStatus.remaining
+                            ? 'text-amber-700'
+                            : 'text-[#0A5A62]'
+                        }`}
+                      >
+                        {standardEstCalls > quotaStatus.remaining
+                          ? `⚠ Займёт ~${standardEstCalls} выз., сегодня осталось ${quotaStatus.remaining}`
+                          : `Займёт ~${standardEstCalls} выз., сегодня осталось ${quotaStatus.remaining}`}
+                      </span>
+                    </>
+                  )}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
@@ -1192,311 +1186,89 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
           )}
 
           {/* ========================================================= */}
-          {/* MODE 2: AI AGENT (DIRECTOR & PROMPT ENGINEERING STUDIO)   */}
+          {/* MODE 2: AUTONOMOUS AI AGENT (SINGLE INPUT, ZERO DROPDOWNS) */}
           {/* ========================================================= */}
           {mode === 'agent' && (
             <div className="space-y-4">
-              {/* Quick Template Buttons */}
-              <div className="space-y-1.5">
-                <span className="text-[11px] font-mono text-[#5D594E] block">
-                  {lang === 'uz' ? 'Tezkor shablonlar va formatlar:' : 'Быстрые сценарии и форматы:'}
+              {/* 5 примеров-подсказок (нажатие ТОЛЬКО подставляет текст, без переключения настроек) */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] font-mono text-[#5D594E] mr-1">
+                  {lang === 'uz' ? 'Misollar:' : 'Примеры:'}
                 </span>
-                <div className="flex flex-wrap gap-1.5">
-                  {AGENT_TEMPLATES.map((tpl) => (
-                    <button
-                      key={tpl.id}
-                      type="button"
-                      onClick={() => {
-                        setAgentTask(lang === 'uz' ? tpl.promptUz : tpl.promptRu);
-                        setAgentDurationSec(tpl.duration);
-                        setAgentOutputMode(tpl.outputMode);
-                        setAgentWorkflowMode(tpl.workflowMode);
-                        setAgentPauseCadence(tpl.pauseCadence);
-                      }}
-                      className="px-3 py-1.5 rounded-lg border border-[rgba(22,21,17,0.14)] bg-[#F4F1EA] hover:bg-[#ECE7DB] text-xs font-medium text-[#161511] transition-colors cursor-pointer whitespace-nowrap"
-                    >
-                      {lang === 'uz' ? tpl.labelUz : tpl.labelRu}
-                    </button>
-                  ))}
-                </div>
+                {AGENT_EXAMPLES.map((ex) => (
+                  <button
+                    key={ex.id}
+                    type="button"
+                    onClick={() => setAgentTask(lang === 'uz' ? ex.textUz : ex.textRu)}
+                    className="px-3 py-1 rounded-lg border border-[rgba(22,21,17,0.14)] bg-[#F4F1EA] hover:bg-[#ECE7DB] text-xs font-medium text-[#161511] transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    {lang === 'uz' ? ex.labelUz : ex.labelRu}
+                  </button>
+                ))}
               </div>
 
-              {/* Agent Controls Row: Workflow Mode, Output Format (1 Full Monologue vs 3 Variants), and Pause Cadence */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 bg-[#F4F1EA] p-3 rounded-2xl border border-[rgba(22,21,17,0.12)]">
-                {/* 1. Режим задачи */}
-                <div className="space-y-1">
-                  <label className="block text-[11px] font-mono text-[#5D594E]">
-                    {lang === 'uz' ? '1. Agent vazifasi:' : '1. Режим работы агента:'}
-                  </label>
-                  <select
-                    value={agentWorkflowMode}
-                    onChange={(e) => {
-                      const val = e.target.value as TtsAgentWorkflowMode;
-                      setAgentWorkflowMode(val);
-                      if (val === 'format_procedure' || val === 'expand_monologue') {
-                        setAgentOutputMode('single_monologue');
-                      }
-                    }}
-                    className="w-full rounded-xl border border-[rgba(22,21,17,0.16)] bg-white px-2.5 py-1.5 text-xs font-medium text-[#161511] focus:outline-none focus:border-[#0E7C86]"
-                  >
-                    <option value="create">
-                      {lang === 'uz'
-                        ? 'Mavzu bo‘yicha yangi ssenariy'
-                        : 'Создать сценарий по заданию'}
-                    </option>
-                    <option value="expand_monologue">
-                      {lang === 'uz'
-                        ? 'Katta monolog / Hikoya (Storitelling)'
-                        : 'Большой монолог / Рассказ (Сторителлинг)'}
-                    </option>
-                    <option value="format_procedure">
-                      {lang === 'uz'
-                        ? 'Mening jarayonim / matnimni jonlantirish (pauzalar bilan)'
-                        : 'Оживить всю мою процедуру / текст (без сокращений)'}
-                    </option>
-                  </select>
-                </div>
-
-                {/* 2. Формат результата: 1 Полный сценарий vs 3 Варианта */}
-                <div className="space-y-1">
-                  <label className="block text-[11px] font-mono text-[#5D594E]">
-                    {lang === 'uz' ? '2. Natija formati:' : '2. Формат результата:'}
-                  </label>
-                  <select
-                    value={agentOutputMode}
-                    onChange={(e) => setAgentOutputMode(e.target.value as TtsAgentOutputMode)}
-                    className="w-full rounded-xl border border-[rgba(22,21,17,0.16)] bg-white px-2.5 py-1.5 text-xs font-medium text-[#161511] focus:outline-none focus:border-[#0E7C86]"
-                  >
-                    <option value="single_monologue">
-                      {lang === 'uz'
-                        ? '1 ta to‘liq ssenariy / monolog (tavsiya etiladi)'
-                        : '1 Полный сценарий / Монолог (без дробления)'}
-                    </option>
-                    <option value="three_variants">
-                      {lang === 'uz'
-                        ? '3 xil ohang varianti (qisqa reklama uchun)'
-                        : '3 Варианта подачи (для коротких роликов)'}
-                    </option>
-                  </select>
-                </div>
-
-                {/* 3. Партитура пауз */}
-                <div className="space-y-1">
-                  <label className="block text-[11px] font-mono text-[#5D594E]">
-                    {lang === 'uz' ? '3. Nutq ichidagi pauzalar:' : '3. Паузы внутри речи:'}
-                  </label>
-                  <select
-                    value={agentPauseCadence}
-                    onChange={(e) => setAgentPauseCadence(e.target.value as TtsPauseCadence)}
-                    className="w-full rounded-xl border border-[rgba(22,21,17,0.16)] bg-white px-2.5 py-1.5 text-xs font-medium text-[#161511] focus:outline-none focus:border-[#0E7C86]"
-                  >
-                    <option value="1_2_3s">
-                      {lang === 'uz'
-                        ? 'Aniq pauzalar: 1s, 2s, 3s (monolog va jarayon uchun)'
-                        : 'Чередование пауз 1с, 2с, 3с (для монологов и процедур)'}
-                    </option>
-                    <option value="1s">
-                      {lang === 'uz' ? 'Qisqa pauzalar [pauza 1s]' : 'Короткие паузы по 1 сек'}
-                    </option>
-                    <option value="auto">
-                      {lang === 'uz' ? 'Avto (mazmunga qarab)' : 'Авто (по смыслу текста)'}
-                    </option>
-                    <option value="none">
-                      {lang === 'uz' ? 'Qo‘shimcha pauzasiz' : 'Без тегов пауз'}
-                    </option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Task / Procedure Input up to 65 000 characters (~10 000 words) */}
+              {/* Единственное поле ввода без лишних настроек (лимит 3 000 слов) */}
               <div className="space-y-2">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <label className="block text-xs font-semibold text-[#161511]">
-                    {lang === 'uz'
-                      ? 'Vazifa, monolog mavzusi yoki butun jarayon matnini kiriting (10 000 so‘zgacha):'
-                      : 'Опишите задачу или вставьте всю процедуру / рассказ (до 10 000 слов):'}
-                  </label>
-
-                  {/* Quick pause insertion buttons for Agent Task */}
-                  <div className="flex flex-wrap items-center gap-1">
-                    {(
-                      [
-                        { label: '+ [pauza 1s]', tag: '[pauza 1s]' },
-                        { label: '+ [pauza 2s]', tag: '[pauza 2s]' },
-                        { label: '+ [pauza 3s]', tag: '[pauza 3s]' },
-                      ] as const
-                    ).map((b) => (
-                      <button
-                        key={b.tag}
-                        type="button"
-                        onClick={() => insertTagIntoAgentTask(b.tag)}
-                        className="px-2 py-0.5 rounded-md bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] hover:border-[#0E7C86] text-[10px] font-mono font-semibold text-[#0A5A62] cursor-pointer"
-                      >
-                        {b.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                <label className="block text-xs font-semibold text-[#161511]">
+                  {lang === 'uz'
+                    ? 'Vazifani yozing yoki tayyor matnni joylang'
+                    : 'Опишите задачу или вставьте текст'}
+                </label>
 
                 <textarea
                   ref={agentTextareaRef}
                   value={agentTask}
-                  onChange={(e) => setAgentTask(e.target.value.slice(0, MAX_STUDIO_CHARS))}
+                  onChange={(e) => setAgentTask(e.target.value)}
                   rows={6}
-                  maxLength={MAX_STUDIO_CHARS}
                   placeholder={
                     lang === 'uz'
-                      ? "Masalan: Menga bitta katta hikoya-monolog kerak, har bir fikrdan keyin 1, 2, 3 soniya pauza bo'lsin. Yoki butun jarayon matnini shu yerga tashlang..."
-                      : 'Например: Нужен один большой монолог-рассказ, внутри которого между каждой мыслью стоят паузы 1, 2, 3 секунды. Либо вставьте сюда всю процедуру целиком (до 10 000 слов)...'
+                      ? "Masalan: 30 soniyalik qahvaxona reklamasi, yoki tayyor matn / yo'riqnomani joylang — agent janr, variantlar soni va pauzalarni o'zi belgilaydi..."
+                      : 'Опишите задачу своими словами (например, реклама, монолог с паузами 1–3с) или вставьте готовый текст / процедуру — агент сам выберет формат, число вариантов и паузы...'
                   }
                   className="w-full rounded-2xl border border-[rgba(22,21,17,0.16)] bg-[#FAF8F4] p-3.5 text-sm text-[#161511] leading-relaxed focus:outline-none focus:border-[#0E7C86] transition-colors resize-y"
                 />
-              </div>
 
-              {/* Prompt Engineering Studio Drawer (Custom Rules & Architecture Inspector) */}
-              <div className="rounded-2xl border border-[rgba(22,21,17,0.12)] bg-[#FAF8F4] overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => setIsPromptStudioOpen((prev) => !prev)}
-                  className="w-full px-4 py-2.5 flex items-center justify-between text-left text-xs font-semibold text-[#161511] hover:bg-[#ECE7DB]/50 transition-colors cursor-pointer"
-                >
-                  <div className="flex items-center gap-2">
-                    <Sliders className="w-3.5 h-3.5 text-[#0E7C86]" />
+                {isAgentTaskTooLong && (
+                  <div className="rounded-xl bg-amber-50 border border-amber-300 px-3.5 py-2 text-xs text-amber-950 flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
                     <span>
                       {lang === 'uz'
-                        ? 'Prompt-injiniring va AI-Rejissyor qoidalari (ElevenLabs / Hume / Descript darajasi)'
-                        : 'Промпт-инжиниринг и правила AI-Режиссёра (уровень ElevenLabs / Hume Octave / Descript)'}
+                        ? `Matnni qismlarga bo'ling (maksimum ${MAX_AGENT_WORDS.toLocaleString()} so'z, hozir ${agentTaskStats.words.toLocaleString()}).`
+                        : `Разбейте текст на части (максимум ${MAX_AGENT_WORDS.toLocaleString()} слов, сейчас ${agentTaskStats.words.toLocaleString()}).`}
                     </span>
-                  </div>
-                  {isPromptStudioOpen ? (
-                    <ChevronUp className="w-4 h-4 text-[#5D594E]" />
-                  ) : (
-                    <ChevronDown className="w-4 h-4 text-[#5D594E]" />
-                  )}
-                </button>
-
-                {isPromptStudioOpen && (
-                  <div className="p-4 pt-2 border-t border-[rgba(22,21,17,0.08)] space-y-3 text-xs text-[#5D594E]">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-[11px]">
-                      <div className="p-2.5 rounded-xl bg-white border border-[rgba(22,21,17,0.08)]">
-                        <b className="text-[#161511] block mb-1">
-                          1. Voice-First Синтагматика (Письмо для уха)
-                        </b>
-                        Фразы по 7–15 слов на одно дыхание, живые разговорные связки, чистая узбекская латиница без канцелярита.
-                      </div>
-                      <div className="p-2.5 rounded-xl bg-white border border-[rgba(22,21,17,0.08)]">
-                        <b className="text-[#161511] block mb-1">
-                          2. Точная хореография пауз (1с / 2с / 3с)
-                        </b>
-                        Агент расставляет <code className="font-mono text-[#0A5A62]">[pauza 1s]</code>,{' '}
-                        <code className="font-mono text-[#0A5A62]">[pauza 2s]</code>,{' '}
-                        <code className="font-mono text-[#0A5A62]">[pauza 3s]</code>, которые синтезируются в точную студийную тишину.
-                      </div>
-                      <div className="p-2.5 rounded-xl bg-white border border-[rgba(22,21,17,0.08)]">
-                        <b className="text-[#161511] block mb-1">
-                          3. Без потолка в 60 секунд (до 10 000 слов)
-                        </b>
-                        Полная сохранность длинных процедур, регламентов и рассказов без принудительного обрезания текста.
-                      </div>
-                      <div className="p-2.5 rounded-xl bg-white border border-[rgba(22,21,17,0.08)]">
-                        <b className="text-[#161511] block mb-1">
-                          4. Запрет на навязанные «три телефона»
-                        </b>
-                        Агент никогда не вставляет <code className="font-mono">[telefon]</code> в монологи, рассказы, инструкции и процедуры.
-                      </div>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="block text-xs font-semibold text-[#161511]">
-                        {lang === 'uz'
-                          ? 'Qo‘shimcha mualliflik prompt-qoidalaringiz (ixtiyoriy):'
-                          : 'Ваши дополнительные инструкции для промпта AI-агента (необязательно):'}
-                      </label>
-                      <textarea
-                        value={customSystemRules}
-                        onChange={(e) => setCustomSystemRules(e.target.value)}
-                        rows={2}
-                        placeholder={
-                          lang === 'uz'
-                            ? "Masalan: Har bir qadamdan keyin [pauza 2s] qo'y, rasmiy so'zlarni ishlatma, xuddi yaqin do'stdek gapir..."
-                            : 'Например: После каждого абзаца обязательно ставь [pauza 2s], обращайся к слушателю на «вы», используй спокойный доверительный тон рассказчика...'
-                        }
-                        className="w-full rounded-xl border border-[rgba(22,21,17,0.16)] bg-white p-2.5 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86]"
-                      />
-                    </div>
                   </div>
                 )}
               </div>
 
-              {/* Flexible Duration Selector (Auto Unlimited / 15s / 30s / 1m / 3m / 5m / 10m) + Generate Button */}
+              {/* Footer: счетчик слов и единственная кнопка «Предложить варианты» */}
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs text-[#5D594E] font-mono">
-                    {lang === 'uz' ? 'Davomiyligi:' : 'Длительность:'}
-                  </span>
-                  <div className="flex flex-wrap gap-1 p-1 rounded-xl bg-[#ECE7DB] border border-[rgba(22,21,17,0.12)] font-mono text-xs tabular-nums">
-                    {(
-                      [
-                        {
-                          sec: 0,
-                          labelUz: 'Avto (Cheklovsiz / 10 000 so‘z)',
-                          labelRu: 'Авто (Без лимита / до 10 000 слов)',
-                        },
-                        { sec: 15, labelUz: '15 s', labelRu: '15 с' },
-                        { sec: 30, labelUz: '30 s', labelRu: '30 с' },
-                        { sec: 60, labelUz: '1 daq', labelRu: '1 мин' },
-                        { sec: 180, labelUz: '3 daq', labelRu: '3 мин' },
-                        { sec: 300, labelUz: '5 daq', labelRu: '5 мин' },
-                        { sec: 600, labelUz: '10 daq', labelRu: '10 мин' },
-                      ] as const
-                    ).map((opt) => (
-                      <button
-                        key={opt.sec}
-                        type="button"
-                        onClick={() => {
-                          setAgentDurationSec(opt.sec);
-                          if (opt.sec === 0 || opt.sec > 60) {
-                            setAgentOutputMode('single_monologue');
-                          }
-                        }}
-                        className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
-                          agentDurationSec === opt.sec
-                            ? 'bg-white text-[#161511] font-semibold shadow-xs'
-                            : 'text-[#5D594E] hover:text-[#161511]'
-                        }`}
-                      >
-                        {lang === 'uz' ? opt.labelUz : opt.labelRu}
-                      </button>
-                    ))}
-                  </div>
-                  <span className="text-[11px] font-mono tabular-nums text-[#5D594E]">
-                    ({agentTaskStats.words.toLocaleString()} {lang === 'uz' ? "so'z" : 'слов'} ·{' '}
-                    {agentTaskStats.charCount.toLocaleString()} / 65 000)
-                  </span>
-                </div>
+                <span
+                  className={`text-xs font-mono tabular-nums ${
+                    isAgentTaskTooLong ? 'text-amber-700 font-semibold' : 'text-[#5D594E]'
+                  }`}
+                >
+                  {agentTaskStats.words.toLocaleString()} / {MAX_AGENT_WORDS.toLocaleString()}{' '}
+                  {lang === 'uz' ? "so'z" : 'слов'}
+                </span>
 
                 <button
                   type="button"
                   onClick={() => handleProposeVariants()}
-                  disabled={!agentTask.trim() || isProposing}
+                  disabled={!agentTask.trim() || isProposing || isAgentTaskTooLong}
                   className="btn-pill btn-solid px-5 py-2.5 text-xs sm:text-sm font-semibold flex items-center gap-2 cursor-pointer disabled:opacity-50"
                 >
                   <Wand2 className="w-4 h-4" />
                   <span>
                     {isProposing
-                      ? `${lang === 'uz' ? 'Tayyorlanmoqda' : 'Генерация'} ${agentScriptCountdown.progressPercent}%`
-                      : agentOutputMode === 'single_monologue'
-                        ? lang === 'uz'
-                          ? 'To‘liq ssenariy yaratish'
-                          : 'Создать полный сценарий'
-                        : lang === 'uz'
-                          ? '3 ta variant taklif qilish'
-                          : 'Предложить 3 варианта'}
+                      ? `${lang === 'uz' ? 'Tayyorlanmoqda' : 'Думаю…'} ${agentScriptCountdown.progressPercent}%`
+                      : lang === 'uz'
+                        ? 'Variantlarni taklif qilish'
+                        : 'Предложить варианты'}
                   </span>
                 </button>
               </div>
 
-              {/* Single Clarifying Question Box (when task has no subject/essence) */}
+              {/* Единственный уточняющий вопрос (если в задаче нет сути) */}
               {clarifyingQuestion && (
                 <div className="rounded-2xl border border-[#0E7C86]/40 bg-[rgba(14,124,134,0.06)] p-4 space-y-3">
                   <div className="text-xs font-semibold text-[#0A5A62]">
@@ -1529,14 +1301,23 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                 </div>
               )}
 
-              {/* Agent Proposal Cards (1 Full Monologue or 3 Variants) with Inline Editing & Pause Toolbar */}
+              {/* Решение агента (reasonShort) над карточками — Раздел 1.4 */}
+              {proposals.length > 0 && agentDecision?.reasonShort && (
+                <div className="rounded-xl bg-[rgba(14,124,134,0.08)] border border-[#0E7C86]/25 px-4 py-2.5 text-xs text-[#0A5A62] flex items-center gap-2">
+                  <Sparkles className="w-3.5 h-3.5 text-[#0E7C86] shrink-0" />
+                  <span className="font-medium">{agentDecision.reasonShort}</span>
+                </div>
+              )}
+
+              {/* Карточки вариантов (1 для процедуры/монолога или 3 для короткого формата) */}
               {proposals.length > 0 && (
-                <div className="grid grid-cols-1 gap-4 pt-2">
+                <div className="grid grid-cols-1 gap-4 pt-1">
                   {proposals.map((prop) => {
                     const isRefineOpen = openRefineId === prop.id;
                     const isRefiningThis = refiningProposalId === prop.id;
                     const isEditingThis = editingProposalId === prop.id;
                     const liveMetrics = computeClientScriptMetrics(prop.text, speed);
+                    const estCalls = estimateTtsCallsForText(prop.text);
 
                     return (
                       <div
@@ -1550,10 +1331,6 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                             </h3>
                             <div className="text-[11px] text-[#5D594E] font-mono tabular-nums mt-0.5 flex flex-wrap items-center gap-1.5">
                               <span>{prop.badge}</span>
-                              <span>·</span>
-                              <span>
-                                {lang === 'uz' ? 'Uslub:' : 'Подача:'} {prop.recommendedPreset}
-                              </span>
                               <span>·</span>
                               <span className="font-semibold text-[#161511]">
                                 {liveMetrics.words.toLocaleString()} {lang === 'uz' ? "so'z" : 'слов'}
@@ -1587,67 +1364,9 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                                   ? 'Tayyor'
                                   : 'Готово'
                                 : lang === 'uz'
-                                  ? 'Matn va pauzani tahrirlash'
-                                  : 'Редактировать текст / паузы'}
+                                  ? 'Tahrirlash'
+                                  : 'Править'}
                             </span>
-                          </button>
-                        </div>
-
-                        {/* Quick Pause & AI Director Toolbar directly inside the card */}
-                        <div className="flex flex-wrap items-center gap-1.5 bg-white/80 border border-[rgba(22,21,17,0.08)] rounded-xl px-3 py-2">
-                          <span className="text-[10px] font-mono text-[#5D594E] mr-1">
-                            {lang === 'uz' ? 'Pauza va rejissura:' : 'Паузы и режиссура:'}
-                          </span>
-                          {(
-                            [
-                              { label: '+ [pauza 1s]', tag: '[pauza 1s]' },
-                              { label: '+ [pauza 2s]', tag: '[pauza 2s]' },
-                              { label: '+ [pauza 3s]', tag: '[pauza 3s]' },
-                            ] as const
-                          ).map((btn) => (
-                            <button
-                              key={btn.tag}
-                              type="button"
-                              onClick={() => {
-                                handleUpdateProposalTextInPlace(
-                                  prop.id,
-                                  `${prop.text.trim()} ${btn.tag} `
-                                );
-                                setEditingProposalId(prop.id);
-                              }}
-                              className="px-2 py-0.5 rounded-md bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] hover:border-[#0E7C86] text-[10px] font-mono font-semibold text-[#0A5A62] cursor-pointer"
-                            >
-                              {btn.label}
-                            </button>
-                          ))}
-
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleUpdateProposalTextInPlace(
-                                prop.id,
-                                autoInsertCadencePausesInText(prop.text)
-                              )
-                            }
-                            className="px-2.5 py-0.5 rounded-md bg-[rgba(14,124,134,0.12)] border border-[#0E7C86]/30 hover:bg-[#0E7C86] hover:text-white text-[10px] font-mono font-semibold text-[#0A5A62] transition-colors cursor-pointer"
-                          >
-                            {lang === 'uz'
-                              ? 'Avto-pauza 1–2–3s qo‘yish'
-                              : 'Расставить паузы 1–2–3с'}
-                          </button>
-
-                          <button
-                            type="button"
-                            disabled={isRefiningThis}
-                            onClick={() =>
-                              handleRefineProposal(
-                                prop,
-                                'Расширь этот монолог в 2 раза, добавь глубокие примеры, живые переходы и расставь точные паузы [pauza 1s], [pauza 2s], [pauza 3s] между смысловыми частями'
-                              )
-                            }
-                            className="px-2.5 py-0.5 rounded-md bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] hover:border-[#0E7C86] text-[10px] font-mono text-[#161511] cursor-pointer disabled:opacity-50"
-                          >
-                            {lang === 'uz' ? '+ Kengaytirish (2x)' : '+ Развернуть подробнее (2x)'}
                           </button>
                         </div>
 
@@ -1687,8 +1406,8 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                               }
                               placeholder={
                                 lang === 'uz'
-                                  ? "Komanda: «har bir gapdan keyin 2 soniya pauza qo'y», «yanada jonliroq qil», «davomini yoz»..."
-                                  : 'Команда: «поставь паузы 1, 2, 3 секунды между абзацами», «сделай длиннее на 3 минуты», «живее»...'
+                                  ? "Masalan: «har bir gapdan keyin 2 soniya pauza qo'y», «qisqaroq qil»..."
+                                  : 'Например: «поставь паузы 2 секунды», «сделай короче», «живее»...'
                               }
                               className="flex-1 min-w-[220px] rounded-xl border border-[rgba(22,21,17,0.16)] bg-white px-3 py-1.5 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86]"
                             />
@@ -1711,7 +1430,7 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                           </div>
                         )}
 
-                        {/* Card Actions: «Ozvuchit'», «Открыть в редакторе», «Доработать с AI» */}
+                        {/* Card Actions + Quota Forecast (1.6) */}
                         <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                           <div className="flex flex-wrap items-center gap-2">
                             <button
@@ -1747,13 +1466,29 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                               className="btn-pill btn-ghost text-xs px-3 py-1.5 flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
                             >
                               <Wand2 className="w-3.5 h-3.5 text-[#0E7C86]" />
-                              <span>{lang === 'uz' ? 'AI bilan ishlov berish' : 'Доработать с AI'}</span>
+                              <span>{lang === 'uz' ? 'Takomillashtirish' : 'Доработать'}</span>
                             </button>
                           </div>
 
-                          <span className="text-[11px] font-mono tabular-nums text-[#5D594E]">
-                            {liveMetrics.estCredits} {lang === 'uz' ? 'kredit' : 'кред.'}
-                          </span>
+                          <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono tabular-nums text-[#5D594E]">
+                            {quotaStatus && (
+                              <span
+                                className={
+                                  estCalls > quotaStatus.remaining
+                                    ? 'text-amber-700 font-semibold'
+                                    : 'text-[#0A5A62]'
+                                }
+                              >
+                                {estCalls > quotaStatus.remaining
+                                  ? `⚠ ~${estCalls} выз. (осталось ${quotaStatus.remaining})`
+                                  : `Займёт ~${estCalls} выз., осталось ${quotaStatus.remaining}`}
+                              </span>
+                            )}
+                            <span>·</span>
+                            <span>
+                              {liveMetrics.estCredits} {lang === 'uz' ? 'kredit' : 'кред.'}
+                            </span>
+                          </div>
                         </div>
                       </div>
                     );
@@ -1800,6 +1535,16 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                         : 'Из кэша (0 кредитов)'
                       : `${result.creditsUsed} ${lang === 'uz' ? 'kredit' : 'кред.'}`}
                   </span>
+                  {typeof result.ttsCallsUsed === 'number' && (
+                    <>
+                      <span> · </span>
+                      <span>
+                        {result.ttsCallsUsed === 0
+                          ? '0 вызовов (кэш)'
+                          : `${result.ttsCallsUsed} выз. TTS (${result.provider})`}
+                      </span>
+                    </>
+                  )}
                 </div>
               </div>
 

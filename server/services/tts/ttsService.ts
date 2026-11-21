@@ -13,6 +13,15 @@ import {
 } from "../../../src/utils/uzbekNormalizer.ts";
 import { buildTtsStyleAndAnnotatedText } from "./ttsAutoStyle.ts";
 import { synthesizeViaKieAi } from "./kieTtsAdapter.ts";
+import {
+  stretchTimedPausesInPcm,
+  type TimedPauseMarker,
+} from "../dubbing/batchAudioSlicer.ts";
+import {
+  getTtsQuotaStatus,
+  recordGoogleTtsCalls,
+  markGoogleTtsQuotaExhaustedToday,
+} from "./ttsQuotaTracker.ts";
 import type { TtsLanguage, TtsPreset } from "../../../src/types/tts.ts";
 
 const execFileAsync = promisify(execFile);
@@ -20,8 +29,10 @@ const execFileAsync = promisify(execFile);
 const TTS_STORAGE_DIR = path.resolve(process.cwd(), "uploads", "tts-audio");
 const TTS_INDEX_FILE = path.join(TTS_STORAGE_DIR, "index.json");
 
-if (!fs.existsSync(TTS_STORAGE_DIR)) {
-  fs.mkdirSync(TTS_STORAGE_DIR, { recursive: true });
+function ensureStorageDir() {
+  if (!fs.existsSync(TTS_STORAGE_DIR)) {
+    fs.mkdirSync(TTS_STORAGE_DIR, { recursive: true });
+  }
 }
 
 export interface StoredTtsRecord {
@@ -49,15 +60,13 @@ function loadTtsIndex(): Record<string, StoredTtsRecord> {
 
 function saveTtsIndex(index: Record<string, StoredTtsRecord>) {
   try {
+    ensureStorageDir();
     fs.writeFileSync(TTS_INDEX_FILE, JSON.stringify(index, null, 2), "utf8");
   } catch (e) {
     console.warn("[TTS Storage] Failed to save index:", e);
   }
 }
 
-/**
- * Удаляет файлы старше 7 дней, если они не были сохранены в Медиатеку.
- */
 export function cleanupExpiredTtsFiles() {
   try {
     const index = loadTtsIndex();
@@ -101,10 +110,6 @@ export function markTtsRecordSavedToMediaLibrary(id: string): StoredTtsRecord | 
   return rec;
 }
 
-/**
- * Определяет, является ли выбранный голос клонированным голосом пользователя.
- * Клонированный голос (voice_...) работает ТОЛЬКО через прямой Gemini и никогда молча не подменяется.
- */
 export function isClonedVoiceIdentifier(voiceId?: string, replicatedVoiceConfig?: any): boolean {
   if (replicatedVoiceConfig) return true;
   const v = String(voiceId || "").trim().toLowerCase();
@@ -118,9 +123,6 @@ export function isClonedVoiceIdentifier(voiceId?: string, replicatedVoiceConfig?
   );
 }
 
-/**
- * Сопоставляет ID голоса из каталога OvozStudio с одним из 6 базовых голосов Gemini TTS.
- */
 export function resolvePrebuiltVoiceName(voiceId?: string): string {
   const v = String(voiceId || "").trim().toLowerCase();
   const canonical: Record<string, string> = {
@@ -142,7 +144,8 @@ export function resolvePrebuiltVoiceName(voiceId?: string): string {
 }
 
 /**
- * Нарезка длинного текста (> 3 000 знаков) по абзацам и предложениям без разрыва фраз.
+ * Раздел 1.5: Нарезка текста ТОЛЬКО по лимиту (~3 000 знаков) по границам абзацев и предложений.
+ * Теги [pauza Ns] НЕ являются границей вызова TTS!
  */
 export function splitTextIntoTtsChunks(
   text: string,
@@ -167,7 +170,6 @@ export function splitTextIntoTtsChunks(
         if (sent.length <= maxChars) {
           current = sent;
         } else {
-          // Если одно предложение без точек длиннее лимита, режем по запятым/пробелам
           const clauses = sent.split(/(?<=[,;:])\s+/);
           for (const cl of clauses) {
             if ((current ? `${current} ${cl}` : cl).length <= maxChars) {
@@ -214,59 +216,104 @@ export function splitTextIntoTtsChunks(
   return chunks;
 }
 
-export type TtsSynthesisSegment =
-  | { type: "speech"; text: string }
-  | { type: "pause"; durationSec: number };
-
 /**
- * Разбивает текст на последовательность речевых кусков и точных пауз ([pauza 1s], [pauza 2s], [pauza 3s]).
- * Между частями длинного речевого блока (> maxChars) автоматически вставляется 250 мс пауза.
+ * Прогноз числа вызовов TTS для заданного текста (раздел 1.6).
  */
-export function parseSpeechAndPauseSegments(
-  text: string,
-  maxChars: number = TTS_MODELS_CONFIG.chunkSplitThresholdChars
-): TtsSynthesisSegment[] {
-  const canonical = canonicalizeTimedPauseTags(text || "").trim();
-  if (!canonical) return [];
-
-  const rawParts = canonical.split(/(\[pauza\s+\d+(?:\.\d+)?s\])/gi);
-  const segments: TtsSynthesisSegment[] = [];
-  const defaultInterChunkSec = TTS_MODELS_CONFIG.interChunkSilenceMs / 1000;
-
-  for (const part of rawParts) {
-    const trimmed = part.trim();
-    if (!trimmed) continue;
-
-    const pauseMatch = trimmed.match(/^\[pauza\s+(\d+(?:\.\d+)?)s\]$/i);
-    if (pauseMatch) {
-      const sec = Math.max(0.2, Math.min(15, parseFloat(pauseMatch[1])));
-      // Склеиваем подряд идущие паузы, если они встретились рядом
-      const prev = segments[segments.length - 1];
-      if (prev && prev.type === "pause") {
-        prev.durationSec = Math.min(20, prev.durationSec + sec);
-      } else {
-        segments.push({ type: "pause", durationSec: sec });
-      }
-      continue;
-    }
-
-    const subChunks = splitTextIntoTtsChunks(trimmed, maxChars);
-    for (let i = 0; i < subChunks.length; i++) {
-      if (subChunks[i].trim()) {
-        segments.push({ type: "speech", text: subChunks[i].trim() });
-        if (i < subChunks.length - 1) {
-          segments.push({ type: "pause", durationSec: defaultInterChunkSec });
-        }
-      }
-    }
-  }
-
-  return segments;
+export function estimateTtsCallsForText(text: string): number {
+  const clean = (text || "").trim();
+  if (!clean) return 0;
+  return Math.max(1, splitTextIntoTtsChunks(clean, TTS_MODELS_CONFIG.chunkSplitThresholdChars).length);
 }
 
 /**
- * Извлекает чистый 16-bit mono PCM из ответа Gemini TTS (WAV или raw PCM) и подрезает краевую тишину.
+ * Раздел 1.5: Подготавливает один чанк (~3000 знаков) к ЕДИНОМУ вызову TTS:
+ * - Каждая пауза `[pauza Ns]` внутри чанка заменяется на `<short pause>`,
+ *   а её относительная позиция в тексте (0..1) запоминается в `markers`.
+ * - Ведущая или завершающая пауза чанка возвращается отдельно (leadingSilenceSec / trailingSilenceSec).
  */
+export function prepareChunkWithInlinePauseMarkers(rawChunk: string): {
+  ttsText: string;
+  markers: TimedPauseMarker[];
+  leadingSilenceSec: number;
+  trailingSilenceSec: number;
+} {
+  const canonical = canonicalizeTimedPauseTags(rawChunk || "").trim();
+  const tokenRegex = /\[pauza\s+(\d+(?:\.\d+)?)s\]/gi;
+
+  const tokens: Array<{ type: "text"; value: string } | { type: "pause"; sec: number }> = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = tokenRegex.exec(canonical)) !== null) {
+    if (match.index > lastIndex) {
+      const seg = canonical.slice(lastIndex, match.index);
+      if (seg.trim()) {
+        tokens.push({ type: "text", value: seg });
+      }
+    }
+    const sec = Math.max(0.5, Math.min(3.5, parseFloat(match[1]) || 1));
+    const prev = tokens[tokens.length - 1];
+    if (prev && prev.type === "pause") {
+      prev.sec = Math.min(5, prev.sec + sec);
+    } else {
+      tokens.push({ type: "pause", sec });
+    }
+    lastIndex = match.index + match[0].length;
+  }
+
+  if (lastIndex < canonical.length) {
+    const tail = canonical.slice(lastIndex);
+    if (tail.trim()) {
+      tokens.push({ type: "text", value: tail });
+    }
+  }
+
+  let leadingSilenceSec = 0;
+  let trailingSilenceSec = 0;
+
+  while (tokens.length > 0 && tokens[0].type === "pause") {
+    leadingSilenceSec += (tokens.shift() as { type: "pause"; sec: number }).sec;
+  }
+  while (tokens.length > 0 && tokens[tokens.length - 1].type === "pause") {
+    trailingSilenceSec += (tokens.pop() as { type: "pause"; sec: number }).sec;
+  }
+
+  const spokenLengthOf = (s: string) =>
+    s.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().length;
+
+  const totalSpokenChars = Math.max(
+    1,
+    tokens.reduce((sum, tk) => (tk.type === "text" ? sum + spokenLengthOf(tk.value) : sum), 0)
+  );
+
+  const ttsParts: string[] = [];
+  const markers: TimedPauseMarker[] = [];
+  let spokenSoFar = 0;
+
+  for (const tk of tokens) {
+    if (tk.type === "text") {
+      ttsParts.push(tk.value.trim());
+      spokenSoFar += spokenLengthOf(tk.value);
+    } else {
+      // Заменяем [pauza Ns] на <short pause>, чтобы модель сделала чистую акустическую паузу,
+      // которую VAD затем растянет ровно до N секунд без повторного вызова TTS!
+      ttsParts.push("<short pause>");
+      const relPos = Math.max(0.02, Math.min(0.98, spokenSoFar / totalSpokenChars));
+      markers.push({
+        relativePos: relPos,
+        targetDurationSec: tk.sec,
+      });
+    }
+  }
+
+  return {
+    ttsText: ttsParts.join(" ").replace(/\s{2,}/g, " ").trim(),
+    markers,
+    leadingSilenceSec,
+    trailingSilenceSec,
+  };
+}
+
 function extractAndTrimPcm(rawBuf: Buffer): Buffer {
   let pcm = rawBuf;
   if (
@@ -300,15 +347,12 @@ function extractAndTrimPcm(rawBuf: Buffer): Buffer {
     lastActive--;
   }
 
-  const padSamples = Math.floor(24000 * 0.025); // 25ms natural margin
+  const padSamples = Math.floor(24000 * 0.025);
   const startSample = Math.max(0, firstActive - padSamples);
   const endSample = Math.min(totalSamples, lastActive + padSamples + 1);
   return Buffer.from(pcm.subarray(startSample * 2, endSample * 2));
 }
 
-/**
- * Строит корректный WAV-буфер (24 kHz, 16-bit, mono) из PCM.
- */
 export function buildWavFromPcm24k(pcm: Buffer): Buffer {
   const header = Buffer.alloc(44);
   const dataLen = pcm.length;
@@ -317,20 +361,17 @@ export function buildWavFromPcm24k(pcm: Buffer): Buffer {
   header.write("WAVE", 8);
   header.write("fmt ", 12);
   header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20); // PCM
-  header.writeUInt16LE(1, 22); // Mono
-  header.writeUInt32LE(24000, 24); // 24 kHz
-  header.writeUInt32LE(48000, 28); // Byte rate
-  header.writeUInt16LE(2, 32); // Block align
-  header.writeUInt16LE(16, 34); // Bits per sample
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(24000, 24);
+  header.writeUInt32LE(48000, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
   header.write("data", 36);
   header.writeUInt32LE(dataLen, 40);
   return Buffer.concat([header, pcm]);
 }
 
-/**
- * Применяет плавную коррекцию скорости через ffmpeg atempo в пределах 0.9–1.15.
- */
 async function applySpeedAtempoPcm24k(pcm: Buffer, speed: number): Promise<Buffer> {
   const clamped = Math.max(
     TTS_MODELS_CONFIG.minSpeed,
@@ -377,9 +418,6 @@ async function applySpeedAtempoPcm24k(pcm: Buffer, speed: number): Promise<Buffe
   return pcm;
 }
 
-/**
- * Конвертирует WAV-файл в MP3 (192 kbps) через ffmpeg.
- */
 async function convertWavToMp3File(wavPath: string, mp3Path: string): Promise<void> {
   await execFileAsync("/usr/bin/ffmpeg", [
     "-y",
@@ -393,9 +431,6 @@ async function convertWavToMp3File(wavPath: string, mp3Path: string): Promise<vo
   ]);
 }
 
-/**
- * Проверяет, является ли ошибка ответом 429 (лимит квоты) или 402 от Google.
- */
 function isGoogleQuotaOrPaymentError(err: any): boolean {
   const status = err?.status || err?.statusCode || err?.code;
   const msg = String(err?.message || err || "").toLowerCase();
@@ -410,17 +445,11 @@ function isGoogleQuotaOrPaymentError(err: any): boolean {
   );
 }
 
-/**
- * Позволяет симулировать ответ 429 от Google в автотестах для проверки ветвления (kie.ai vs клонированный голос).
- */
 let simulateGoogle429ForTesting = false;
 export function setSimulateGoogle429ForTesting(val: boolean) {
   simulateGoogle429ForTesting = val;
 }
 
-/**
- * Синтезирует один кусок текста через gemini-3.8-flash-tts (или kie.ai при 429/402 для встроенных голосов).
- */
 async function synthesizeChunkPcm(
   ai: GoogleGenAI,
   params: {
@@ -473,7 +502,7 @@ async function synthesizeChunkPcm(
       throw simulatedErr;
     }
 
-    // СТРОГО gemini-3.8-flash-tts (Lite не использовать)
+    // СТРОГО gemini-3.8-flash-tts (Lite не использовать нигде)
     const response = await ai.models.generateContent({
       model: TTS_MODELS_CONFIG.ttsModel,
       contents: [
@@ -498,6 +527,8 @@ async function synthesizeChunkPcm(
       },
     });
 
+    recordGoogleTtsCalls(1);
+
     const b64 = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     if (!b64) {
       throw new Error("Google Gemini TTS returned empty audio data");
@@ -512,17 +543,16 @@ async function synthesizeChunkPcm(
     return { pcm, provider: "google-gemini-tts" };
   } catch (err: any) {
     if (isGoogleQuotaOrPaymentError(err)) {
-      // Если выбран клонированный голос, а Google вернул 429 — голос молча НЕ подменяется!
+      markGoogleTtsQuotaExhaustedToday();
       if (isCloned) {
         const cloneErr: any = new Error(
-          "Лимит исчерпан, попробуйте позже или выберите другой голос"
+          "Дневной лимит исчерпан. Клонированный голос доступен после 13:00 по Ташкенту, либо выберите встроенный голос."
         );
         cloneErr.code = "CLONED_VOICE_QUOTA_EXCEEDED";
         cloneErr.status = 429;
         throw cloneErr;
       }
 
-      // Для встроенного голоса при 429/402 переключаемся на запасной канал kie.ai (google/gemini-3-8-flash-tts)
       const kieRes = await synthesizeViaKieAi({
         text: params.chunkText,
         voiceName: prebuiltVoiceName,
@@ -537,16 +567,10 @@ async function synthesizeChunkPcm(
   }
 }
 
-/**
- * Вычисляет стоимость озвучки в кредитах: 1 кредит за каждую начатую минуту аудио.
- */
 export function calculateTtsCreditsForDuration(durationSeconds: number): number {
   return Math.max(1, Math.ceil(Math.max(1, durationSeconds) / 60));
 }
 
-/**
- * Проверяет, есть ли уже готовый результат в кэше для данных параметров (для бесплатной отдачи из кэша).
- */
 export function isTtsRequestCached(params: {
   text: string;
   voiceId: string;
@@ -563,14 +587,15 @@ export function isTtsRequestCached(params: {
   const normalizedText =
     params.language === "uz"
       ? normalizeUzbekSpeech(rawInput, { decimalStyle: "butun" })
-      : normalizeUzbekApostrophes(rawInput);
+      : canonicalizeTimedPauseTags(normalizeUzbekApostrophes(rawInput));
 
   const cacheKey = crypto
     .createHash("sha256")
     .update(
       JSON.stringify({
+        v: 2,
         text: normalizedText,
-        voiceId: params.voiceId || "charon-news",
+        voiceId: params.voiceId || "charon-history",
         language: params.language || "uz",
         preset: params.preset || "auto",
         speed: clampedSpeed.toFixed(2),
@@ -585,13 +610,11 @@ export function isTtsRequestCached(params: {
 }
 
 /**
- * Главная функция синтеза вкладки «TTS Ovozlash»:
- * 1. Проверка кэша по хешу (текст + голос + язык + стиль + темп) -> 0 запросов к Google и 0 кредитов.
- * 2. Нормализация (цифры, даты, суммы, проценты и дроби словами через uzbekNormalizer, единый апостроф ').
- * 3. Автоэмоция (если подача «Авто») с проверкой неизменности всех слов.
- * 4. Нарезка текста > 3000 знаков по абзацам и предложениям + склейка с паузой 250 мс.
- * 5. Доводка темпа (0.9x – 1.15x) через ffmpeg atempo.
- * 6. Сохранение WAV и MP3 на сервере и возврат ссылки /api/tts/audio/:id.
+ * Главная функция синтеза вкладки «TTS Ovozlash» (раздел 1.5):
+ * - Режет текст ТОЛЬКО по лимиту ~3 000 знаков (паузы [pauza 1s/2s/3s] НЕ тратят доп. вызовы TTS!).
+ * - Внутри чанка заменяет [pauza Ns] на <short pause>, после синтеза VAD находит паузу
+ *   и растягивает её ровно до N секунд вставкой нулевого PCM.
+ * - Возвращает ttsCallsUsed и актуальный остаток дневной квоты.
  */
 export async function synthesizeTtsOvozlash(
   ai: GoogleGenAI,
@@ -613,6 +636,9 @@ export async function synthesizeTtsOvozlash(
   styleSummary: string;
   provider: "google-gemini-tts" | "kie-gemini-tts" | "cache";
   cached: boolean;
+  ttsCallsUsed: number;
+  quotaRemaining: number;
+  quotaLimit: number;
   creditsCost: number;
   synthesisWallTimeMs: number;
 }> {
@@ -629,17 +655,16 @@ export async function synthesizeTtsOvozlash(
     Math.min(TTS_MODELS_CONFIG.maxSpeed, Number(params.speed) || TTS_MODELS_CONFIG.defaultSpeed)
   );
 
-  // 1. Нормализация: для узбекского языка — цифры, даты, суммы, проценты и дроби словами + единый апостроф + канонические паузы [pauza Ns]
   const normalizedText =
     params.language === "uz"
       ? normalizeUzbekSpeech(rawInput, { decimalStyle: "butun" })
       : canonicalizeTimedPauseTags(normalizeUzbekApostrophes(rawInput));
 
-  // 2. Ключ кэша = хеш(нормализованный текст + голос + язык + стиль/пресет + темп)
   const cacheKey = crypto
     .createHash("sha256")
     .update(
       JSON.stringify({
+        v: 2,
         text: normalizedText,
         voiceId: params.voiceId,
         language: params.language,
@@ -655,6 +680,7 @@ export async function synthesizeTtsOvozlash(
   );
 
   if (cachedRecord) {
+    const quota = getTtsQuotaStatus();
     return {
       id: cachedRecord.id,
       audioUrl: `/api/tts/audio/${cachedRecord.id}?format=wav`,
@@ -664,12 +690,14 @@ export async function synthesizeTtsOvozlash(
       styleSummary: cachedRecord.styleSummary,
       provider: "cache",
       cached: true,
+      ttsCallsUsed: 0,
+      quotaRemaining: quota.remaining,
+      quotaLimit: quota.limit,
       creditsCost: 0,
       synthesisWallTimeMs: Date.now() - t0,
     };
   }
 
-  // 3. Автоэмоция (только при preset === 'auto') с проверкой, что слова не изменились
   const styleResult = await buildTtsStyleAndAnnotatedText(ai, {
     text: normalizedText,
     preset: params.preset,
@@ -680,43 +708,65 @@ export async function synthesizeTtsOvozlash(
   const textForSynthesis = styleResult.combinedTaggedText || normalizedText;
   const overallStyle = styleResult.overallStyle;
 
-  // 4. Разбивка на речевые сегменты и точные студийные паузы ([pauza 1s], [pauza 2s], [pauza 3s] + 250 мс между кусками > 2800 знаков)
-  const segments = parseSpeechAndPauseSegments(
+  // Раздел 1.5: Нарезка ТОЛЬКО по ~3 000 знаков по границам абзацев и предложений
+  const rawChunks = splitTextIntoTtsChunks(
     textForSynthesis,
     TTS_MODELS_CONFIG.chunkSplitThresholdChars
   );
 
   const pcmParts: Buffer[] = [];
   let activeProvider: "google-gemini-tts" | "kie-gemini-tts" = "google-gemini-tts";
+  let ttsCallsUsed = 0;
+  const interChunkSilenceSamples = Math.round(
+    24000 * (TTS_MODELS_CONFIG.interChunkSilenceMs / 1000) * clampedSpeed
+  );
 
-  for (const seg of segments) {
-    if (seg.type === "pause") {
-      // Умножаем на clampedSpeed, чтобы после ffmpeg atempo итоговая пауза равнялась ровно seg.durationSec секунд!
-      const pauseSamples = Math.max(480, Math.round(24000 * seg.durationSec * clampedSpeed));
-      pcmParts.push(Buffer.alloc(pauseSamples * 2, 0));
-      continue;
+  for (let i = 0; i < rawChunks.length; i++) {
+    const prepared = prepareChunkWithInlinePauseMarkers(rawChunks[i]);
+    if (!prepared.ttsText) continue;
+
+    if (prepared.leadingSilenceSec > 0) {
+      pcmParts.push(
+        Buffer.alloc(Math.round(24000 * prepared.leadingSilenceSec * clampedSpeed) * 2, 0)
+      );
     }
 
     const chunkRes = await synthesizeChunkPcm(ai, {
-      chunkText: seg.text,
+      chunkText: prepared.ttsText,
       style: overallStyle,
       voiceId: params.voiceId,
       replicatedVoiceConfig: params.replicatedVoiceConfig,
     });
+    ttsCallsUsed += 1;
+
     if (chunkRes.provider === "kie-gemini-tts") {
       activeProvider = "kie-gemini-tts";
     }
-    pcmParts.push(chunkRes.pcm);
+
+    // Раздел 1.5: Растягиваем найденные VAD-паузы ровно до [pauza Ns] секунд вставкой нулевого PCM (0 доп. вызовов!)
+    const stretched =
+      prepared.markers.length > 0
+        ? stretchTimedPausesInPcm(chunkRes.pcm, prepared.markers, clampedSpeed)
+        : { pcm: chunkRes.pcm, matchedCount: 0, missedCount: 0, details: [] };
+
+    pcmParts.push(stretched.pcm);
+
+    if (prepared.trailingSilenceSec > 0) {
+      pcmParts.push(
+        Buffer.alloc(Math.round(24000 * prepared.trailingSilenceSec * clampedSpeed) * 2, 0)
+      );
+    } else if (i < rawChunks.length - 1) {
+      pcmParts.push(Buffer.alloc(interChunkSilenceSamples * 2, 0));
+    }
   }
 
   const stitchedPcm =
     pcmParts.length > 0 ? Buffer.concat(pcmParts) : Buffer.alloc(24000 * 2, 0);
 
-  // 5. Доводка темпа через ffmpeg atempo в пределах 0.9–1.15
   const finalPcm = await applySpeedAtempoPcm24k(stitchedPcm, clampedSpeed);
   const durationSeconds = Math.max(1, Math.round((finalPcm.length / 48000) * 10) / 10);
 
-  // 6. Сохранение WAV и MP3 на сервере
+  ensureStorageDir();
   const id = `tts_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
   const wavPath = path.join(TTS_STORAGE_DIR, `${id}.wav`);
   const mp3Path = path.join(TTS_STORAGE_DIR, `${id}.mp3`);
@@ -744,6 +794,7 @@ export async function synthesizeTtsOvozlash(
   saveTtsIndex(freshIndex);
 
   const creditsCost = calculateTtsCreditsForDuration(durationSeconds);
+  const quota = getTtsQuotaStatus();
 
   return {
     id,
@@ -754,6 +805,9 @@ export async function synthesizeTtsOvozlash(
     styleSummary: overallStyle,
     provider: activeProvider,
     cached: false,
+    ttsCallsUsed,
+    quotaRemaining: quota.remaining,
+    quotaLimit: quota.limit,
     creditsCost,
     synthesisWallTimeMs: Date.now() - t0,
   };

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { VoiceProfile, DialogueTurn, AmbientSoundscape, SoundCueType, AudioSegmentCue } from '../types/podcast';
 import { authFetch } from '../utils/authFetch';
 import { getVoicePreviewUrl } from '../data/voicePreviews';
@@ -519,6 +519,56 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   const [synthesizedTurns, setSynthesizedTurns] = useState<DialogueTurn[]>([]);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [activeTurnIndex, setActiveTurnIndex] = useState<number>(-1);
+
+  // Daily Gemini TTS quota (100 RPD) & pause/resume state for cloned voice 429
+  const [ttsQuota, setTtsQuota] = useState<{
+    used: number;
+    limit: number;
+    remaining: number;
+    resetHintRu?: string;
+  } | null>(null);
+  const [quotaPausedInfo, setQuotaPausedInfo] = useState<{
+    messageRu: string;
+    blocksCompleted: number;
+    blocksTotal: number;
+    remainingTurnsCount: number;
+  } | null>(null);
+
+  const refreshTtsQuota = async () => {
+    try {
+      const res = await authFetch('/api/tts/quota');
+      if (res.ok) {
+        const data = await res.json();
+        if (typeof data?.remaining === 'number') {
+          setTtsQuota(data);
+        }
+      }
+    } catch {}
+  };
+
+  useEffect(() => {
+    refreshTtsQuota();
+  }, [user?.uid]);
+
+  const dubbingCallsForecast = useMemo(() => {
+    if (!turns.length) return { blocks: 0, estimatedCalls: 0, modeLabel: 'A' as 'A' | 'B' };
+    const uniqueSpeakers = new Set(turns.map((t) => t.speakerId || 'HOST_1'));
+    const hasCloned = [speaker1Profile, speaker2Profile].some((p: any) => {
+      if (!p) return false;
+      const id = String(p.voiceId || p.id || '').toLowerCase();
+      return (
+        Boolean(p.isReplicatedVoice || p.isUserCustomVoice) ||
+        id === 'voice_17raj9ewke3g' ||
+        id === 'user-replicated' ||
+        id === 'shohrux' ||
+        id === 'shokhrukh'
+      );
+    });
+    const blocks = Math.max(1, Math.ceil(turns.length / 22));
+    const useModeB = hasCloned || uniqueSpeakers.size > 2;
+    const estimatedCalls = useModeB ? blocks * Math.max(1, uniqueSpeakers.size) : blocks;
+    return { blocks, estimatedCalls, modeLabel: (useModeB ? 'B' : 'A') as 'A' | 'B' };
+  }, [turns, speaker1Profile, speaker2Profile]);
 
   // Ref to avoid overwriting user storage while hydrating on user switch
   const isHydratingUserRef = useRef<boolean>(false);
@@ -2086,8 +2136,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     setBatchProgress(null);
   };
 
-  // Synthesize Full Dialogue (with strict timecode sync)
-  const handleSynthesizeDialogue = async () => {
+  // Synthesize Full Dialogue (macro-blocks 20-25 turns, strict timecode sync, 429 pause/resume)
+  const handleSynthesizeDialogue = async (resumeOnlyRemaining = false) => {
     if (
       !requireAuth(
         () => {},
@@ -2103,6 +2153,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     }
 
     setIsSynthesizing(true);
+    setQuotaPausedInfo(null);
     setMuxedVideoDownloadUrl(null);
     abortControllerRef.current = new AbortController();
 
@@ -2126,6 +2177,15 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       baseVoice: speaker1Profile?.baseVoice || 'Kore',
       gender: speaker1Profile?.gender || 'female',
       tempo: speaker1Tempo,
+      ...(speaker1Profile?.isReplicatedVoice
+        ? {
+            replicatedVoiceConfig: {
+              voiceSampleAudio: speaker1Profile.sampleAudioUrl,
+              consentAudio: (speaker1Profile as any).consentAudio,
+              voiceConsentSignature: (speaker1Profile as any).voiceConsentSignature,
+            },
+          }
+        : {}),
     };
     const host2VoicePayload = {
       voiceId: speaker2Profile?.voiceId || speaker2Profile?.id || 'voice_17raj9ewke3g',
@@ -2137,6 +2197,15 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       timbre: speaker2Timbre || speaker2Profile?.timbre,
       customPersonaPrompt: speaker2Profile?.customPersonaPrompt,
       role: speaker2Role,
+      ...(speaker2Profile?.isReplicatedVoice
+        ? {
+            replicatedVoiceConfig: {
+              voiceSampleAudio: speaker2Profile.sampleAudioUrl,
+              consentAudio: (speaker2Profile as any).consentAudio,
+              voiceConsentSignature: (speaker2Profile as any).voiceConsentSignature,
+            },
+          }
+        : {}),
     };
 
     // Enrich turns with gapAfterSec & nextTurnStartSec across the full timeline before batching
@@ -2158,14 +2227,40 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       };
     });
 
-    if (enrichedTurns.length <= 12) {
+    // Preserve already synthesized turns when resuming after cloned-voice 429 pause
+    const existingById = new Map<string, DialogueTurn>();
+    if (resumeOnlyRemaining && synthesizedTurns.length > 0) {
+      for (const st of synthesizedTurns) {
+        if (st.id && st.audioBase64) {
+          existingById.set(st.id, st);
+        }
+      }
+    }
+
+    const turnsToSynthesize = resumeOnlyRemaining
+      ? enrichedTurns.filter((t) => !existingById.has(t.id))
+      : enrichedTurns;
+
+    const updateQuotaFromPayload = (payload: any) => {
+      if (typeof payload?.quotaRemaining === 'number' && typeof payload?.quotaLimit === 'number') {
+        setTtsQuota({
+          used: Math.max(0, payload.quotaLimit - payload.quotaRemaining),
+          limit: payload.quotaLimit,
+          remaining: payload.quotaRemaining,
+          resetHintRu: 'после 13:00 по Ташкенту',
+        });
+      }
+    };
+
+    // Single request for <= 30 turns (when not resuming partial set)
+    if (!resumeOnlyRemaining && turnsToSynthesize.length <= 30) {
       try {
         const res = await authFetch('/api/podcast/synthesize-dialogue', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           signal: abortControllerRef.current.signal,
           body: JSON.stringify({
-            turns: enrichedTurns,
+            turns: turnsToSynthesize,
             host1Voice: host1VoicePayload,
             host2Voice: host2VoicePayload,
             speakers: extraSpeakers,
@@ -2187,9 +2282,28 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         }
 
         const data = await res.json();
+        updateQuotaFromPayload(data);
+
+        const resultTurns: DialogueTurn[] = data.turns || [];
+        if (data.quotaPaused) {
+          setSynthesizedTurns(resultTurns);
+          setQuotaPausedInfo({
+            messageRu:
+              data.quotaPauseMessageRu ||
+              `Дневной лимит исчерпан. Готово ${data.blocksCompleted || 0} из ${data.blocksTotal || 1} блоков, продолжим после 13:00 по Ташкенту`,
+            blocksCompleted: data.blocksCompleted || 0,
+            blocksTotal: data.blocksTotal || 1,
+            remainingTurnsCount: Math.max(0, enrichedTurns.length - resultTurns.length),
+          });
+          setDialogueNotice(
+            data.quotaPauseMessageRu ||
+              'Дневной лимит исчерпан. Готовые блоки сохранены, можно продолжить после 13:00 по Ташкенту.'
+          );
+          return;
+        }
+
         setMasterAudioBase64(data.masterAudioBase64);
         setTotalDuration(data.totalDurationSeconds || 0);
-        const resultTurns: DialogueTurn[] = data.turns || [];
         setSynthesizedTurns(resultTurns);
         if (resultTurns.length > 0) {
           setTurns((prev) =>
@@ -2214,6 +2328,13 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         setIsPlaying(false);
         setActiveTurnIndex(-1);
 
+        if (typeof data.ttsCallsUsed === 'number') {
+          const st = data.stats || { ok: 0, adjusted: 0, overflow: 0 };
+          setDialogueNotice(
+            `Озвучка готова: ${data.ttsCallsUsed} вызовов TTS (${data.provider || 'google'}) · ok: ${st.ok}, ускорено: ${st.adjusted}, overflow: ${st.overflow}`
+          );
+        }
+
         if (typeof data.creditsRemaining === 'number') {
           syncCredits(data.creditsRemaining);
         } else {
@@ -2231,18 +2352,23 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       return;
     }
 
-    const BATCH_SIZE = 8;
-    const totalBatches = Math.ceil(enrichedTurns.length / BATCH_SIZE);
-    const accumulatedTurns: any[] = [];
-    let currentSpeakerPaceState: any = undefined;
+    // Раздел 2.1: размер батча 25 реплик (вместо 8)
+    const BATCH_SIZE = 25;
+    const totalBatches = Math.max(1, Math.ceil(turnsToSynthesize.length / BATCH_SIZE));
+    const totalProjectBlocks = Math.max(1, Math.ceil(enrichedTurns.length / 22));
+    const initialCompletedBlocks = Math.floor(existingById.size / 22);
+    const newlySynthesizedById = new Map<string, any>(existingById);
+    let totalTtsCallsUsed = 0;
+    const providersUsed = new Set<string>();
+    let pausedByQuota = false;
 
     setBatchProgress({
       currentBatch: 1,
       totalBatches,
-      completedTurns: 0,
+      completedTurns: newlySynthesizedById.size,
       totalTurns: enrichedTurns.length,
-      percent: 0,
-      statusText: `Запуск генерации по таймкодам (пакет 1/${totalBatches})...`,
+      percent: Math.round((newlySynthesizedById.size / Math.max(1, enrichedTurns.length)) * 100),
+      statusText: `Запуск пакетной озвучки (блок 1/${totalBatches})...`,
     });
 
     try {
@@ -2250,16 +2376,16 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         if (abortControllerRef.current?.signal.aborted) break;
 
         const startIdx = b * BATCH_SIZE;
-        const endIdx = Math.min(enrichedTurns.length, (b + 1) * BATCH_SIZE);
-        const batchTurns = enrichedTurns.slice(startIdx, endIdx);
+        const endIdx = Math.min(turnsToSynthesize.length, (b + 1) * BATCH_SIZE);
+        const batchTurns = turnsToSynthesize.slice(startIdx, endIdx);
 
         setBatchProgress({
           currentBatch: b + 1,
           totalBatches,
-          completedTurns: accumulatedTurns.length,
+          completedTurns: newlySynthesizedById.size,
           totalTurns: enrichedTurns.length,
-          percent: Math.round((accumulatedTurns.length / enrichedTurns.length) * 100),
-          statusText: `Озвучка пакета ${b + 1}/${totalBatches} (реплики ${startIdx + 1}–${endIdx})...`,
+          percent: Math.round((newlySynthesizedById.size / Math.max(1, enrichedTurns.length)) * 100),
+          statusText: `Озвучка макро-блока ${b + 1}/${totalBatches} (реплики ${startIdx + 1}–${endIdx})...`,
         });
 
         let batchData: any = null;
@@ -2274,7 +2400,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
               body: JSON.stringify({
                 turns: batchTurns,
                 skipMasterStitch: true,
-                speakerPaceState: currentSpeakerPaceState,
+                startingCompletedBlocks: initialCompletedBlocks + b,
+                totalProjectBlocks,
                 host1Voice: host1VoicePayload,
                 host2Voice: host2VoicePayload,
                 speakers: extraSpeakers,
@@ -2285,7 +2412,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
             if (!res.ok) {
               const err = await res.json().catch(() => ({}));
-              throw new Error(err.message || err.error || `HTTP ${res.status}`);
+              throw new Error(err.message_ru || err.message || err.error || `HTTP ${res.status}`);
             }
 
             batchData = await res.json();
@@ -2298,11 +2425,15 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         }
 
         if (!batchData) {
-          throw new Error(`Ошибка в пакете ${b + 1}: ${lastErr?.message || 'сбой сети'}`);
+          throw new Error(`Ошибка в блоке ${b + 1}: ${lastErr?.message || 'сбой сети'}`);
         }
 
-        if (batchData.speakerPaceState) {
-          currentSpeakerPaceState = batchData.speakerPaceState;
+        updateQuotaFromPayload(batchData);
+        if (typeof batchData.ttsCallsUsed === 'number') {
+          totalTtsCallsUsed += batchData.ttsCallsUsed;
+        }
+        if (batchData.provider) {
+          providersUsed.add(String(batchData.provider));
         }
 
         if (typeof batchData.creditsRemaining === 'number') {
@@ -2310,12 +2441,37 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         }
 
         if (Array.isArray(batchData.turns)) {
-          accumulatedTurns.push(...batchData.turns);
-          setSynthesizedTurns([...accumulatedTurns]);
+          for (const t of batchData.turns) {
+            if (t?.id) newlySynthesizedById.set(t.id, t);
+          }
+          const orderedPartial = enrichedTurns
+            .map((t) => newlySynthesizedById.get(t.id))
+            .filter(Boolean);
+          setSynthesizedTurns(orderedPartial);
+        }
+
+        if (batchData.quotaPaused) {
+          pausedByQuota = true;
+          const remainingCount = Math.max(0, enrichedTurns.length - newlySynthesizedById.size);
+          const msgRu =
+            batchData.quotaPauseMessageRu ||
+            `Дневной лимит исчерпан. Готово ${batchData.blocksCompleted || initialCompletedBlocks + b} из ${totalProjectBlocks} блоков, продолжим после 13:00 по Ташкенту`;
+          setQuotaPausedInfo({
+            messageRu: msgRu,
+            blocksCompleted: batchData.blocksCompleted || initialCompletedBlocks + b,
+            blocksTotal: totalProjectBlocks,
+            remainingTurnsCount: remainingCount,
+          });
+          setDialogueNotice(msgRu);
+          break;
         }
       }
 
-      if (accumulatedTurns.length > 0) {
+      const accumulatedTurns = enrichedTurns
+        .map((t) => newlySynthesizedById.get(t.id))
+        .filter(Boolean);
+
+      if (!pausedByQuota && accumulatedTurns.length > 0) {
         setBatchProgress({
           currentBatch: totalBatches,
           totalBatches,
@@ -2363,6 +2519,15 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           if (stitchData.srtSubtitles) setSrtSubtitles(stitchData.srtSubtitles);
           setIsPlaying(false);
           setActiveTurnIndex(-1);
+
+          const okCount = finalTurns.filter((t) => t.syncStatus === 'ok').length;
+          const adjCount = finalTurns.filter((t) => t.syncStatus === 'adjusted').length;
+          const ovfCount = finalTurns.filter((t) => t.syncStatus === 'overflow').length;
+          const provLabel = Array.from(providersUsed).join('+') || 'google';
+          setDialogueNotice(
+            `Озвучка готова: ${totalTtsCallsUsed} вызовов TTS (${provLabel}) · ok: ${okCount}, ускорено: ${adjCount}, overflow: ${ovfCount}`
+          );
+
           if (typeof stitchData.creditsRemaining === 'number') {
             syncCredits(stitchData.creditsRemaining);
           }
@@ -2379,6 +2544,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     } finally {
       setIsSynthesizing(false);
       setBatchProgress(null);
+      refreshTtsQuota();
     }
   };
 
@@ -3801,7 +3967,26 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
               })}
             </div>
 
-            {/* Add turn button & Synthesize action */}
+            {/* Quota Pause / Resume Banner for Cloned Voice 429 (Раздел 2.8) */}
+            {quotaPausedInfo && !isSynthesizing && (
+              <div className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-950 flex flex-wrap items-center justify-between gap-3">
+                <div className="space-y-0.5">
+                  <div className="font-semibold">{quotaPausedInfo.messageRu}</div>
+                  <div className="text-[11px] text-amber-800">
+                    Сохранено реплик: {turns.length - quotaPausedInfo.remainingTurnsCount} из {turns.length} (без подмены клонированного голоса).
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleSynthesizeDialogue(true)}
+                  className="btn-pill btn-solid text-xs px-4 py-2 cursor-pointer whitespace-nowrap"
+                >
+                  Продолжить оставшиеся блоки ({quotaPausedInfo.remainingTurnsCount} репл.)
+                </button>
+              </div>
+            )}
+
+            {/* Add turn button & Synthesize action + Quota Forecast (Раздел 2.8) */}
             <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-3 flex-wrap">
               <button
                 onClick={addTurn}
@@ -3812,6 +3997,20 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
               </button>
 
               <div className="flex items-center gap-2.5 w-full sm:w-auto justify-end flex-wrap">
+                {!isSynthesizing && turns.length > 0 && ttsQuota && (
+                  <span
+                    className={`text-[11px] font-mono tabular-nums px-2.5 py-1 rounded-lg border ${
+                      dubbingCallsForecast.estimatedCalls > ttsQuota.remaining
+                        ? 'bg-amber-50 border-amber-300 text-amber-900 font-semibold'
+                        : 'bg-[#FAF8F4] border-[rgba(22,21,17,0.12)] text-[#0A5A62]'
+                    }`}
+                  >
+                    {dubbingCallsForecast.estimatedCalls > ttsQuota.remaining
+                      ? `⚠ Озвучка займёт ~${dubbingCallsForecast.estimatedCalls} выз., сегодня осталось ${ttsQuota.remaining}`
+                      : `Озвучка займёт ~${dubbingCallsForecast.estimatedCalls} выз., сегодня осталось ${ttsQuota.remaining}`}
+                  </span>
+                )}
+
                 {!isSynthesizing && turns.length > 0 && (
                   <PreCalculationBadge
                     estimatedSeconds={estimatedDialogueSeconds}
@@ -3832,7 +4031,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 )}
 
                 <button
-                  onClick={handleSynthesizeDialogue}
+                  onClick={() => handleSynthesizeDialogue(false)}
                   disabled={isSynthesizing || turns.length === 0}
                   className="btn-pill btn-solid text-xs sm:text-sm py-2.5 px-6 flex items-center justify-center gap-2 w-full sm:w-auto shadow-sm"
                 >
