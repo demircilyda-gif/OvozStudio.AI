@@ -17,7 +17,7 @@ import {
   FileText,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { authFetch, getCurrentIdToken } from '../utils/authFetch';
+import { authFetch } from '../utils/authFetch';
 import { getVoicePreviewUrl } from '../data/voicePreviews';
 import { canonicalizeTimedPauseTags } from '../utils/uzbekNormalizer';
 import { GenerationCountdownHUD, PreCalculationBadge } from './GenerationCountdownHUD';
@@ -29,12 +29,14 @@ import {
 } from '../hooks/useGenerationCountdown';
 import type { VoiceProfile } from '../types/podcast';
 import type {
+  CharacterVoice,
   TtsMode,
   TtsLanguage,
   TtsPreset,
   TtsProcessingStage,
   TtsAgentProposal,
   TtsAgentDecision,
+  TtsDirectorSegment,
   TtsSynthesisResult,
   TtsQuotaStatus,
 } from '../types/tts';
@@ -286,6 +288,10 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
   const [doNotTranslate, setDoNotTranslate] = useState<boolean>(false);
   const [userExplicitlyPickedVoice, setUserExplicitlyPickedVoice] = useState<boolean>(false);
 
+  // Cartoon character voices loaded from public server config (single source of truth)
+  const [characterVoices, setCharacterVoices] = useState<CharacterVoice[]>([]);
+  const [selectedCharacterVoiceId, setSelectedCharacterVoiceId] = useState<string | null>(null);
+
   // Voice preview state
   const [playingPreviewVoiceId, setPlayingPreviewVoiceId] = useState<string | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -313,6 +319,7 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
   const [refineInstructionById, setRefineInstructionById] = useState<Record<string, string>>({});
   const [refiningProposalId, setRefiningProposalId] = useState<string | null>(null);
   const [editingProposalId, setEditingProposalId] = useState<string | null>(null);
+  const [voiceOverrideByProposalId, setVoiceOverrideByProposalId] = useState<Record<string, string>>({});
 
   // Google TTS 100 RPD quota status
   const [quotaStatus, setQuotaStatus] = useState<TtsQuotaStatus | null>(null);
@@ -323,19 +330,49 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [placeholderWarning, setPlaceholderWarning] = useState<string[] | null>(null);
   const [result, setResult] = useState<TtsSynthesisResult | null>(null);
+  const [lastSynthesizedVoiceName, setLastSynthesizedVoiceName] = useState<string>('');
   const [savedToCmsSuccess, setSavedToCmsSuccess] = useState<boolean>(false);
 
-  // Audio Player State
+  // Audio Player & Download State (Blob-backed via authFetch — 100% reliable in iframes)
   const [isPlayingResult, setIsPlayingResult] = useState<boolean>(false);
   const [currentTimeSec, setCurrentTimeSec] = useState<number>(0);
-  const [authenticatedAudioUrl, setAuthenticatedAudioUrl] = useState<string>('');
-  const [authenticatedMp3Url, setAuthenticatedMp3Url] = useState<string>('');
+  const [audioBlobUrl, setAudioBlobUrl] = useState<string>('');
+  const [isLoadingAudioBlob, setIsLoadingAudioBlob] = useState<boolean>(false);
+  const [downloadingFormat, setDownloadingFormat] = useState<'mp3' | 'wav' | null>(null);
   const resultAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const activeVoice = useMemo(
     () => voices.find((v) => v.id === selectedVoiceId) || voices[0],
     [voices, selectedVoiceId]
   );
+
+  const activeCharacterVoice = useMemo(
+    () =>
+      selectedCharacterVoiceId
+        ? characterVoices.find((c) => c.id === selectedCharacterVoiceId) || null
+        : null,
+    [characterVoices, selectedCharacterVoiceId]
+  );
+
+  const activeDisplayVoiceName = useMemo(() => {
+    if (activeCharacterVoice) {
+      return lang === 'uz' ? activeCharacterVoice.nameUz : activeCharacterVoice.nameRu;
+    }
+    return activeVoice?.name || 'OvozStudio';
+  }, [activeCharacterVoice, activeVoice, lang]);
+
+  const formatCharacterRoleLabel = (role: CharacterVoice['role']) => {
+    if (lang === 'uz') {
+      if (role === 'girl') return 'Qizcha';
+      if (role === 'boy') return 'Bola';
+      if (role === 'creature') return 'Qahramon';
+      return 'Hikoyachi';
+    }
+    if (role === 'girl') return 'Девочка';
+    if (role === 'boy') return 'Мальчик';
+    if (role === 'creature') return 'Зверёк';
+    return 'Сказочник';
+  };
 
   // Detect input text language for «Не переводить» checkbox visibility
   const detectedLang = useMemo(() => detectClientTextLanguage(text), [text]);
@@ -401,29 +438,100 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
 
   useEffect(() => {
     refreshQuotaStatus();
+    fetch('/api/tts/character-voices')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (Array.isArray(data?.voices)) {
+          setCharacterVoices(data.voices);
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const standardEstCalls = useMemo(() => estimateTtsCallsForText(text), [text]);
   const isAgentTaskTooLong = agentTaskStats.words > MAX_AGENT_WORDS;
 
-  // Attach token to audio URLs when result changes
+  // Load synthesized audio into an authenticated local Blob URL so Play & Seek always work
   useEffect(() => {
     let active = true;
-    if (!result) {
-      setAuthenticatedAudioUrl('');
-      setAuthenticatedMp3Url('');
+    let createdUrl = '';
+
+    setIsPlayingResult(false);
+    setCurrentTimeSec(0);
+    if (resultAudioRef.current) {
+      resultAudioRef.current.pause();
+    }
+
+    if (!result?.audioUrl) {
+      setAudioBlobUrl('');
+      setIsLoadingAudioBlob(false);
       return;
     }
-    getCurrentIdToken().then((token: string | null) => {
-      if (!active) return;
-      const tParam = token ? `&token=${encodeURIComponent(token)}` : '';
-      setAuthenticatedAudioUrl(`${result.audioUrl}${tParam}`);
-      setAuthenticatedMp3Url(`${result.mp3Url}${tParam}`);
-    });
+
+    setIsLoadingAudioBlob(true);
+    authFetch(result.audioUrl)
+      .then(async (res) => {
+        if (!res.ok) {
+          throw new Error(`Audio load failed (${res.status})`);
+        }
+        const blob = await res.blob();
+        if (!active) return;
+        createdUrl = URL.createObjectURL(blob);
+        setAudioBlobUrl(createdUrl);
+      })
+      .catch((err) => {
+        if (!active) return;
+        console.error('[TtsStudio] Failed to load audio blob:', err);
+        setAudioBlobUrl('');
+        setErrorMessage(
+          lang === 'uz'
+            ? "Tayyor audioni yuklab bo'lmadi. Qayta urinib ko'ring."
+            : 'Не удалось загрузить готовое аудио для воспроизведения. Попробуйте ещё раз.'
+        );
+      })
+      .finally(() => {
+        if (active) setIsLoadingAudioBlob(false);
+      });
+
     return () => {
       active = false;
+      if (createdUrl) {
+        URL.revokeObjectURL(createdUrl);
+      }
     };
-  }, [result]);
+  }, [result?.id, result?.audioUrl]);
+
+  // Authenticated Blob download (works reliably in iframes and all browsers)
+  const handleDownloadResultAudio = async (format: 'mp3' | 'wav') => {
+    if (!result || downloadingFormat) return;
+    setDownloadingFormat(format);
+    setErrorMessage(null);
+    try {
+      const targetUrl = format === 'mp3' ? result.mp3Url : result.audioUrl;
+      const res = await authFetch(targetUrl);
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        throw new Error(errText || `HTTP ${res.status}`);
+      }
+      const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = `ovozstudio_${result.id}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 2500);
+    } catch (err: any) {
+      setErrorMessage(
+        lang === 'uz'
+          ? `Faylni yuklab olib bo'lmadi (${format.toUpperCase()}): ${err?.message || ''}`
+          : `Не удалось скачать ${format.toUpperCase()}: ${err?.message || 'ошибка сети'}`
+      );
+    } finally {
+      setDownloadingFormat(null);
+    }
+  };
 
   // Insert pause or vocal tag into Standard Textarea at cursor position
   const insertTagIntoStandardEditor = (tag: string) => {
@@ -458,6 +566,7 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
           ? {
               ...item,
               text: newText,
+              segments: undefined, // ручная правка текста имеет приоритет над исходными сегментами
               wordCount: metrics.words,
               pauseTotalSeconds: metrics.pauseSeconds,
               estimatedSeconds: metrics.estSeconds,
@@ -468,16 +577,12 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
     );
   };
 
-  const handleToggleVoicePreview = (voice: VoiceProfile) => {
-    if (playingPreviewVoiceId === voice.id) {
+  const handleTogglePreviewUrl = (previewKey: string, url: string) => {
+    if (playingPreviewVoiceId === previewKey) {
       previewAudioRef.current?.pause();
       setPlayingPreviewVoiceId(null);
       return;
     }
-    const url =
-      voice.sampleAudioUrl ||
-      getVoicePreviewUrl(voice.id) ||
-      `/audio/previews/${voice.id}.wav`;
 
     if (!previewAudioRef.current) {
       previewAudioRef.current = new Audio(url);
@@ -489,14 +594,33 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
     previewAudioRef.current.currentTime = 0;
     previewAudioRef.current
       .play()
-      .then(() => setPlayingPreviewVoiceId(voice.id))
+      .then(() => setPlayingPreviewVoiceId(previewKey))
       .catch(() => setPlayingPreviewVoiceId(null));
+  };
+
+  const handleToggleVoicePreview = (voice: VoiceProfile) => {
+    const url =
+      voice.sampleAudioUrl ||
+      getVoicePreviewUrl(voice.id) ||
+      `/audio/previews/${voice.id}.wav`;
+    handleTogglePreviewUrl(voice.id, url);
+  };
+
+  const handleToggleCharacterPreview = (charVoice: CharacterVoice) => {
+    const url =
+      charVoice.previewUrl ||
+      getVoicePreviewUrl(charVoice.id) ||
+      `/audio/previews/characters/${charVoice.id}.wav`;
+    handleTogglePreviewUrl(charVoice.id, url);
   };
 
   const executeSynthesize = async (params: {
     textToSpeak: string;
     voiceIdToUse: string;
+    characterVoiceIdToUse?: string;
     presetToUse: TtsPreset;
+    directorStyle?: string;
+    segments?: TtsDirectorSegment[];
   }) => {
     setErrorMessage(null);
     setPlaceholderWarning(null);
@@ -511,19 +635,25 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
 
     try {
       setActiveSynthesisText(params.textToSpeak);
-      setStage(params.presetToUse === 'auto' ? 'analyzing_intonation' : 'synthesizing');
+      setStage(params.presetToUse === 'auto' && !params.directorStyle ? 'analyzing_intonation' : 'synthesizing');
 
-      const chosenVoice = voices.find((v) => v.id === params.voiceIdToUse);
-      const replicatedVoiceConfig = chosenVoice?.isReplicatedVoice
-        ? {
-            voiceSampleAudio: chosenVoice.sampleAudioUrl,
-            consentAudio: (chosenVoice as any).consentAudio,
-            voiceConsentSignature: (chosenVoice as any).voiceConsentSignature,
-          }
+      const chosenCharacter = params.characterVoiceIdToUse
+        ? characterVoices.find((c) => c.id === params.characterVoiceIdToUse)
         : undefined;
+      const chosenVoice = chosenCharacter
+        ? undefined
+        : voices.find((v) => v.id === params.voiceIdToUse) || activeVoice;
+      const replicatedVoiceConfig =
+        !chosenCharacter && chosenVoice?.isReplicatedVoice
+          ? {
+              voiceSampleAudio: chosenVoice.sampleAudioUrl,
+              consentAudio: (chosenVoice as any).consentAudio,
+              voiceConsentSignature: (chosenVoice as any).voiceConsentSignature,
+            }
+          : undefined;
 
       const stageTimer =
-        params.presetToUse === 'auto'
+        params.presetToUse === 'auto' && !params.directorStyle
           ? setTimeout(() => setStage('synthesizing'), 1400)
           : null;
 
@@ -532,11 +662,14 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text: params.textToSpeak,
-          voiceId: params.voiceIdToUse,
+          voiceId: chosenCharacter ? chosenCharacter.baseVoice || 'Leda' : params.voiceIdToUse,
+          characterVoiceId: chosenCharacter ? chosenCharacter.id : undefined,
           language: targetLang,
           preset: params.presetToUse,
           speed,
           replicatedVoiceConfig,
+          directorStyle: params.directorStyle || undefined,
+          segments: params.segments && params.segments.length > 1 ? params.segments : undefined,
         }),
       });
 
@@ -549,6 +682,13 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
         );
       }
 
+      setLastSynthesizedVoiceName(
+        chosenCharacter
+          ? lang === 'uz'
+            ? chosenCharacter.nameUz
+            : chosenCharacter.nameRu
+          : chosenVoice?.name || params.voiceIdToUse
+      );
       setResult(data);
       setStage('done');
       if (typeof data.creditsRemaining === 'number') {
@@ -614,6 +754,7 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
           await executeSynthesize({
             textToSpeak: trData.translatedText,
             voiceIdToUse: selectedVoiceId,
+            characterVoiceIdToUse: selectedCharacterVoiceId || undefined,
             presetToUse: preset,
           });
           return;
@@ -666,6 +807,7 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
     await executeSynthesize({
       textToSpeak: clean,
       voiceIdToUse: selectedVoiceId,
+      characterVoiceIdToUse: selectedCharacterVoiceId || undefined,
       presetToUse: preset,
     });
   };
@@ -690,6 +832,8 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
     setPlaceholderWarning(null);
     setClarifyingQuestion(null);
     setAgentDecision(null);
+    setVoiceOverrideByProposalId({});
+    setEditingProposalId(null);
 
     try {
       const res = await authFetch('/api/tts/agent-propose', {
@@ -698,12 +842,14 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
         body: JSON.stringify({
           task: taskToUse,
           language: targetLang,
-          voiceId: userExplicitlyPickedVoice ? selectedVoiceId : undefined,
+          voiceId: userExplicitlyPickedVoice
+            ? selectedCharacterVoiceId || selectedVoiceId
+            : undefined,
         }),
       });
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(data?.error || 'Ошибка генерации сценария');
+        throw new Error(data?.message_ru || data?.error || 'Ошибка генерации сценария');
       }
 
       if (data.decision) {
@@ -715,7 +861,22 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
         setProposals([]);
       } else {
         setClarifyingQuestion(null);
-        setProposals(Array.isArray(data.proposals) ? data.proposals : []);
+        const nextProposals: TtsAgentProposal[] = Array.isArray(data.proposals)
+          ? data.proposals
+          : [];
+        setProposals(nextProposals);
+
+        // Если пользователь НЕ выбирал голос вручную в правой консоли и агент определил kids_cartoon —
+        // автоматически выставляем рекомендованного персонажа на каждой карточке!
+        if (!userExplicitlyPickedVoice && data.decision?.audience === 'kids_cartoon') {
+          const autoOverrides: Record<string, string> = {};
+          for (const p of nextProposals) {
+            if (p.characterVoiceId) {
+              autoOverrides[p.id] = p.characterVoiceId;
+            }
+          }
+          setVoiceOverrideByProposalId(autoOverrides);
+        }
       }
     } catch (err: any) {
       setErrorMessage(err?.message || 'Не удалось получить сценарий от агента');
@@ -737,6 +898,7 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           proposalText: proposal.text,
+          directorStyle: proposal.deliveryStyle || proposal.directorStyle || '',
           instruction,
           language: targetLang,
         }),
@@ -753,6 +915,9 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
             ? {
                 ...item,
                 text: data.refinedText,
+                directorStyle: data.directorStyle || item.directorStyle,
+                deliveryStyle: data.directorStyle || item.deliveryStyle,
+                segments: undefined,
                 wordCount: updatedMetrics.words,
                 pauseTotalSeconds: updatedMetrics.pauseSeconds,
                 estimatedSeconds: updatedMetrics.estSeconds,
@@ -774,7 +939,21 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
     }
   };
 
-  // Agent Mode: Speak a proposal card immediately
+  // Resolves effective voice/character for an Agent proposal card (manual choice always wins)
+  const resolveEffectiveCardSelection = (proposal: TtsAgentProposal): string => {
+    if (voiceOverrideByProposalId[proposal.id]) {
+      return voiceOverrideByProposalId[proposal.id];
+    }
+    if (userExplicitlyPickedVoice) {
+      return selectedCharacterVoiceId || selectedVoiceId || voices[0]?.id || 'ulugbek-history';
+    }
+    if (proposal.characterVoiceId && characterVoices.some((c) => c.id === proposal.characterVoiceId)) {
+      return proposal.characterVoiceId;
+    }
+    return selectedCharacterVoiceId || selectedVoiceId || voices[0]?.id || 'ulugbek-history';
+  };
+
+  // Agent Mode: Speak a proposal card immediately using the chosen voice/character & deliveryStyle
   const handleSpeakProposal = async (proposal: TtsAgentProposal) => {
     if (!requireAuth(() => {}, 'TTS Ovozlash')) return;
     const unfilled = findUnfilledPlaceholders(proposal.text);
@@ -783,18 +962,21 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
       return;
     }
 
-    const candidateVoiceId = userExplicitlyPickedVoice
-      ? selectedVoiceId
-      : voices.some((v) => v.id === proposal.recommendedVoiceId)
-        ? proposal.recommendedVoiceId
-        : selectedVoiceId;
+    const effectiveSelectionId = resolveEffectiveCardSelection(proposal);
+    const selectedChar = characterVoices.find((c) => c.id === effectiveSelectionId);
 
-    const presetToUse = preset !== 'auto' ? preset : proposal.recommendedPreset || 'conversational';
+    // Если подача в режиме "Авто", передаём режиссуру агента (deliveryStyle/directorStyle + segments) напрямую в Gemini 3.8 TTS!
+    const useAgentDirection = preset === 'auto';
+    const presetToUse: TtsPreset = useAgentDirection ? 'auto' : preset;
+    const activeDirectionStyle = proposal.deliveryStyle || proposal.directorStyle;
 
     await executeSynthesize({
       textToSpeak: proposal.text,
-      voiceIdToUse: candidateVoiceId,
+      voiceIdToUse: selectedChar ? selectedChar.baseVoice || 'Leda' : effectiveSelectionId,
+      characterVoiceIdToUse: selectedChar ? selectedChar.id : undefined,
       presetToUse,
+      directorStyle: useAgentDirection ? activeDirectionStyle : undefined,
+      segments: useAgentDirection ? proposal.segments : undefined,
     });
   };
 
@@ -804,10 +986,15 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
     setLastTranslatedSnapshot(proposal.text);
     setTranslationBannerText(null);
     setPlaceholderWarning(null);
-    if (!userExplicitlyPickedVoice && voices.some((v) => v.id === proposal.recommendedVoiceId)) {
-      onSelectVoiceId(proposal.recommendedVoiceId);
+    const effectiveSelectionId = resolveEffectiveCardSelection(proposal);
+    const matchedChar = characterVoices.find((c) => c.id === effectiveSelectionId);
+    if (matchedChar) {
+      setSelectedCharacterVoiceId(matchedChar.id);
+    } else if (voices.some((v) => v.id === effectiveSelectionId)) {
+      setSelectedCharacterVoiceId(null);
+      onSelectVoiceId(effectiveSelectionId);
     }
-    setPreset(proposal.recommendedPreset || 'conversational');
+    setPreset('auto');
     setMode('standard');
   };
 
@@ -827,7 +1014,7 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
         id: result.id,
         title: `TTS: ${result.finalSpokenText.slice(0, 48)}`,
         script: result.finalSpokenText,
-        voiceName: activeVoice?.name || selectedVoiceId,
+        voiceName: lastSynthesizedVoiceName || activeVoice?.name || selectedVoiceId,
         durationSeconds: result.durationSeconds,
         rawAudioWavBase64: data.rawAudioWavBase64 || '',
         preset,
@@ -881,8 +1068,8 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
             lang={lang}
             title={
               lang === 'uz'
-                ? `${activeVoice?.name || 'OvozStudio'} bilan nutq sintez qilinmoqda`
-                : `Студийный синтез речи (${activeVoice?.name || 'OvozStudio'})`
+                ? `${activeDisplayVoiceName} bilan nutq sintez qilinmoqda`
+                : `Студийный синтез речи (${activeDisplayVoiceName})`
             }
             subtitle={
               stage === 'translating'
@@ -1309,7 +1496,7 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                 </div>
               )}
 
-              {/* Карточки вариантов (1 для процедуры/монолога или 3 для короткого формата) */}
+              {/* Карточки вариантов (режиссёр предлагает выбор «так, так или так») */}
               {proposals.length > 0 && (
                 <div className="grid grid-cols-1 gap-4 pt-1">
                   {proposals.map((prop) => {
@@ -1318,6 +1505,24 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                     const isEditingThis = editingProposalId === prop.id;
                     const liveMetrics = computeClientScriptMetrics(prop.text, speed);
                     const estCalls = estimateTtsCallsForText(prop.text);
+                    const cardSelectionId = resolveEffectiveCardSelection(prop);
+                    const cardCharacter = characterVoices.find((c) => c.id === cardSelectionId);
+                    const cardVoice = cardCharacter
+                      ? undefined
+                      : voices.find((v) => v.id === cardSelectionId) || activeVoice;
+                    const recommendedCharacter = prop.characterVoiceId
+                      ? characterVoices.find((c) => c.id === prop.characterVoiceId)
+                      : undefined;
+                    const recommendedVoice = !recommendedCharacter
+                      ? voices.find((v) => v.id === prop.recommendedVoiceId)
+                      : undefined;
+                    const showRecCharacterSuggestion =
+                      Boolean(recommendedCharacter) &&
+                      recommendedCharacter!.id !== cardSelectionId;
+                    const showRecAdultSuggestion =
+                      !recommendedCharacter &&
+                      Boolean(recommendedVoice) &&
+                      recommendedVoice!.id !== cardSelectionId;
 
                     return (
                       <div
@@ -1331,6 +1536,15 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                             </h3>
                             <div className="text-[11px] text-[#5D594E] font-mono tabular-nums mt-0.5 flex flex-wrap items-center gap-1.5">
                               <span>{prop.badge}</span>
+                              {cardCharacter && (
+                                <>
+                                  <span>·</span>
+                                  <span className="font-semibold text-[#0E7C86]">
+                                    {lang === 'uz' ? cardCharacter.nameUz : cardCharacter.nameRu} (
+                                    {formatCharacterRoleLabel(cardCharacter.role)})
+                                  </span>
+                                </>
+                              )}
                               <span>·</span>
                               <span className="font-semibold text-[#161511]">
                                 {liveMetrics.words.toLocaleString()} {lang === 'uz' ? "so'z" : 'слов'}
@@ -1370,7 +1584,36 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                           </button>
                         </div>
 
-                        {/* Script Text: Editable Textarea OR Highlighted Preview */}
+                        {/* Timed / Multi-Beat Directorial Timeline (never spoken aloud — guides acting only) */}
+                        {prop.segments && prop.segments.length > 1 && (
+                          <div className="rounded-xl bg-[rgba(14,124,134,0.06)] border border-[#0E7C86]/20 px-3 py-2 space-y-1">
+                            <div className="text-[10px] font-mono uppercase tracking-wider text-[#0A5A62] font-semibold">
+                              {lang === 'uz'
+                                ? 'Rejissura bo‘yicha bosqichlar (ovozda o‘qilmaydi, faqat intonatsiyani boshqaradi)'
+                                : 'Режиссура подачи по этапам (вслух не читается — управляет только живой интонацией)'}
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {prop.segments.map((seg, sIdx) => (
+                                <span
+                                  key={sIdx}
+                                  className="inline-flex items-center gap-1 text-[11px] bg-white/90 border border-[#0E7C86]/20 rounded-lg px-2 py-0.5 text-[#161511]"
+                                  title={seg.style}
+                                >
+                                  {seg.timecode && (
+                                    <span className="font-mono font-semibold text-[#0E7C86]">
+                                      {seg.timecode}
+                                    </span>
+                                  )}
+                                  <span className="truncate max-w-[220px] text-[#5D594E]">
+                                    {seg.style}
+                                  </span>
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Pure Spoken Script Text: Editable Textarea OR Highlighted Preview */}
                         {isEditingThis ? (
                           <textarea
                             value={prop.text}
@@ -1392,6 +1635,146 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                           </p>
                         )}
 
+                        {/* Inline Voice / Character Picker + Preview directly on every Agent card */}
+                        <div className="flex flex-wrap items-center gap-2 bg-white/85 border border-[rgba(22,21,17,0.1)] rounded-xl px-3 py-2">
+                          <span className="text-[11px] font-semibold text-[#5D594E] whitespace-nowrap">
+                            {cardCharacter
+                              ? lang === 'uz'
+                                ? 'Qahramon:'
+                                : 'Персонаж:'
+                              : lang === 'uz'
+                                ? 'Ovoz:'
+                                : 'Голос:'}
+                          </span>
+                          <select
+                            value={cardSelectionId}
+                            onChange={(e) => {
+                              const nextId = e.target.value;
+                              const nextChar = characterVoices.find((c) => c.id === nextId);
+                              setVoiceOverrideByProposalId((prev) => ({
+                                ...prev,
+                                [prop.id]: nextId,
+                              }));
+                              if (nextChar) {
+                                setSelectedCharacterVoiceId(nextChar.id);
+                              } else {
+                                setSelectedCharacterVoiceId(null);
+                                onSelectVoiceId(nextId);
+                              }
+                              setUserExplicitlyPickedVoice(true);
+                            }}
+                            className="flex-1 min-w-[190px] max-w-xs rounded-lg border border-[rgba(22,21,17,0.14)] bg-[#FAF8F4] px-2.5 py-1 text-xs font-medium text-[#161511] focus:outline-none focus:border-[#0E7C86] cursor-pointer"
+                          >
+                            {characterVoices.length > 0 && (
+                              <optgroup
+                                label={
+                                  lang === 'uz'
+                                    ? 'Multfilm qahramonlari'
+                                    : 'Персонажи мультфильмов'
+                                }
+                              >
+                                {characterVoices.map((c) => (
+                                  <option key={c.id} value={c.id}>
+                                    {lang === 'uz' ? c.nameUz : c.nameRu} · {c.temperament}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            )}
+                            <optgroup
+                              label={lang === 'uz' ? 'Asosiy ovozlar' : 'Стандартные голоса'}
+                            >
+                              {voices.map((v) => {
+                                const isCloned = Boolean(
+                                  v.isReplicatedVoice || v.isUserCustomVoice
+                                );
+                                return (
+                                  <option key={v.id} value={v.id}>
+                                    {v.name}{' '}
+                                    {isCloned
+                                      ? lang === 'uz'
+                                        ? '(Klon)'
+                                        : '(Клон)'
+                                      : `(${v.baseVoice})`}
+                                  </option>
+                                );
+                              })}
+                            </optgroup>
+                          </select>
+
+                          {cardCharacter ? (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleCharacterPreview(cardCharacter)}
+                              className="w-7 h-7 rounded-lg bg-[#FAF8F4] border border-[rgba(22,21,17,0.14)] flex items-center justify-center text-[#0E7C86] hover:bg-[#0E7C86] hover:text-white transition-colors shrink-0 cursor-pointer"
+                              title={
+                                lang === 'uz'
+                                  ? 'Qahramon ovozini tinglash'
+                                  : 'Прослушать персонажа'
+                              }
+                            >
+                              {playingPreviewVoiceId === cardCharacter.id ? (
+                                <Square className="w-3 h-3 fill-current" />
+                              ) : (
+                                <Play className="w-3 h-3 fill-current" />
+                              )}
+                            </button>
+                          ) : cardVoice ? (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleVoicePreview(cardVoice)}
+                              className="w-7 h-7 rounded-lg bg-[#FAF8F4] border border-[rgba(22,21,17,0.14)] flex items-center justify-center text-[#0E7C86] hover:bg-[#0E7C86] hover:text-white transition-colors shrink-0 cursor-pointer"
+                              title={
+                                lang === 'uz' ? 'Ovozni tinglash' : 'Прослушать выбранный голос'
+                              }
+                            >
+                              {playingPreviewVoiceId === cardVoice.id ? (
+                                <Square className="w-3 h-3 fill-current" />
+                              ) : (
+                                <Play className="w-3 h-3 fill-current" />
+                              )}
+                            </button>
+                          ) : null}
+
+                          {showRecCharacterSuggestion && recommendedCharacter && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setVoiceOverrideByProposalId((prev) => ({
+                                  ...prev,
+                                  [prop.id]: recommendedCharacter.id,
+                                }));
+                                setSelectedCharacterVoiceId(recommendedCharacter.id);
+                                setUserExplicitlyPickedVoice(true);
+                              }}
+                              className="text-[11px] px-2 py-1 rounded-lg bg-[rgba(14,124,134,0.1)] text-[#0A5A62] hover:bg-[#0E7C86] hover:text-white transition-colors cursor-pointer whitespace-nowrap"
+                            >
+                              {lang === 'uz' ? 'AI tavsiyasi:' : 'AI советует:'}{' '}
+                              {lang === 'uz'
+                                ? recommendedCharacter.nameUz
+                                : recommendedCharacter.nameRu}
+                            </button>
+                          )}
+
+                          {showRecAdultSuggestion && recommendedVoice && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setVoiceOverrideByProposalId((prev) => ({
+                                  ...prev,
+                                  [prop.id]: recommendedVoice.id,
+                                }));
+                                setSelectedCharacterVoiceId(null);
+                                onSelectVoiceId(recommendedVoice.id);
+                                setUserExplicitlyPickedVoice(true);
+                              }}
+                              className="text-[11px] px-2 py-1 rounded-lg bg-[rgba(14,124,134,0.1)] text-[#0A5A62] hover:bg-[#0E7C86] hover:text-white transition-colors cursor-pointer whitespace-nowrap"
+                            >
+                              {lang === 'uz' ? 'AI tavsiyasi:' : 'AI советует:'}{' '}
+                              {recommendedVoice.name.split('·')[0].trim()}
+                            </button>
+                          )}
+                        </div>
+
                         {/* Refine Input Drawer */}
                         {isRefineOpen && (
                           <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -1406,8 +1789,8 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                               }
                               placeholder={
                                 lang === 'uz'
-                                  ? "Masalan: «har bir gapdan keyin 2 soniya pauza qo'y», «qisqaroq qil»..."
-                                  : 'Например: «поставь паузы 2 секунды», «сделай короче», «живее»...'
+                                  ? "Masalan: «har bir gapdan keyin 2 soniya pauza qo'y», «jonliroq qil»..."
+                                  : 'Например: «поставь паузы 2 секунды», «сделай живее и теплее», «короче»...'
                               }
                               className="flex-1 min-w-[220px] rounded-xl border border-[rgba(22,21,17,0.16)] bg-white px-3 py-1.5 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86]"
                             />
@@ -1502,7 +1885,7 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
         {/* Live Writing Studio Waveform during Synthesis (Just like Solo Podcast & 2 Ovozli Intervyu) */}
         {isSynthesizingAudio && (
           <LiveWritingWaveform
-            voiceName={activeVoice?.name || 'OvozStudio'}
+            voiceName={activeDisplayVoiceName}
             lang={lang}
             wordCount={activeSynthMetrics.words}
             estimatedAudioSeconds={activeSynthMetrics.estSeconds}
@@ -1522,7 +1905,7 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                   {lang === 'uz' ? 'Tayyor audio yozuv' : 'Готовая озвучка'}
                 </h3>
                 <div className="text-xs font-mono tabular-nums text-[#5D594E] mt-0.5">
-                  <span>{activeVoice?.name}</span>
+                  <span>{lastSynthesizedVoiceName || activeVoice?.name}</span>
                   <span> · </span>
                   <span>
                     {formatDurationHuman(result.durationSeconds, lang)} ({result.durationSeconds} s)
@@ -1548,29 +1931,43 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                 </div>
               </div>
 
-              {/* Export & Save Buttons */}
+              {/* Export & Save Buttons (Authenticated Blob Downloads — 100% reliable) */}
               <div className="flex flex-wrap items-center gap-2">
-                {authenticatedMp3Url && (
-                  <a
-                    href={`${authenticatedMp3Url}&download=1`}
-                    download={`ovozstudio_${result.id}.mp3`}
-                    className="btn-pill btn-ghost text-xs px-3.5 py-1.5 flex items-center gap-1.5 no-underline text-[#161511] whitespace-nowrap"
-                  >
-                    <Download className="w-3.5 h-3.5 text-[#0E7C86]" />
-                    <span>{lang === 'uz' ? 'MP3 yuklab olish' : 'Скачать MP3'}</span>
-                  </a>
-                )}
+                <button
+                  type="button"
+                  onClick={() => handleDownloadResultAudio('mp3')}
+                  disabled={downloadingFormat !== null}
+                  className="btn-pill btn-ghost text-xs px-3.5 py-1.5 flex items-center gap-1.5 text-[#161511] cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                >
+                  <Download className="w-3.5 h-3.5 text-[#0E7C86]" />
+                  <span>
+                    {downloadingFormat === 'mp3'
+                      ? lang === 'uz'
+                        ? 'Yuklanmoqda…'
+                        : 'Скачивание…'
+                      : lang === 'uz'
+                        ? 'MP3 yuklab olish'
+                        : 'Скачать MP3'}
+                  </span>
+                </button>
 
-                {authenticatedAudioUrl && (
-                  <a
-                    href={`${authenticatedAudioUrl}&download=1`}
-                    download={`ovozstudio_${result.id}.wav`}
-                    className="btn-pill btn-ghost text-xs px-3.5 py-1.5 flex items-center gap-1.5 no-underline text-[#161511] whitespace-nowrap"
-                  >
-                    <Download className="w-3.5 h-3.5 text-[#0E7C86]" />
-                    <span>{lang === 'uz' ? 'WAV yuklab olish' : 'Скачать WAV'}</span>
-                  </a>
-                )}
+                <button
+                  type="button"
+                  onClick={() => handleDownloadResultAudio('wav')}
+                  disabled={downloadingFormat !== null}
+                  className="btn-pill btn-ghost text-xs px-3.5 py-1.5 flex items-center gap-1.5 text-[#161511] cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                >
+                  <Download className="w-3.5 h-3.5 text-[#0E7C86]" />
+                  <span>
+                    {downloadingFormat === 'wav'
+                      ? lang === 'uz'
+                        ? 'Yuklanmoqda…'
+                        : 'Скачивание…'
+                      : lang === 'uz'
+                        ? 'WAV yuklab olish'
+                        : 'Скачать WAV'}
+                  </span>
+                </button>
 
                 <button
                   type="button"
@@ -1593,12 +1990,13 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
               </div>
             </div>
 
-            {/* Play/Pause + Waveform Visualizer */}
+            {/* Play/Pause + Clickable Seekable Waveform Visualizer */}
             <div className="flex items-center gap-4 bg-[#FAF8F4] rounded-2xl p-3.5 border border-[rgba(22,21,17,0.1)]">
               <button
                 type="button"
+                disabled={!audioBlobUrl || isLoadingAudioBlob}
                 onClick={() => {
-                  if (!resultAudioRef.current) return;
+                  if (!resultAudioRef.current || !audioBlobUrl) return;
                   if (isPlayingResult) {
                     resultAudioRef.current.pause();
                     setIsPlayingResult(false);
@@ -1606,10 +2004,17 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                     resultAudioRef.current
                       .play()
                       .then(() => setIsPlayingResult(true))
-                      .catch(() => setIsPlayingResult(false));
+                      .catch((err) => {
+                        setIsPlayingResult(false);
+                        setErrorMessage(
+                          lang === 'uz'
+                            ? `Audioni ijro etib bo'lmadi: ${err?.message || ''}`
+                            : `Не удалось воспроизвести аудио: ${err?.message || 'проверьте звук браузера'}`
+                        );
+                      });
                   }
                 }}
-                className="w-11 h-11 rounded-full bg-[#0E7C86] text-white flex items-center justify-center shrink-0 hover:bg-[#0A5A62] transition-colors cursor-pointer"
+                className="w-11 h-11 rounded-full bg-[#0E7C86] text-white flex items-center justify-center shrink-0 hover:bg-[#0A5A62] transition-colors cursor-pointer disabled:opacity-50"
                 aria-label={isPlayingResult ? 'Pause' : 'Play'}
               >
                 {isPlayingResult ? (
@@ -1619,13 +2024,29 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                 )}
               </button>
 
-              {/* Waveform Bars */}
-              <div className="flex-1 flex items-center gap-[3px] h-10">
+              {/* Clickable Seekable Waveform Bars */}
+              <div
+                className="flex-1 flex items-center gap-[3px] h-10 cursor-pointer"
+                onClick={(e) => {
+                  if (!resultAudioRef.current || !audioBlobUrl) return;
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                  const dur =
+                    resultAudioRef.current.duration && isFinite(resultAudioRef.current.duration)
+                      ? resultAudioRef.current.duration
+                      : result.durationSeconds;
+                  if (dur > 0) {
+                    resultAudioRef.current.currentTime = ratio * dur;
+                    setCurrentTimeSec(ratio * dur);
+                  }
+                }}
+              >
                 {Array.from({ length: 48 }).map((_, i) => {
-                  const progressRatio =
-                    result.durationSeconds > 0
-                      ? currentTimeSec / result.durationSeconds
-                      : 0;
+                  const audioDur =
+                    resultAudioRef.current?.duration && isFinite(resultAudioRef.current.duration)
+                      ? resultAudioRef.current.duration
+                      : result.durationSeconds;
+                  const progressRatio = audioDur > 0 ? currentTimeSec / audioDur : 0;
                   const barRatio = i / 48;
                   const h =
                     22 +
@@ -1648,13 +2069,18 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
               </div>
 
               <span className="text-xs font-mono tabular-nums text-[#161511] shrink-0">
-                {currentTimeSec.toFixed(1)}s / {result.durationSeconds.toFixed(1)}s
+                {isLoadingAudioBlob
+                  ? lang === 'uz'
+                    ? 'Yuklanmoqda…'
+                    : 'Загрузка…'
+                  : `${currentTimeSec.toFixed(1)}s / ${result.durationSeconds.toFixed(1)}s`}
               </span>
 
-              {authenticatedAudioUrl && (
+              {audioBlobUrl && (
                 <audio
                   ref={resultAudioRef}
-                  src={authenticatedAudioUrl}
+                  src={audioBlobUrl}
+                  preload="auto"
                   onTimeUpdate={(e) =>
                     setCurrentTimeSec((e.target as HTMLAudioElement).currentTime)
                   }
@@ -1662,6 +2088,8 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                     setIsPlayingResult(false);
                     setCurrentTimeSec(0);
                   }}
+                  onPause={() => setIsPlayingResult(false)}
+                  onPlay={() => setIsPlayingResult(true)}
                   className="hidden"
                 />
               )}
@@ -1679,14 +2107,14 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
             {lang === 'uz' ? 'Ovoz va Uslub Sozlamalari' : 'Настройки озвучки'}
           </div>
 
-          {/* 1. Голос: встроенные и клонированные, кнопка ▶ для прослушивания */}
-          <div className="space-y-2">
+          {/* 1. Голос: стандартные дикторы + группа «Multfilm qahramonlari / Персонажи мультфильмов» */}
+          <div className="space-y-3">
             <label className="block text-xs font-semibold text-[#161511]">
               1. {lang === 'uz' ? 'Ovoz' : 'Голос'}
             </label>
-            <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1">
+            <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1">
               {voices.map((v) => {
-                const isSelected = v.id === selectedVoiceId;
+                const isSelected = !selectedCharacterVoiceId && v.id === selectedVoiceId;
                 const isPreviewing = playingPreviewVoiceId === v.id;
                 const isCloned = Boolean(v.isReplicatedVoice || v.isUserCustomVoice);
 
@@ -1694,6 +2122,7 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                   <div
                     key={v.id}
                     onClick={() => {
+                      setSelectedCharacterVoiceId(null);
                       onSelectVoiceId(v.id);
                       setUserExplicitlyPickedVoice(true);
                     }}
@@ -1733,6 +2162,60 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
                 );
               })}
             </div>
+
+            {/* Группа «Multfilm qahramonlari / Персонажи мультфильмов» со статическими превью (0 токенов) */}
+            {characterVoices.length > 0 && (
+              <div className="pt-2.5 border-t border-[rgba(22,21,17,0.1)] space-y-2">
+                <div className="text-[11px] font-mono uppercase tracking-wider text-[#0A5A62] font-semibold">
+                  {lang === 'uz' ? 'Multfilm qahramonlari' : 'Персонажи мультфильмов'}
+                </div>
+                <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1">
+                  {characterVoices.map((charVoice) => {
+                    const isSelected = selectedCharacterVoiceId === charVoice.id;
+                    const isPreviewing = playingPreviewVoiceId === charVoice.id;
+                    return (
+                      <div
+                        key={charVoice.id}
+                        onClick={() => {
+                          setSelectedCharacterVoiceId(charVoice.id);
+                          setUserExplicitlyPickedVoice(true);
+                        }}
+                        className={`flex items-center justify-between gap-2 px-3 py-2 rounded-xl border text-xs transition-all cursor-pointer ${
+                          isSelected
+                            ? 'border-[#0E7C86] bg-[rgba(14,124,134,0.1)] text-[#161511] font-semibold'
+                            : 'border-[rgba(22,21,17,0.1)] bg-[#FAF8F4] text-[#5D594E] hover:text-[#161511]'
+                        }`}
+                      >
+                        <div className="truncate flex-1 min-w-0">
+                          <span className="block truncate text-[#161511]">
+                            {lang === 'uz' ? charVoice.nameUz : charVoice.nameRu}
+                          </span>
+                          <span className="text-[10px] font-mono text-[#5D594E]">
+                            {formatCharacterRoleLabel(charVoice.role)} · {charVoice.temperament}
+                          </span>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleToggleCharacterPreview(charVoice);
+                          }}
+                          className="w-7 h-7 rounded-lg bg-white border border-[rgba(22,21,17,0.14)] flex items-center justify-center text-[#0E7C86] hover:bg-[#0E7C86] hover:text-white transition-colors shrink-0 cursor-pointer"
+                          title={lang === 'uz' ? 'Prevyuni tinglash' : 'Прослушать превью'}
+                        >
+                          {isPreviewing ? (
+                            <Square className="w-3 h-3 fill-current" />
+                          ) : (
+                            <Play className="w-3 h-3 fill-current" />
+                          )}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* 2. Язык озвучки: O'zbek (по умолчанию) / Русский / English */}
@@ -1863,6 +2346,12 @@ export const TtsStudio: React.FC<TtsStudioProps> = ({
               </label>
             </div>
           )}
+          {/* 18+ Adult Creator Studio Notice (Google API Terms compliance) */}
+          <div className="pt-2.5 border-t border-[rgba(22,21,17,0.08)] text-[10px] leading-relaxed text-[#5D594E]">
+            {lang === 'uz'
+              ? '18+ · Kattalar (animatorlar, kontent mualliflari va dublyaj studiyalari) uchun ovozlashtirish vositasi.'
+              : '18+ · Инструмент озвучки для взрослых создателей контента, аниматоров и студий дубляжа.'}
+          </div>
         </div>
       </aside>
     </div>

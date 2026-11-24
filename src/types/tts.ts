@@ -6,10 +6,33 @@ export type TtsPreset = 'auto' | 'conversational' | 'confident' | 'energetic' | 
 
 export type TtsProcessingStage = 'idle' | 'translating' | 'analyzing_intonation' | 'synthesizing' | 'done';
 
-export type TtsAgentWorkflow = 'create' | 'format' | 'expand';
+export type TtsAgentWorkflow = 'create' | 'direct' | 'format' | 'expand';
+
+export type TtsAudience = 'general' | 'kids_cartoon';
+
+export type CharacterVoiceRole = 'girl' | 'boy' | 'creature' | 'narrator_kids';
+
+export interface CharacterVoice {
+  id: string;
+  nameUz: string;
+  nameRu: string;
+  category: 'cartoon';
+  role: CharacterVoiceRole;
+  temperament: string;
+  baseVoice?: string;
+  pitchSemitones: number;
+  previewUrl?: string;
+}
+
+export interface TtsDirectorSegment {
+  timecode?: string;
+  style: string;
+  text: string;
+}
 
 export interface TtsAgentDecision {
   genre: string;
+  audience?: TtsAudience;
   workflow: TtsAgentWorkflow;
   variantsCount: number;
   targetSeconds: number;
@@ -21,6 +44,10 @@ export interface TtsAgentProposal {
   title: string;
   badge: string;
   text: string;
+  directorStyle?: string;
+  deliveryStyle?: string;
+  characterVoiceId?: string;
+  segments?: TtsDirectorSegment[];
   preset: Exclude<TtsPreset, 'auto'>;
   recommendedPreset: Exclude<TtsPreset, 'auto'>;
   recommendedVoiceId: string;
@@ -63,6 +90,8 @@ export interface TtsSynthesisResult {
   styleSummary: string;
   provider: 'google-gemini-tts' | 'kie-gemini-tts' | 'cache';
   cached: boolean;
+  characterVoiceId?: string;
+  pitchSemitones?: number;
   ttsCallsUsed?: number;
   quotaRemaining?: number;
   quotaLimit?: number;

@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { validateSafeUrl } from "./mediaIngest/adapters/baseAdapter.ts";
+import { resolveFfmpegPath } from "../utils/ffmpegBinary.ts";
 
 export interface ExtractedMedia {
   platform: "youtube" | "instagram" | "tiktok" | "direct";
@@ -75,8 +76,7 @@ export async function extractMediaAudio(url: string): Promise<ExtractedMedia> {
       "mp3",
       "--audio-quality",
       "128K",
-      "--ffmpeg-location",
-      "/usr/bin/ffmpeg",
+      ...(resolveFfmpegPath() ? ["--ffmpeg-location", resolveFfmpegPath()!] : []),
       "--max-filesize",
       "50M",
       "-o",

@@ -3,6 +3,7 @@ import path from "node:path";
 import { BaseMediaAdapter, type AdapterResult } from "./baseAdapter.ts";
 import type { MediaPlatform, IngestJobState } from "../types.ts";
 import { execAsync, sanitizeLogOutput } from "../audioVerifier.ts";
+import { resolveFfmpegPath } from "../../../utils/ffmpegBinary.ts";
 
 export class YtDlpAdapter extends BaseMediaAdapter {
   readonly name = "YtDlpAdapter";
@@ -38,7 +39,7 @@ export class YtDlpAdapter extends BaseMediaAdapter {
       "--no-playlist",
       "--js-runtimes", "node:/usr/local/bin/node",
       "-f", "ba/b/bestaudio/best",
-      "--ffmpeg-location", "/usr/bin/ffmpeg",
+      ...(resolveFfmpegPath() ? ["--ffmpeg-location", resolveFfmpegPath()!] : []),
       "--max-filesize", "80M",
       "-o", destinationPath,
       "--",

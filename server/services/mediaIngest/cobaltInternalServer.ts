@@ -14,6 +14,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { execAsync } from "./audioVerifier.ts";
+import { resolveFfmpegPath } from "../../utils/ffmpegBinary.ts";
 
 const COBALT_PORT = 9099;
 let serverInstance: http.Server | null = null;
@@ -73,7 +74,7 @@ export function startCobaltInternalServer(): Promise<number> {
               "--no-warnings",
               "-f", format,
               "-x", "--audio-format", "mp3",
-              "--ffmpeg-location", "/usr/bin/ffmpeg",
+              ...(resolveFfmpegPath() ? ["--ffmpeg-location", resolveFfmpegPath()!] : []),
               "-o", tempOut,
               targetUrl,
             ], 25000);

@@ -148,10 +148,10 @@ export async function buildTtsStyleAndAnnotatedText(
       .map((p, idx) => `[Paragraph ${idx + 1}]: ${p.slice(0, 1200)}`)
       .join("\n\n");
 
-    const systemInstruction = `You are a speech director for Gemini 3.8 TTS.
+    const systemInstruction = `You are a master voice director for Gemini 3.8 Flash TTS.
 Analyze the user's text paragraph by paragraph and return:
-1. A short vocal delivery style in English for each paragraph (e.g., "warm, slight smile, relaxed pace" or "clear, confident announcement tone").
-2. The exact paragraph text with ONLY these four inline vocal tags inserted sparingly where natural: <short pause>, <breath>, <laugh>, <sigh>. Keep any existing timed pause tags like [pauza 1s], [pauza 2s], [pauza 3s] intact in their exact positions.
+1. A vivid, living-human vocal delivery style in English for each paragraph (e.g., "warm, intimate human voice with genuine smile, natural breathing, unhurried organic rhythm, never robotic" or "grounded charismatic speaker with calm authority, expressive pitch dynamics and natural phrasing").
+2. The exact paragraph text with ONLY these four inline vocal tags inserted sparingly where a real human would breathe or pause: <short pause>, <breath>, <laugh>, <sigh>. Keep any existing timed pause tags like [pauza 1s], [pauza 2s], [pauza 3s] intact in their exact positions.
 
 CRITICAL INVARIANT:
 - DO NOT change, add, delete, translate, or respell ANY word, number, or punctuation mark of the original text.

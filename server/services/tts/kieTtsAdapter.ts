@@ -4,6 +4,7 @@ import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { TTS_MODELS_CONFIG } from "../../config/ttsModels.ts";
+import { resolveFfmpegPath } from "../../utils/ffmpegBinary.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -14,12 +15,72 @@ export interface KieTtsParams {
 }
 
 /**
- * Перекодирует любой аудиофайл (MP3/WAV/OGG) в 24kHz 16-bit mono PCM (s16le) через ffmpeg.
+ * Быстрый разбор 24kHz 16-bit mono WAV напрямую в памяти без вызова ffmpeg.
+ * Возвращает raw PCM Buffer, если входной файл уже в формате 24kHz 16-bit mono PCM WAV, иначе null.
+ */
+function tryExtractDirectPcm24kFromWav(rawBuf: Buffer): Buffer | null {
+  if (
+    rawBuf.length <= 44 ||
+    rawBuf.toString("ascii", 0, 4) !== "RIFF" ||
+    rawBuf.toString("ascii", 8, 12) !== "WAVE"
+  ) {
+    return null;
+  }
+  let audioFormat = 0;
+  let numChannels = 0;
+  let sampleRate = 0;
+  let bitsPerSample = 0;
+  let dataSlice: Buffer | null = null;
+
+  let offset = 12;
+  while (offset + 8 <= rawBuf.length) {
+    const chunkId = rawBuf.toString("ascii", offset, offset + 4);
+    const chunkSize = rawBuf.readUInt32LE(offset + 4);
+    const bodyStart = offset + 8;
+    if (chunkId === "fmt " && bodyStart + 16 <= rawBuf.length) {
+      audioFormat = rawBuf.readUInt16LE(bodyStart);
+      numChannels = rawBuf.readUInt16LE(bodyStart + 2);
+      sampleRate = rawBuf.readUInt32LE(bodyStart + 4);
+      bitsPerSample = rawBuf.readUInt16LE(bodyStart + 14);
+    } else if (chunkId === "data") {
+      dataSlice = rawBuf.subarray(bodyStart, Math.min(rawBuf.length, bodyStart + chunkSize));
+      break;
+    }
+    offset = bodyStart + chunkSize + (chunkSize % 2);
+  }
+
+  if (
+    dataSlice &&
+    dataSlice.length > 0 &&
+    audioFormat === 1 &&
+    numChannels === 1 &&
+    sampleRate === 24000 &&
+    bitsPerSample === 16
+  ) {
+    return Buffer.from(dataSlice);
+  }
+  return null;
+}
+
+/**
+ * Перекодирует любой аудиофайл (MP3/WAV/OGG) в 24kHz 16-bit mono PCM (s16le) через ffmpeg-static / system ffmpeg.
  */
 export async function transcodeAudioFileToPcm24k(inputPath: string): Promise<Buffer> {
+  // Fast-path: если файл уже 24kHz mono 16-bit WAV (стандарт Gemini TTS), читаем PCM напрямую
+  try {
+    const raw = fs.readFileSync(inputPath);
+    const directPcm = tryExtractDirectPcm24kFromWav(raw);
+    if (directPcm) return directPcm;
+  } catch {}
+
+  const ffmpegBin = resolveFfmpegPath();
+  if (!ffmpegBin) {
+    throw new Error("ffmpeg не найден на сервере для декодирования резервного аудио kie.ai.");
+  }
+
   const outPath = `${inputPath}.24k.pcm`;
   try {
-    await execFileAsync("/usr/bin/ffmpeg", [
+    await execFileAsync(ffmpegBin, [
       "-y",
       "-i",
       inputPath,
@@ -69,7 +130,8 @@ export async function synthesizeViaKieAi(params: KieTtsParams): Promise<{ pcm: B
 
   const baseUrl = TTS_MODELS_CONFIG.kieApiBaseUrl.replace(/\/+$/, "");
 
-  // 1. Создание задачи в kie.ai
+  // 1. Создание задачи в kie.ai (официальная схема google/gemini-3-8-flash-tts: speakers + dialogue_turns)
+  const speakerId = "Speaker 1";
   const createResp = await fetch(`${baseUrl}/api/v1/jobs/createTask`, {
     method: "POST",
     headers: {
@@ -79,20 +141,35 @@ export async function synthesizeViaKieAi(params: KieTtsParams): Promise<{ pcm: B
     body: JSON.stringify({
       model: TTS_MODELS_CONFIG.kieModel,
       input: {
-        text: params.text,
-        voice: params.voiceName,
-        voice_name: params.voiceName,
-        ...(params.style ? { style: params.style, prompt: params.style } : {}),
+        speakers: [
+          {
+            speaker_id: speakerId,
+            voice_name: params.voiceName,
+            ...(params.style ? { style: params.style } : {}),
+          },
+        ],
+        dialogue_turns: [
+          {
+            speaker_id: speakerId,
+            text: params.text,
+          },
+        ],
+        temperature: 1.0,
       },
     }),
   });
 
   if (!createResp.ok) {
     const errBody = await createResp.text().catch(() => "");
-    throw new Error(`kie.ai createTask error (${createResp.status}): ${errBody.slice(0, 200)}`);
+    throw new Error(`kie.ai createTask error (${createResp.status}): ${errBody.slice(0, 300)}`);
   }
 
   const createJson: any = await createResp.json();
+  if (typeof createJson?.code === "number" && createJson.code !== 200) {
+    throw new Error(
+      `kie.ai createTask rejected (code ${createJson.code}): ${createJson?.msg || createJson?.message || JSON.stringify(createJson).slice(0, 250)}`
+    );
+  }
   const taskId =
     createJson?.data?.taskId ||
     createJson?.data?.task_id ||
@@ -100,7 +177,7 @@ export async function synthesizeViaKieAi(params: KieTtsParams): Promise<{ pcm: B
     createJson?.id;
 
   if (!taskId) {
-    throw new Error(`kie.ai did not return taskId: ${JSON.stringify(createJson).slice(0, 200)}`);
+    throw new Error(`kie.ai did not return taskId: ${JSON.stringify(createJson).slice(0, 250)}`);
   }
 
   // 2. Опрос статуса задачи
@@ -219,9 +296,26 @@ export async function synthesizeDialogueBlockViaKieAi(
 
   const baseUrl = TTS_MODELS_CONFIG.kieApiBaseUrl.replace(/\/+$/, "");
 
-  const uniqueSpeakers = Array.from(
-    new Map(turns.map((t) => [t.speaker, { speaker: t.speaker, voice: t.voice }])).values()
-  );
+  // Собираем список уникальных спикеров по официальной схеме google/gemini-3-8-flash-tts
+  // kie.ai строго требует формат speaker_id: "Speaker 1", "Speaker 2", ... ("Speaker N")
+  const speakerNameToId = new Map<string, string>();
+  const speakerDefMap = new Map<
+    string,
+    { speaker_id: string; voice_name: string; style?: string }
+  >();
+  for (const t of turns) {
+    let speakerId = speakerNameToId.get(t.speaker);
+    if (!speakerId) {
+      speakerId = `Speaker ${speakerNameToId.size + 1}`;
+      speakerNameToId.set(t.speaker, speakerId);
+      speakerDefMap.set(speakerId, {
+        speaker_id: speakerId,
+        voice_name: t.voice,
+        ...(t.style ? { style: t.style } : {}),
+      });
+    }
+  }
+  const uniqueSpeakers = Array.from(speakerDefMap.values());
 
   const createResp = await fetch(`${baseUrl}/api/v1/jobs/createTask`, {
     method: "POST",
@@ -232,23 +326,27 @@ export async function synthesizeDialogueBlockViaKieAi(
     body: JSON.stringify({
       model: TTS_MODELS_CONFIG.kieModel,
       input: {
-        dialogue_turns: turns.map((t) => ({
-          speaker: t.speaker,
-          voice: t.voice,
-          text: t.text,
-          ...(t.style ? { style: t.style } : {}),
-        })),
         speakers: uniqueSpeakers,
+        dialogue_turns: turns.map((t) => ({
+          speaker_id: speakerNameToId.get(t.speaker) || "Speaker 1",
+          text: t.text,
+        })),
+        temperature: 1.0,
       },
     }),
   });
 
   if (!createResp.ok) {
     const errBody = await createResp.text().catch(() => "");
-    throw new Error(`kie.ai dialogue createTask error (${createResp.status}): ${errBody.slice(0, 200)}`);
+    throw new Error(`kie.ai dialogue createTask error (${createResp.status}): ${errBody.slice(0, 300)}`);
   }
 
   const createJson: any = await createResp.json();
+  if (typeof createJson?.code === "number" && createJson.code !== 200) {
+    throw new Error(
+      `kie.ai dialogue rejected (code ${createJson.code}): ${createJson?.msg || createJson?.message || JSON.stringify(createJson).slice(0, 250)}`
+    );
+  }
   const taskId =
     createJson?.data?.taskId ||
     createJson?.data?.task_id ||
@@ -256,7 +354,7 @@ export async function synthesizeDialogueBlockViaKieAi(
     createJson?.id;
 
   if (!taskId) {
-    throw new Error(`kie.ai dialogue did not return taskId: ${JSON.stringify(createJson).slice(0, 200)}`);
+    throw new Error(`kie.ai dialogue did not return taskId: ${JSON.stringify(createJson).slice(0, 250)}`);
   }
 
   const maxPolls = 60;

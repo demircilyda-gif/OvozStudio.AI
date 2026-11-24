@@ -54,13 +54,13 @@ export const TTS_PRESET_STYLES: Record<
   string
 > = {
   conversational:
-    "Natural conversational delivery, lively everyday intonation, relaxed human cadence, authentic pronunciation",
+    "Authentic live human conversation, relaxed natural breathing, organic everyday intonation with subtle pitch variation, speaking directly to a friend — never stiff or robotic",
   confident:
-    "Confident, authoritative, clear professional and business-like delivery, steady assured tone",
+    "Grounded, charismatic human speaker with calm authority, natural resonant voice, unhurried emphasis on key words and organic micro-pauses — never flat announcer monotony",
   energetic:
-    "Energetic, bright, engaging promotional and dynamic delivery, enthusiastic upbeat intonation",
+    "Lively, genuinely excited human delivery with bright vocal smile, dynamic rhythm, natural breath lifts and engaging emphasis — expressive and real, never forced or synthetic",
   warm:
-    "Warm, friendly, heartfelt, welcoming and sincere delivery with a gentle smile in the voice",
+    "Warm, intimate, heartfelt human voice with gentle warmth and sincerity, soft natural cadence, subtle emotional presence and effortless phrasing",
 };
 
 /**

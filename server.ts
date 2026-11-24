@@ -36,6 +36,11 @@ import {
 } from "./server/services/verbatimStoryboardService.ts";
 import { DUBBING_MODELS_CONFIG } from "./server/config/dubbingModels.ts";
 import { TTS_MODELS_CONFIG } from "./server/config/ttsModels.ts";
+import {
+  getPublicCharacterVoices,
+  isGoogleSafetyOrPolicyError,
+} from "./server/config/characterVoices.ts";
+import { resolveFfmpegPath } from "./server/utils/ffmpegBinary.ts";
 import { translateOrTransliterateTtsText } from "./server/services/tts/ttsTranslate.ts";
 import {
   generateTtsAgentProposals,
@@ -92,10 +97,12 @@ try {
 } catch (e: any) {
   console.warn("[Media Dubbing] Warning checking bin/yt-dlp permissions:", e.message);
 }
-const ffmpegAvailable = fs.existsSync("/usr/bin/ffmpeg");
+const resolvedFfmpeg = resolveFfmpegPath();
 console.log(
-  `[Media Dubbing] /usr/bin/ffmpeg status: ${
-    ffmpegAvailable ? "Available (Ready for audio multiplexing)" : "Warning: not found at /usr/bin/ffmpeg"
+  `[Media Dubbing] ffmpeg status: ${
+    resolvedFfmpeg
+      ? `Available at ${resolvedFfmpeg} (Ready for audio/video processing)`
+      : "Warning: ffmpeg binary not found (pure-JS MP3 fallback active for TTS)"
   }`
 );
 
@@ -1519,6 +1526,8 @@ app.use("/api", (req, res, next) => {
       fullPath === "/api/agent/realtor-greeting.wav" ||
       fullPath === "/api/agent/realtor-filler.wav" ||
       fullPath.startsWith("/api/podcast/download-dubbed-video/") ||
+      fullPath.startsWith("/api/tts/audio/") ||
+      fullPath === "/api/tts/character-voices" ||
       (previewMatch && ALLOWED_PUBLIC_VOICE_PREVIEW_IDS.has(previewMatch))
     )) ||
     (req.method === "POST" && (
@@ -8937,6 +8946,13 @@ app.get("/api/tts/quota", requireAuth, (_req, res) => {
   return res.json(getTtsQuotaStatus());
 });
 
+// Public read-only catalog of cartoon character voices (strictly omits private cloned voiceId)
+app.get("/api/tts/character-voices", (_req, res) => {
+  return res.json({
+    voices: getPublicCharacterVoices(),
+  });
+});
+
 // 2. POST /api/tts/agent-propose — Полностью автономный AI Агент (0 кредитов)
 app.post(
   "/api/tts/agent-propose",
@@ -8973,6 +8989,15 @@ app.post(
       return res.json(result);
     } catch (error: any) {
       console.error("[/api/tts/agent-propose] Error:", error);
+      if (error?.code === "GOOGLE_POLICY_REFUSAL" || isGoogleSafetyOrPolicyError(error)) {
+        return res.status(400).json({
+          code: "GOOGLE_POLICY_REFUSAL",
+          error:
+            "Запрос отклонён политикой безопасности Google Gemini. Измените описание задачи.",
+          message_ru:
+            "Запрос отклонён политикой безопасности Google Gemini. Измените описание задачи.",
+        });
+      }
       if (error?.code === "TEXT_TOO_LONG" || error?.status === 400) {
         return res.status(400).json({
           code: error?.code || "BAD_REQUEST",
@@ -9000,6 +9025,7 @@ app.post(
     try {
       const {
         proposalText = "",
+        directorStyle = "",
         instruction = "",
         language = "uz",
       } = req.body || {};
@@ -9020,6 +9046,7 @@ app.post(
       const validLang = ["uz", "ru", "en"].includes(language) ? language : "uz";
       const result = await refineTtsAgentProposal(ai, {
         proposalText: cleanProposal,
+        directorStyle: String(directorStyle || "").trim() || undefined,
         instruction: cleanInstruction,
         language: validLang as "uz" | "ru" | "en",
       });
@@ -9052,20 +9079,26 @@ app.post(
     const {
       text = "",
       voiceId = "charon-news",
+      characterVoiceId,
       language = "uz",
       preset = "auto",
       speed = 1.0,
+      directorStyle = "",
+      segments,
     } = req.body || {};
     const cleanText = String(text || "").trim();
     if (
       isTtsRequestCached({
         text: cleanText,
         voiceId: String(voiceId || "charon-news"),
+        characterVoiceId: characterVoiceId ? String(characterVoiceId).trim() : undefined,
         language: (["uz", "ru", "en"].includes(language) ? language : "uz") as any,
         preset: (["auto", "conversational", "confident", "energetic", "warm"].includes(preset)
           ? preset
           : "auto") as any,
         speed: Number(speed) || 1.0,
+        directorStyle: typeof directorStyle === "string" ? directorStyle : undefined,
+        segments: Array.isArray(segments) ? segments : undefined,
       })
     ) {
       return 0;
@@ -9082,10 +9115,13 @@ app.post(
       const {
         text = "",
         voiceId = "charon-news",
+        characterVoiceId,
         language = "uz",
         preset = "auto",
         speed = 1.0,
         replicatedVoiceConfig,
+        directorStyle = "",
+        segments,
       } = req.body || {};
 
       const cleanText = String(text || "").trim();
@@ -9114,11 +9150,14 @@ app.post(
       const synthResult = await synthesizeTtsOvozlash(ai, {
         text: cleanText,
         voiceId: String(voiceId || "charon-news"),
+        characterVoiceId: characterVoiceId ? String(characterVoiceId).trim() || undefined : undefined,
         language: validLang,
         preset: validPreset,
         speed: Number(speed) || 1.0,
         ownerUid: uid,
         replicatedVoiceConfig,
+        directorStyle: typeof directorStyle === "string" ? directorStyle.trim() || undefined : undefined,
+        segments: Array.isArray(segments) ? segments : undefined,
       });
 
       // Кредиты списываются ТОЛЬКО после успешного синтеза (0 при кэше, иначе 1 за каждую начатую минуту)
@@ -9135,9 +9174,11 @@ app.post(
             title: `TTS Ovozlash (${cleanText.slice(0, 42)})`,
             creditsCost: isEmailAdmin(userEmail) ? 0 : creditsUsed,
             status: "completed",
-            voiceName: String(voiceId),
+            voiceName: String(synthResult.characterVoiceId || voiceId),
             durationSeconds: synthResult.durationSeconds,
-            details: `Provider: ${synthResult.provider} | Preset: ${validPreset}`,
+            details: `Provider: ${synthResult.provider} | Preset: ${validPreset}${
+              synthResult.characterVoiceId ? ` | Character: ${synthResult.characterVoiceId}` : ""
+            }`,
             createdAt: new Date().toISOString(),
           });
         } catch {}
@@ -9152,6 +9193,8 @@ app.post(
         styleSummary: synthResult.styleSummary,
         provider: synthResult.provider,
         cached: synthResult.cached,
+        ...(synthResult.characterVoiceId ? { characterVoiceId: synthResult.characterVoiceId } : {}),
+        pitchSemitones: synthResult.pitchSemitones,
         creditsUsed,
         creditsRemaining,
         synthesisWallTimeMs: synthResult.synthesisWallTimeMs,
@@ -9161,6 +9204,18 @@ app.post(
       });
     } catch (error: any) {
       console.error("[/api/tts/synthesize] Error:", error?.message || error);
+      // Прозрачная ошибка при отказе по политике безопасности Google — без обхода и переформулировок
+      if (error?.code === "GOOGLE_POLICY_REFUSAL" || isGoogleSafetyOrPolicyError(error)) {
+        return res.status(400).json({
+          error: "google_policy_refusal",
+          message:
+            error?.message ||
+            "Запрос отклонён политикой безопасности Google Gemini. Проверьте текст или описание задачи.",
+          message_ru:
+            error?.message ||
+            "Запрос отклонён политикой безопасности Google Gemini. Проверьте текст или описание задачи.",
+        });
+      }
       // Если выбран клон, а Google вернул 429 — возвращаем точное сообщение без подмены голоса
       if (error?.code === "CLONED_VOICE_QUOTA_EXCEEDED" || error?.status === 429) {
         return res.status(429).json({

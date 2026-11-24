@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import type { MediaStreamInspection } from "./types.ts";
+import { resolveFfmpegPath } from "../../utils/ffmpegBinary.ts";
 
 /**
  * Sanitizes command output and error logs by masking tokens, cookies, auth headers, and sigs.
@@ -146,7 +147,8 @@ export async function extractDecodedAudio(
   inputFilePath: string,
   outputMp3Path: string
 ): Promise<{ success: boolean; audioDuration: number; fileSize: number; error?: string }> {
-  const res = await execAsync("/usr/bin/ffmpeg", [
+  const ffmpegBin = resolveFfmpegPath() || "/usr/bin/ffmpeg";
+  const res = await execAsync(ffmpegBin, [
     "-y",
     "-i", inputFilePath,
     "-vn",

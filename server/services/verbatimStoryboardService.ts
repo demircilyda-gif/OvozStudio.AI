@@ -4,6 +4,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 import { DUBBING_MODELS_CONFIG } from "../config/dubbingModels.ts";
+import { resolveFfmpegPath } from "../utils/ffmpegBinary.ts";
 import { normalizeUzbekSpeech } from "../../src/utils/uzbekNormalizer.ts";
 
 const execFileAsync = promisify(execFile);
@@ -1606,7 +1607,8 @@ export async function applyMildAtempoPcm(
 ): Promise<Buffer> {
   const maxRatio = maxAllowedRatio || DUBBING_MODELS_CONFIG.maxAtempoSpeedRatio || 1.1;
   const clampedRatio = Math.min(maxRatio, Math.max(1.0, Math.round(speedRatio * 1000) / 1000));
-  if (clampedRatio <= 1.008 || !fs.existsSync("/usr/bin/ffmpeg")) {
+  const ffmpegBin = resolveFfmpegPath();
+  if (clampedRatio <= 1.008 || !ffmpegBin) {
     return pcmBuffer;
   }
 
@@ -1616,7 +1618,7 @@ export async function applyMildAtempoPcm(
 
   try {
     await fs.promises.writeFile(inRawPath, pcmBuffer);
-    await execFileAsync("/usr/bin/ffmpeg", [
+    await execFileAsync(ffmpegBin, [
       "-y",
       "-f",
       "s16le",
@@ -1910,7 +1912,8 @@ export async function muxDubbedAudioWithVideoFile({
   spokenIntervals: Array<{ startSec: number; endSec: number }>;
   backgroundMode: "smart_ducking" | "mute_speech_keep_music" | "voice_only";
 }): Promise<string> {
-  if (!fs.existsSync("/usr/bin/ffmpeg")) {
+  const ffmpegBin = resolveFfmpegPath();
+  if (!ffmpegBin) {
     throw new Error("ffmpeg не найден на сервере для сборки видео.");
   }
 
@@ -1922,7 +1925,7 @@ export async function muxDubbedAudioWithVideoFile({
 
   try {
     if (backgroundMode === "voice_only" || spokenIntervals.length === 0) {
-      await execFileAsync("/usr/bin/ffmpeg", [
+      await execFileAsync(ffmpegBin, [
         "-y",
         "-i",
         videoFilePath,
@@ -1973,7 +1976,7 @@ export async function muxDubbedAudioWithVideoFile({
     const filterComplex = `[0:a]volume=${duckGain}:enable='${betweenClauses}'[orig_ducked];[1:a]volume=1.15[dub_voice];[orig_ducked][dub_voice]amix=inputs=2:duration=first:dropout_transition=0,alimiter=limit=0.95[aout]`;
 
     try {
-      await execFileAsync("/usr/bin/ffmpeg", [
+      await execFileAsync(ffmpegBin, [
         "-y",
         "-i",
         videoFilePath,
@@ -1995,7 +1998,7 @@ export async function muxDubbedAudioWithVideoFile({
       ]);
     } catch {
       // Fallback if source video has no audio stream at all
-      await execFileAsync("/usr/bin/ffmpeg", [
+      await execFileAsync(ffmpegBin, [
         "-y",
         "-i",
         videoFilePath,
