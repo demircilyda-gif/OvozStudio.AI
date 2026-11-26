@@ -5422,28 +5422,35 @@ VAZIFA:
   }
 });
 
-// Smart Diarize existing turns into Host 1 (Artur Yugay) vs Host 2 (Oybek Burxanov)
+// Smart Diarize existing turns into HOST_1 vs HOST_2 using speaker names from request
 app.post("/api/podcast/smart-diarize-turns", requireCreditBalance(1), async (req, res) => {
   try {
     const {
       turns = [],
-      host1Name = "Artur Yugay",
-      host2Name = "Ayubxon Burxonov",
+      host1Name: rawHost1Name,
+      host2Name: rawHost2Name,
+      host1Role: rawHost1Role,
+      host2Role: rawHost2Role,
     } = req.body;
+
+    const host1Name = String(rawHost1Name || "").trim() || "Спикер 1";
+    const host2Name = String(rawHost2Name || "").trim() || "Спикер 2";
+    const host1Role = String(rawHost1Role || "").trim();
+    const host2Role = String(rawHost2Role || "").trim();
 
     if (!Array.isArray(turns) || turns.length === 0) {
       return res.status(400).json({ error: "Replikalar ro'yxati (turns) bo'sh" });
     }
 
-    const prompt = `Siz professional YouTube podkast va intervyu rejissyori hamda audio diarizatsiya mutaxassisisiz.
-Quyida Artur Yugay (Boshlovchi) va Ayubxon Burxanov (Mehmon) o'rtasidagi suhbatdan olingan replikalar berilgan.
+    const prompt = `Siz professional audio diarizatsiya va dialog tahlili mutaxassisisiz.
+Quyida ikki ishtirokchi o'rtasidagi suhbatdan olingan replikalar ro'yxati berilgan.
 
-ISHTIROKCHILAR VA QOIDALAR:
-1. HOST_1 (${host1Name} / Boshlovchi): Intervyu beruvchi, savollar beradi, mavzuni boshlaydi va ochadi ("Assalomu alaykum do'stlar", "Menda bir savol bor", "Nega bizning davlatda yashash bunchalik qimmat?", "Oltin arzonlashsa nima bo'ladi?").
-2. HOST_2 (${host2Name} / Mehmon ekspert): Moliya, biznes va ko'chmas mulk tahlilchisi. Savollarga batafsil javob beradi, faktlar va iqtisodiy misollar keltiradi (talab va taklif, post-kovid o'sishi, Kopengagendagi pizza va qahva narxi, Reygan latifasi, bank depozitlari, ko'chmas mulk narxlari).
+ISHTIROKCHILAR:
+1. HOST_1: ${host1Name}${host1Role ? ` (${host1Role})` : ""}
+2. HOST_2: ${host2Name}${host2Role ? ` (${host2Role})` : ""}
 
 VAZIFA:
-Har bir replikaning mazmunini tahlil qiling va uning egasi kimligini (HOST_1 yoki HOST_2) qat'iy belgilang.
+Har bir replikaning konteksti, dialog mantiqi, savol-javob almashinuvi va nutq uslubini tahlil qiling hamda uning egasi kimligini (HOST_1 yoki HOST_2) aniqlang. Hech qanday mavzu yoki shaxsni oldindan taxmin qilmang — faqat berilgan replikalar mazmuniga tayaning.
 Replikalar ro'yxati:
 ${JSON.stringify(turns.map((t: any, i: number) => ({ index: i, timecode: t.timecode, text: t.originalText || t.text })), null, 2)}
 
@@ -5990,14 +5997,27 @@ app.post(
           intonationRu: turn.intonationRu,
           originalTextRu: turn.originalTextRu || turn.originalText,
           speakerGender: turn.speakerGender,
+          sceneTitle: turn.sceneTitle || turn.chapter || undefined,
           inlineTags: turn.inlineTags,
           rawTurn: turn,
         };
       });
 
+      // Keep speakerMap order deterministic (HOST_1 -> SpeakerOne, HOST_2 -> SpeakerTwo)
+      // so every macro-block uses the exact same voice slot and base speaker style
+      const orderedSpeakerMap = new Map<string, ResolvedBatchSpeaker>(
+        Array.from(speakerMap.entries()).sort(([a], [b]) => {
+          if (a === "HOST_1") return -1;
+          if (b === "HOST_1") return 1;
+          if (a === "HOST_2") return -1;
+          if (b === "HOST_2") return 1;
+          return a.localeCompare(b);
+        })
+      );
+
       const batchResult = await synthesizeDialogueInMacroBlocks(ai, {
         turns: batchInputTurns,
-        speakerMap,
+        speakerMap: orderedSpeakerMap,
         strictTimeWindow: isTimeAlignedMode,
         startingCompletedBlocks: Number(req.body?.startingCompletedBlocks) || 0,
         totalProjectBlocks: Number(req.body?.totalProjectBlocks) || undefined,

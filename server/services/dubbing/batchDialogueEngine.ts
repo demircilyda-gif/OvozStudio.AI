@@ -5,6 +5,10 @@ import { GoogleGenAI } from "@google/genai";
 import { DUBBING_MODELS_CONFIG } from "../../config/dubbingModels.ts";
 import { normalizeUzbekSpeech } from "../../../src/utils/uzbekNormalizer.ts";
 import {
+  splitTurnsIntoMacroBlocks as sharedSplitTurnsIntoMacroBlocks,
+  type MacroBlockSplitOptions,
+} from "../../../src/utils/dialogueMacroBlocks.ts";
+import {
   extractRawPcm24k,
   buildWav24k,
   sliceBatchPcmByVad,
@@ -62,6 +66,7 @@ export interface BatchInputTurn {
   intonationRu?: string;
   originalTextRu?: string;
   speakerGender?: "female" | "male";
+  sceneTitle?: string;
   inlineTags?: string[];
   rawTurn: any;
 }
@@ -122,91 +127,23 @@ function isQuota429Error(err: any): boolean {
 }
 
 /**
- * Раздел 2.2: Группирует реплики в макро-блоки по 20–25 реплик (~2–2.5 мин речи).
- * Граница ставится на длинных паузах и в местах «без слов», а не посреди быстрого обмена репликами.
- * Гарантирует <= ~6 000 входных токенов на блок.
+ * Раздел 2.2: Группирует реплики в макро-блоки (общая логика из src/utils/dialogueMacroBlocks.ts):
+ * - группирует подряд идущие сцены в блоки <= 25 реплик;
+ * - режет слишком длинные сцены по самой длинной паузе;
+ * - не режет при паузе < 0.5 с, если есть другой вариант;
+ * - гарантирует <= ~5 800 входных токенов на блок.
  */
 export function splitTurnsIntoMacroBlocks(
   turns: BatchInputTurn[],
-  options: { targetSize?: number; minSize?: number; maxSize?: number; maxInputTokens?: number } = {}
+  options: MacroBlockSplitOptions = {}
 ): BatchInputTurn[][] {
-  if (turns.length === 0) return [];
-  const targetSize = options.targetSize ?? 22;
-  const minSize = options.minSize ?? 16;
-  const maxSize = options.maxSize ?? 25;
-  const maxInputTokens = options.maxInputTokens ?? 5800;
-
-  const estimateTurnTokens = (t: BatchInputTurn): number => {
-    const chars = (t.cleanSpeechText || t.text || "").length + (t.style || "").length + 45;
-    return Math.ceil(chars / 3.0);
-  };
-
-  const blocks: BatchInputTurn[][] = [];
-  let cursor = 0;
-
-  while (cursor < turns.length) {
-    const remaining = turns.length - cursor;
-    // Если осталось <= maxSize и вписывается по токенам — берём целиком
-    if (remaining <= maxSize) {
-      let tokSum = 0;
-      let end = cursor;
-      while (end < turns.length) {
-        const tTok = estimateTurnTokens(turns[end]);
-        if (end > cursor && tokSum + tTok > maxInputTokens) break;
-        tokSum += tTok;
-        end++;
-      }
-      blocks.push(turns.slice(cursor, end));
-      cursor = end;
-      continue;
-    }
-
-    // Сначала определяем максимально допустимый индекс по токен-бюджету и maxSize
-    let maxEnd = cursor;
-    let tokSum = 0;
-    while (maxEnd < turns.length && maxEnd - cursor < maxSize) {
-      const tTok = estimateTurnTokens(turns[maxEnd]);
-      if (maxEnd > cursor && tokSum + tTok > maxInputTokens) break;
-      tokSum += tTok;
-      maxEnd++;
-    }
-
-    // Если хвост после разреза окажется слишком коротким (1..5 реплик), балансируем границу раньше
-    const preferredMin = Math.min(maxEnd, cursor + minSize);
-    let bestCut = Math.min(maxEnd, cursor + targetSize);
-    let bestPauseScore = -1;
-
-    // Ищем самую длинную паузу (gapAfterSec) в окне [preferredMin .. maxEnd]
-    for (let idx = preferredMin; idx <= maxEnd; idx++) {
-      const lastInBlock = turns[idx - 1];
-      const nextTurn = turns[idx];
-      let gap = typeof lastInBlock.gapAfterSec === "number" ? lastInBlock.gapAfterSec : 0;
-      if (
-        gap <= 0 &&
-        typeof lastInBlock.endSec === "number" &&
-        typeof nextTurn?.startSec === "number"
-      ) {
-        gap = Math.max(0, nextTurn.startSec - lastInBlock.endSec);
-      }
-
-      // Небольшой приоритет точкам ближе к targetSize при равных паузах
-      const distFromTarget = Math.abs(idx - (cursor + targetSize));
-      const score = gap * 10 - distFromTarget * 0.15;
-      if (score > bestPauseScore) {
-        bestPauseScore = score;
-        bestCut = idx;
-      }
-    }
-
-    if (bestCut <= cursor) {
-      bestCut = Math.min(turns.length, cursor + Math.max(1, targetSize));
-    }
-
-    blocks.push(turns.slice(cursor, bestCut));
-    cursor = bestCut;
-  }
-
-  return blocks;
+  return sharedSplitTurnsIntoMacroBlocks(turns, {
+    targetSize: options.targetSize ?? 22,
+    minSize: options.minSize ?? 12,
+    maxSize: options.maxSize ?? 25,
+    minPauseSec: options.minPauseSec ?? 0.5,
+    maxInputTokens: options.maxInputTokens ?? 5800,
+  });
 }
 
 /**
@@ -218,7 +155,7 @@ export function estimateDubbingTtsCalls(
   uniqueSpeakersCount: number
 ): { estimatedCalls: number; blocksCount: number; modeLabel: string } {
   if (turnCount <= 0) return { estimatedCalls: 0, blocksCount: 0, modeLabel: "mode_a" };
-  const blocksCount = Math.max(1, Math.ceil(turnCount / 22));
+  const blocksCount = Math.max(1, Math.ceil(turnCount / 25));
   const isModeA = !usesClonedVoice && uniqueSpeakersCount <= 2;
   const estimatedCalls = isModeA ? blocksCount : blocksCount * Math.max(1, uniqueSpeakersCount);
   return {
@@ -600,8 +537,9 @@ export async function synthesizeDialogueInMacroBlocks(
 
   const blocks = splitTurnsIntoMacroBlocks(turns, {
     targetSize: 22,
-    minSize: 16,
+    minSize: 12,
     maxSize: 25,
+    minPauseSec: 0.5,
     maxInputTokens: 5800,
   });
 

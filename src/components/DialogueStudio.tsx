@@ -53,7 +53,19 @@ import {
   Subtitles,
   DollarSign,
   EyeOff,
+  FileUp,
+  FileDown,
+  X,
 } from 'lucide-react';
+import {
+  parseReadyScript,
+  exportTurnsToJson,
+  exportTurnsToCsv,
+  shouldRunVideoAutoAnalysis,
+  ReadyScriptValidationError,
+  ParsedSpeakerInfo,
+} from '../utils/readyScriptParser';
+import { planDialogueMacroBlocks } from '../utils/dialogueMacroBlocks';
 import { useAuth } from '../context/AuthContext';
 import { YUGAY_BURKHANOV_TURNS, YUGAY_BURKHANOV_METADATA } from '../data/yugayBurkhanovPreset';
 
@@ -369,6 +381,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     return femaleVoice?.id || userClonedVoiceId || 'aziza';
   });
   const [speaker1Name, setSpeaker1Name] = useState<string>('Спикер 1 (Ж)');
+  const [speaker1Gender, setSpeaker1Gender] = useState<'female' | 'male'>('female');
   const [speaker1Role, setSpeaker1Role] = useState<string>('Ведущая · Эмоциональный голос');
   const [speaker1Tempo, setSpeaker1Tempo] = useState<string>('1.0x');
 
@@ -447,6 +460,15 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   const [muxedVideoDownloadUrl, setMuxedVideoDownloadUrl] = useState<string | null>(null);
   const videoInputRef = useRef<HTMLInputElement | null>(null);
   const dubVideoRef = useRef<HTMLVideoElement | null>(null);
+
+  // Ready Script Import / Export & Imported Table Video Protection State
+  const [isImportedScript, setIsImportedScript] = useState<boolean>(false);
+  const [showImportModal, setShowImportModal] = useState<boolean>(false);
+  const [importRawText, setImportRawText] = useState<string>('');
+  const [importFileName, setImportFileName] = useState<string | null>(null);
+  const [importErrors, setImportErrors] = useState<ReadyScriptValidationError[]>([]);
+  const importFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [showReplaceTableModal, setShowReplaceTableModal] = useState<boolean>(false);
 
   // Subtitles / YouTube Import State
   const [youtubeImportUrl, setYoutubeImportUrl] = useState<string>('');
@@ -550,6 +572,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     refreshTtsQuota();
   }, [user?.uid]);
 
+  const plannedMacroBlocks = useMemo(() => {
+    return planDialogueMacroBlocks(turns, { maxSize: 25, minPauseSec: 0.5 });
+  }, [turns]);
+
   const dubbingCallsForecast = useMemo(() => {
     if (!turns.length) return { blocks: 0, estimatedCalls: 0, modeLabel: 'A' as 'A' | 'B' };
     const uniqueSpeakers = new Set(turns.map((t) => t.speakerId || 'HOST_1'));
@@ -564,11 +590,11 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         id === 'shokhrukh'
       );
     });
-    const blocks = Math.max(1, Math.ceil(turns.length / 22));
+    const blocks = Math.max(1, plannedMacroBlocks.length);
     const useModeB = hasCloned || uniqueSpeakers.size > 2;
     const estimatedCalls = useModeB ? blocks * Math.max(1, uniqueSpeakers.size) : blocks;
     return { blocks, estimatedCalls, modeLabel: (useModeB ? 'B' : 'A') as 'A' | 'B' };
-  }, [turns, speaker1Profile, speaker2Profile]);
+  }, [turns, plannedMacroBlocks, speaker1Profile, speaker2Profile]);
 
   // Ref to avoid overwriting user storage while hydrating on user switch
   const isHydratingUserRef = useRef<boolean>(false);
@@ -822,6 +848,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     setMasterAudioBase64(null);
     setSynthesizedTurns([]);
     setSrtSubtitles('');
+    setIsImportedScript(false);
     if (user?.uid) {
       const draftKey = getDialogueDraftKey(user.uid);
       if (draftKey) localStorage.removeItem(draftKey);
@@ -896,6 +923,18 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     setSpeaker1VoiceId(vId);
     const chosen = voices.find((v) => v.id === vId);
     if (chosen) {
+      const isFemale =
+        chosen.gender === 'female' ||
+        chosen.baseVoice === 'Kore' ||
+        chosen.baseVoice === 'Aoede' ||
+        chosen.baseVoice === 'Zephyr';
+      if (isImportedScript) {
+        setTurns((prev) =>
+          prev.map((t) => (t.speakerId === 'HOST_1' ? { ...t, voiceId: vId, baseVoice: chosen.baseVoice } : t))
+        );
+        return;
+      }
+      setSpeaker1Gender(isFemale ? 'female' : 'male');
       const rawName = chosen.name || chosen.id;
       const nameMatch = rawName.match(/^([^(]+)/);
       const newName = (nameMatch?.[1] || rawName).trim();
@@ -921,10 +960,17 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       /aziza|madina|dilnoza|zarina|nodira|malika|zephyr|kore|aoede|sevara|shahnoza|rayhon|gulzoda|umida|nigora|feruza|ayol/i.test(
         chosen.name || chosen.id
       );
-    setSpeaker2Gender(isFemale ? 'female' : 'male');
     if (chosen.tempo) setSpeaker2Tempo(chosen.tempo.match(/[\d.]+x/)?.[0] || '1.0x');
     if (chosen.timbre) setSpeaker2Timbre(chosen.timbre);
 
+    if (isImportedScript) {
+      setTurns((prev) =>
+        prev.map((t) => (t.speakerId === 'HOST_2' ? { ...t, voiceId: vId, baseVoice: chosen.baseVoice } : t))
+      );
+      return;
+    }
+
+    setSpeaker2Gender(isFemale ? 'female' : 'male');
     const rawName = chosen.name || chosen.id;
     const nameMatch = rawName.match(/^([^(]+)(?:\((.*?)\))?/);
     const extractedName = (nameMatch?.[1] || rawName).trim();
@@ -1041,6 +1087,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       setSpeaker1VoiceId(fem.id);
     }
     setSpeaker1Name('Девушка (Ж)');
+    setSpeaker1Gender('female');
     setSpeaker1Role('Пассажир · Живой эмоциональный голос');
 
     const clonedOrMale =
@@ -1052,6 +1099,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     }
     setSpeaker2Name('Мужчина (М) — Shohrux');
     setSpeaker2Role('Водитель · Спокойный уверенный эксперт');
+    setIsImportedScript(false);
 
     saveProjectToUserHistory({
       title: presetTitle,
@@ -1065,6 +1113,124 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     setDialogueNotice(
       '✅ Загружена раскадровка (9 реплик + 2 музыкальные вставки «Без слов») и сохранена в историю вашего текущего аккаунта.'
     );
+  };
+
+  // Pure client-side Ready Script Import (0 LLM, 0 credits, 0 network calls)
+  const handleOpenImportModal = () => {
+    setImportErrors([]);
+    setShowImportModal(true);
+  };
+
+  const handleImportFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const content = await file.text();
+      setImportRawText(content);
+      setImportFileName(file.name);
+      setImportErrors([]);
+    } catch {
+      setImportErrors([{ line: 1, message: 'Не удалось прочитать файл. Проверьте кодировку UTF-8.' }]);
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  const handleApplyReadyScriptImport = () => {
+    const result = parseReadyScript(importRawText);
+    if (!result.ok) {
+      setImportErrors(result.errors);
+      return;
+    }
+
+    setTurns(result.turns);
+    setNoSpeechIntervals(result.noSpeechIntervals);
+    setTotalVideoDurationSec(result.totalDurationSec);
+    setMasterAudioMode('time_aligned');
+    setExtraSpeakers([]);
+    setMasterAudioBase64(null);
+    setSynthesizedTurns([]);
+    setSrtSubtitles('');
+    setQuotaPausedInfo(null);
+
+    const sp1 = result.speakers.find((s) => s.speakerId === 'HOST_1') || result.speakers[0];
+    const sp2 = result.speakers.find((s) => s.speakerId === 'HOST_2') || result.speakers[1];
+    if (sp1) {
+      setSpeaker1Name(sp1.name);
+      setSpeaker1Gender(sp1.gender);
+    }
+    if (sp2) {
+      setSpeaker2Name(sp2.name);
+      setSpeaker2Gender(sp2.gender);
+    }
+
+    // Protect imported table from automatic Gemini video analysis
+    setIsImportedScript(true);
+    setAutoExtractFromVideo(false);
+
+    if (importFileName && !topic.trim()) {
+      setTopic(importFileName.replace(/\.[^.]+$/, ''));
+    }
+
+    setImportErrors([]);
+    setShowImportModal(false);
+    setDialogueNotice(
+      `✅ Импортирован готовый сценарий (${result.turns.length} реплик${
+        result.noSpeechIntervals.length > 0
+          ? `, ${result.noSpeechIntervals.length} вставок «Без слов»`
+          : ''
+      }). Выберите голоса спикеров в Шаге 02. Загрузка видео не перезапишет таблицу.`
+    );
+  };
+
+  // Pure client-side Script Export (.json / .csv) including manual edits & syncStatus, strictly without audio
+  const handleExportScript = (format: 'json' | 'csv') => {
+    if (turns.length === 0) {
+      setDialogueNotice('Таблица реплик пуста — нечего экспортировать.');
+      return;
+    }
+
+    const speakersMeta: ParsedSpeakerInfo[] = [
+      { speakerId: 'HOST_1', name: speaker1Name, gender: speaker1Gender },
+      { speakerId: 'HOST_2', name: speaker2Name, gender: speaker2Gender },
+    ];
+
+    const content =
+      format === 'json'
+        ? exportTurnsToJson(turns, speakersMeta, noSpeechIntervals)
+        : exportTurnsToCsv(turns, speakersMeta);
+
+    const mime =
+      format === 'json' ? 'application/json;charset=utf-8' : 'text/csv;charset=utf-8';
+    const blob = new Blob([format === 'csv' ? `\uFEFF${content}` : content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const baseName = (topic || 'dubbing-script')
+      .trim()
+      .replace(/[^\p{L}\p{N}_-]+/gu, '_')
+      .slice(0, 60) || 'dubbing-script';
+
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${baseName}.${format}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // Guard toggling auto-extract when an imported or populated table exists
+  const handleToggleAutoExtractFromVideo = (nextChecked: boolean) => {
+    if (nextChecked && (isImportedScript || turns.length > 0)) {
+      setShowReplaceTableModal(true);
+      return;
+    }
+    setAutoExtractFromVideo(nextChecked);
+  };
+
+  const handleConfirmReplaceTableForVideo = () => {
+    setIsImportedScript(false);
+    setAutoExtractFromVideo(true);
+    setShowReplaceTableModal(false);
   };
 
   // Parse & Translate any custom Russian Storyboard 1:1 via /api/podcast/parse-verbatim-storyboard
@@ -1132,6 +1298,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
           if (sp1) {
             setSpeaker1Name(sp1.name);
+            setSpeaker1Gender(sp1.gender === 'male' ? 'male' : 'female');
             if (sp1.description) setSpeaker1Role(sp1.description.slice(0, 60));
             if (sp1.gender === 'female') {
               const femVoice = voices.find((v) => v.id === 'aziza' || v.baseVoice === 'Kore' || v.gender === 'female');
@@ -1141,6 +1308,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
               if (maleVoice) setSpeaker1VoiceId(maleVoice.id);
             }
           }
+          setIsImportedScript(false);
 
           if (sp2) {
             setSpeaker2Name(sp2.name);
@@ -1274,9 +1442,14 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     setUploadedVideoSizeMb(sizeMb);
     setMuxedVideoDownloadUrl(null);
 
-    // Point 1: If storyboard field is empty, ALWAYS run video extraction; checkbox is true by default
+    // Protect imported script (or populated table with auto-extract off) from automatic Gemini analysis
     const isStoryboardFieldEmpty = !storyboardTextRu.trim();
-    const shouldRunAnalysis = autoExtractFromVideo || isStoryboardFieldEmpty;
+    const shouldRunAnalysis = shouldRunVideoAutoAnalysis({
+      autoExtractFromVideo,
+      isImportedScript,
+      storyboardTextRu,
+      turnsCount: turns.length,
+    });
 
     setIsUploadingVideo(true);
     setVideoJobStatus(
@@ -1292,7 +1465,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     setDialogueNotice(
       shouldRunAnalysis
         ? `Этап: Загрузка видео в Gemini Files API (5%)...`
-        : `Отправка видео "${file.name}" (${sizeMb} МБ) на сервер...`
+        : `Отправка видео "${file.name}" (${sizeMb} МБ) для сборки MP4 (таблица реплик сохранена)...`
     );
 
     try {
@@ -1300,7 +1473,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       const formData = new FormData();
       formData.append('video', file);
       formData.append('generateStoryboardViaGemini', shouldRunAnalysis ? 'true' : 'false');
-      formData.append('storyboardIsEmpty', isStoryboardFieldEmpty ? 'true' : 'false');
+      formData.append('storyboardIsEmpty', shouldRunAnalysis && isStoryboardFieldEmpty ? 'true' : 'false');
       formData.append('videoDurationSec', String(localDurationSec));
       formData.append('userClonedVoiceId', userClonedVoiceId || 'voice_17raj9ewke3g');
 
@@ -2174,9 +2347,12 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       voiceId: speaker1Profile?.voiceId || speaker1Profile?.id || 'aziza',
       name: speaker1Name,
       speakerName: speaker1Name,
-      baseVoice: speaker1Profile?.baseVoice || 'Kore',
-      gender: speaker1Profile?.gender || 'female',
+      baseVoice: speaker1Profile?.baseVoice || (speaker1Gender === 'male' ? 'Charon' : 'Kore'),
+      gender: speaker1Gender,
       tempo: speaker1Tempo,
+      timbre: speaker1Profile?.timbre,
+      customPersonaPrompt: speaker1Profile?.customPersonaPrompt,
+      role: speaker1Role,
       ...(speaker1Profile?.isReplicatedVoice
         ? {
             replicatedVoiceConfig: {
@@ -2252,8 +2428,11 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       }
     };
 
-    // Single request for <= 30 turns (when not resuming partial set)
-    if (!resumeOnlyRemaining && turnsToSynthesize.length <= 30) {
+    const plannedAllBlocks = planDialogueMacroBlocks(enrichedTurns, { maxSize: 25, minPauseSec: 0.5 });
+    const plannedExecutionBlocks = planDialogueMacroBlocks(turnsToSynthesize, { maxSize: 25, minPauseSec: 0.5 });
+
+    // Single request when everything fits cleanly into 1 macro-block (<= 25 turns, not resuming partial set)
+    if (!resumeOnlyRemaining && plannedExecutionBlocks.length <= 1) {
       try {
         const res = await authFetch('/api/podcast/synthesize-dialogue', {
           method: 'POST',
@@ -2352,11 +2531,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       return;
     }
 
-    // Раздел 2.1: размер батча 25 реплик (вместо 8)
-    const BATCH_SIZE = 25;
-    const totalBatches = Math.max(1, Math.ceil(turnsToSynthesize.length / BATCH_SIZE));
-    const totalProjectBlocks = Math.max(1, Math.ceil(enrichedTurns.length / 22));
-    const initialCompletedBlocks = Math.floor(existingById.size / 22);
+    // Scene-aware & pause-aware macro-block slicing (shared utility, max 25 turns/block, avoids <0.5s cuts)
+    const totalBatches = Math.max(1, plannedExecutionBlocks.length);
+    const totalProjectBlocks = Math.max(1, plannedAllBlocks.length);
+    const initialCompletedBlocks = Math.max(0, totalProjectBlocks - totalBatches);
     const newlySynthesizedById = new Map<string, any>(existingById);
     let totalTtsCallsUsed = 0;
     const providersUsed = new Set<string>();
@@ -2375,9 +2553,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       for (let b = 0; b < totalBatches; b++) {
         if (abortControllerRef.current?.signal.aborted) break;
 
-        const startIdx = b * BATCH_SIZE;
-        const endIdx = Math.min(turnsToSynthesize.length, (b + 1) * BATCH_SIZE);
-        const batchTurns = turnsToSynthesize.slice(startIdx, endIdx);
+        const block = plannedExecutionBlocks[b];
+        const batchTurns = block.turns;
 
         setBatchProgress({
           currentBatch: b + 1,
@@ -2385,7 +2562,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           completedTurns: newlySynthesizedById.size,
           totalTurns: enrichedTurns.length,
           percent: Math.round((newlySynthesizedById.size / Math.max(1, enrichedTurns.length)) * 100),
-          statusText: `Озвучка макро-блока ${b + 1}/${totalBatches} (реплики ${startIdx + 1}–${endIdx})...`,
+          statusText: `Озвучка блока ${b + 1}/${totalBatches} (${block.startTimecode}–${block.endTimecode}, ${batchTurns.length} репл.)...`,
         });
 
         let batchData: any = null;
@@ -2855,19 +3032,26 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           : '1. Загрузить оригинальное видео (MP4 / WebM / MOV, до 30 МБ / 720p):'}
                       </span>
                     </div>
-                    <label className="flex items-center gap-1.5 text-[11px] text-[#5D594E] cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={autoExtractFromVideo}
-                        onChange={(e) => setAutoExtractFromVideo(e.target.checked)}
-                        className="accent-[#0E7C86] rounded"
-                      />
-                      <span>
-                        {lang === 'uz'
-                          ? 'Videodan avtomatik raskadrovka olish (Gemini Files API)'
-                          : 'Авто-создать раскадровку из видео'}
-                      </span>
-                    </label>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {isImportedScript && (
+                        <span className="text-[10.5px] font-mono px-2 py-0.5 rounded-md bg-[#0E7C86]/10 text-[#0A5A62] border border-[#0E7C86]/25">
+                          🛡 Сценарий защищён (только склейка MP4)
+                        </span>
+                      )}
+                      <label className="flex items-center gap-1.5 text-[11px] text-[#5D594E] cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={autoExtractFromVideo}
+                          onChange={(e) => handleToggleAutoExtractFromVideo(e.target.checked)}
+                          className="accent-[#0E7C86] rounded"
+                        />
+                        <span>
+                          {lang === 'uz'
+                            ? 'Videodan avtomatik raskadrovka olish (Gemini Files API)'
+                            : 'Авто-создать раскадровку из видео'}
+                        </span>
+                      </label>
+                    </div>
                   </div>
 
                   <input
@@ -3040,6 +3224,34 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleOpenImportModal}
+                        className="text-[11px] px-3 py-1.5 rounded-full bg-[#161511] hover:bg-[#0A5A62] text-white font-semibold transition-all cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                      >
+                        <FileUp className="w-3.5 h-3.5 text-[#5CC8CF]" />
+                        <span>Импорт сценария</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleExportScript('json')}
+                        disabled={turns.length === 0}
+                        className="text-[11px] px-2.5 py-1.5 rounded-full bg-white hover:bg-[#F4F1EA] text-[#161511] border border-[rgba(22,21,17,0.18)] font-semibold transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
+                        title="Экспорт таблицы сценария в JSON (без аудио)"
+                      >
+                        <FileDown className="w-3 h-3 text-[#0E7C86]" />
+                        <span>Экспорт .json</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleExportScript('csv')}
+                        disabled={turns.length === 0}
+                        className="text-[11px] px-2.5 py-1.5 rounded-full bg-white hover:bg-[#F4F1EA] text-[#161511] border border-[rgba(22,21,17,0.18)] font-semibold transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
+                        title="Экспорт таблицы сценария в CSV (без аудио)"
+                      >
+                        <FileDown className="w-3 h-3 text-[#0E7C86]" />
+                        <span>Экспорт .csv</span>
+                      </button>
                       {(storyboardTextRu.trim().length > 0 || turns.length > 0) && (
                         <button
                           type="button"
@@ -3291,7 +3503,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                     <User className="w-3.5 h-3.5" /> Спикер 1 (HOST_1)
                   </span>
                   <span className="text-[10px] font-mono text-[#0E7C86] border border-[#0E7C86]/30 px-2 py-0.5 rounded-full bg-[#0E7C86]/5">
-                    {speaker1Profile?.gender === 'female' || speaker1Profile?.baseVoice === 'Kore' ? '♀ Женский' : '♂ Мужской'}
+                    {speaker1Gender === 'female' ? '♀ Женский' : '♂ Мужской'}
                   </span>
                 </div>
 
@@ -3554,14 +3766,42 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
           {/* STEP 03: Synchronized Video Player & 1:1 Timecode Turn Table */}
           <div className="border border-[rgba(22,21,17,0.14)] rounded-[20px] bg-[rgba(255,255,255,0.52)] backdrop-blur-sm p-6 space-y-4 shadow-[0_30px_50px_-30px_rgba(22,21,17,0.15)]">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.14em] text-[#0A5A62] flex-1">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.14em] text-[#0A5A62] flex-1 min-w-[240px]">
                 <span>03 — {lang === 'uz' ? 'Taymkodlar Jadvali va Video Sinxronizatsiya' : 'Таблица реплик 1:1 по таймкодам и видеоплеер'}</span>
                 <span className="h-[1px] flex-1 bg-[rgba(22,21,17,0.14)] mr-3" />
               </div>
-              <span className="text-xs font-mono text-[#5D594E]">
-                {turns.length} реплик · {noSpeechIntervals.length} вставок «Без слов»
-              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleOpenImportModal}
+                  className="text-[11px] px-2.5 py-1 rounded-lg bg-[#161511] hover:bg-[#0A5A62] text-white font-semibold cursor-pointer inline-flex items-center gap-1"
+                >
+                  <FileUp className="w-3 h-3 text-[#5CC8CF]" />
+                  <span>Импорт сценария</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleExportScript('json')}
+                  disabled={turns.length === 0}
+                  className="text-[11px] px-2.5 py-1 rounded-lg bg-white hover:bg-[#F4F1EA] text-[#161511] border border-[rgba(22,21,17,0.16)] font-semibold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1"
+                >
+                  <FileDown className="w-3 h-3 text-[#0E7C86]" />
+                  <span>JSON</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleExportScript('csv')}
+                  disabled={turns.length === 0}
+                  className="text-[11px] px-2.5 py-1 rounded-lg bg-white hover:bg-[#F4F1EA] text-[#161511] border border-[rgba(22,21,17,0.16)] font-semibold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1"
+                >
+                  <FileDown className="w-3 h-3 text-[#0E7C86]" />
+                  <span>CSV</span>
+                </button>
+                <span className="text-xs font-mono text-[#5D594E]">
+                  {turns.length} реплик · {noSpeechIntervals.length} вставок «Без слов»
+                </span>
+              </div>
             </div>
 
             {/* Uploaded Local Video Synchronized Player & Background Audio Ducking Selector */}
@@ -3731,7 +3971,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           {isHost1 ? <User className="w-3.5 h-3.5" /> : <Bot className="w-3.5 h-3.5" />}
                           <span>{turn.speakerName || (isHost1 ? speaker1Name : speaker2Name)}</span>
                           <span className="text-[10px] font-mono opacity-85">
-                            ({(turn.speakerGender || (isHost1 ? speaker1Profile?.gender : speaker2Gender)) === 'female' ? 'Ж' : 'М'}) ⇄
+                            ({(turn.speakerGender || (isHost1 ? speaker1Gender : speaker2Gender)) === 'female' ? 'Ж' : 'М'}) ⇄
                           </span>
                         </button>
 
@@ -3986,6 +4226,86 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
               </div>
             )}
 
+            {/* Pre-Synthesis Macro-Blocks Plan Preview */}
+            {!isSynthesizing && plannedMacroBlocks.length > 0 && (
+              <div className="rounded-2xl border border-[rgba(22,21,17,0.12)] bg-[#FAF8F3] px-4 py-3 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono">
+                  <span className="font-bold text-[#0A5A62] uppercase tracking-wider">
+                    План нарезки на блоки ({plannedMacroBlocks.length} бл. · {turns.length} реплик)
+                  </span>
+                  <span className="text-[#5D594E]">
+                    Единые голоса и базовый стиль спикеров во всех блоках
+                  </span>
+                </div>
+                <div className="space-y-1.5">
+                  {plannedMacroBlocks.map((blk) => {
+                    const bnd = blk.boundaryAfter;
+                    const boundaryTimeLabel = bnd
+                      ? bnd.endOfBlockTimecode === bnd.startOfNextTimecode
+                        ? bnd.endOfBlockTimecode
+                        : `${bnd.endOfBlockTimecode} / ${bnd.startOfNextTimecode}`
+                      : null;
+
+                    return (
+                      <div key={blk.blockIndex} className="space-y-1">
+                        <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 rounded-xl bg-white border border-[rgba(22,21,17,0.1)] text-xs">
+                          <div className="flex flex-wrap items-center gap-2 min-w-0">
+                            <span className="font-mono text-[11px] font-bold text-[#0E7C86]">
+                              Блок {blk.blockIndex + 1}
+                            </span>
+                            <span className="font-mono text-[11px] px-2 py-0.5 rounded-md bg-[#161511] text-[#FACC15]">
+                              {blk.startTimecode}–{blk.endTimecode}
+                            </span>
+                            <span className="text-[11px] font-semibold text-[#161511]">
+                              {blk.turns.length} реплик
+                            </span>
+                            {blk.sceneTitles.length > 0 && (
+                              <span
+                                className="text-[11px] text-[#5D594E] truncate max-w-[340px]"
+                                title={blk.sceneTitles.join(' · ')}
+                              >
+                                {blk.sceneTitles.length === 1
+                                  ? blk.sceneTitles[0]
+                                  : `${blk.sceneTitles[0]} … ${blk.sceneTitles[blk.sceneTitles.length - 1]}`}
+                              </span>
+                            )}
+                          </div>
+                          <span className="font-mono text-[10.5px] text-[#5D594E]">
+                            #{blk.startTurnIndex + 1}–{blk.endTurnIndex + 1}
+                          </span>
+                        </div>
+
+                        {bnd && (
+                          <div className="flex flex-wrap items-center gap-2 pl-4 text-[10.5px] font-mono">
+                            <span className="text-[#5D594E]">
+                              ↳ Граница {boundaryTimeLabel} (пауза {bnd.gapSec.toFixed(1)}с)
+                            </span>
+                            {bnd.isMidConversation ? (
+                              <span
+                                className={`px-2 py-0.5 rounded-md font-semibold ${
+                                  bnd.reason === 'tight_pause_forced'
+                                    ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                                    : 'bg-amber-50 text-amber-800 border border-amber-200'
+                                }`}
+                              >
+                                {bnd.reason === 'tight_pause_forced'
+                                  ? '⚠ Граница посреди разговора (пауза < 0.5с)'
+                                  : '⚠ Граница посреди разговора (разрез длинной сцены)'}
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-md bg-[#0E7C86]/10 text-[#0A5A62] border border-[#0E7C86]/25">
+                                ✓ Смена сцены
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Add turn button & Synthesize action + Quota Forecast (Раздел 2.8) */}
             <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-3 flex-wrap">
               <button
@@ -3997,17 +4317,21 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
               </button>
 
               <div className="flex items-center gap-2.5 w-full sm:w-auto justify-end flex-wrap">
-                {!isSynthesizing && turns.length > 0 && ttsQuota && (
+                {!isSynthesizing && turns.length > 0 && (
                   <span
                     className={`text-[11px] font-mono tabular-nums px-2.5 py-1 rounded-lg border ${
-                      dubbingCallsForecast.estimatedCalls > ttsQuota.remaining
+                      ttsQuota && dubbingCallsForecast.estimatedCalls > ttsQuota.remaining
                         ? 'bg-amber-50 border-amber-300 text-amber-900 font-semibold'
                         : 'bg-[#FAF8F4] border-[rgba(22,21,17,0.12)] text-[#0A5A62]'
                     }`}
                   >
-                    {dubbingCallsForecast.estimatedCalls > ttsQuota.remaining
-                      ? `⚠ Озвучка займёт ~${dubbingCallsForecast.estimatedCalls} выз., сегодня осталось ${ttsQuota.remaining}`
-                      : `Озвучка займёт ~${dubbingCallsForecast.estimatedCalls} выз., сегодня осталось ${ttsQuota.remaining}`}
+                    {ttsQuota ? (
+                      dubbingCallsForecast.estimatedCalls > ttsQuota.remaining
+                        ? `⚠ ${turns.length} реплик · ~${dubbingCallsForecast.estimatedCalls} выз. TTS · остаток квоты ${ttsQuota.remaining}/${ttsQuota.limit}`
+                        : `${turns.length} реплик · ~${dubbingCallsForecast.estimatedCalls} выз. TTS · остаток квоты ${ttsQuota.remaining}/${ttsQuota.limit}`
+                    ) : (
+                      `${turns.length} реплик · ~${dubbingCallsForecast.estimatedCalls} выз. TTS`
+                    )}
                   </span>
                 )}
 
@@ -4289,6 +4613,162 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           </div>
         </div>
       </div>
+
+      {/* In-app Ready Script Import Modal (0 LLM, 0 credits) */}
+      {showImportModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4">
+          <div className="w-full max-w-3xl rounded-2xl bg-[#FAF8F3] border border-[rgba(22,21,17,0.18)] shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="flex items-center justify-between px-5 py-4 bg-white border-b border-[rgba(22,21,17,0.12)]">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-[#0E7C86]/10 text-[#0E7C86] flex items-center justify-center">
+                  <FileUp className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-[#161511]">
+                    Импорт готового сценария (без ИИ и списания кредитов)
+                  </h3>
+                  <p className="text-[11px] text-[#5D594E]">
+                    Поддерживаются: таблица «ММ:СС–ММ:СС | Спикер | ритм | подача | узб. текст | рус. оригинал», JSON, CSV, SRT
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowImportModal(false)}
+                className="p-1.5 rounded-lg text-[#5D594E] hover:text-[#161511] hover:bg-[#F4F1EA] cursor-pointer"
+                aria-label="Закрыть"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-3.5 overflow-y-auto flex-1">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <input
+                    ref={importFileInputRef}
+                    type="file"
+                    accept=".txt,.csv,.json,.srt,text/plain,text/csv,application/json"
+                    onChange={handleImportFileSelected}
+                    className="hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => importFileInputRef.current?.click()}
+                    className="text-xs px-3.5 py-2 rounded-xl bg-white hover:bg-[#F4F1EA] text-[#161511] border border-[rgba(22,21,17,0.2)] font-semibold cursor-pointer inline-flex items-center gap-1.5"
+                  >
+                    <Upload className="w-3.5 h-3.5 text-[#0E7C86]" />
+                    <span>Выбрать файл (.txt / .csv / .json / .srt)</span>
+                  </button>
+                  {importFileName && (
+                    <span className="text-[11px] font-mono text-[#0A5A62] bg-[#0E7C86]/10 px-2.5 py-1 rounded-lg">
+                      {importFileName}
+                    </span>
+                  )}
+                </div>
+                {importRawText.trim().length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setImportRawText('');
+                      setImportFileName(null);
+                      setImportErrors([]);
+                    }}
+                    className="text-[11px] text-[#5D594E] hover:text-[#C4552D] cursor-pointer"
+                  >
+                    Очистить поле
+                  </button>
+                )}
+              </div>
+
+              <textarea
+                rows={12}
+                value={importRawText}
+                onChange={(e) => {
+                  setImportRawText(e.target.value);
+                  if (importErrors.length > 0) setImportErrors([]);
+                }}
+                placeholder={`Спикеры: Азиз (М), Вероника (Ж)\n=== Вступление ===\n[00:00–00:03 музыка]\n00:03–00:08 (5s) | Азиз | средний | бодро, уверенно | Assalomu alaykum, do'stlar! | Всем привет, друзья!\n00:08–00:13 (5s) | Вероника | живой | с улыбкой | Bugun yangi krossoverni sinaymiz. | Сегодня тестируем новый кроссовер.`}
+                className="w-full bg-white border border-[rgba(22,21,17,0.18)] rounded-xl p-3.5 text-xs text-[#161511] font-mono leading-relaxed focus:outline-none focus:border-[#0E7C86] resize-y"
+              />
+
+              {importErrors.length > 0 && (
+                <div className="p-3.5 rounded-xl bg-[#FEF2F2] border border-[#FCA5A5] space-y-1.5">
+                  <div className="flex items-center gap-2 text-xs font-bold text-[#991B1B]">
+                    <AlertCircle className="w-4 h-4 text-[#DC2626] shrink-0" />
+                    <span>Импорт отклонён — найдены ошибки ({importErrors.length}):</span>
+                  </div>
+                  <ul className="space-y-1 max-h-44 overflow-y-auto pl-6 list-disc text-[11.5px] font-mono text-[#7F1D1D]">
+                    {importErrors.map((err, idx) => (
+                      <li key={`${err.line}-${idx}`}>{err.message}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between gap-3 px-5 py-3.5 bg-white border-t border-[rgba(22,21,17,0.12)]">
+              <span className="text-[11px] text-[#5D594E]">
+                Узбекский текст загружается дословно, без перевода и перефразирования.
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowImportModal(false)}
+                  className="btn-pill btn-ghost text-xs px-4 py-2 cursor-pointer"
+                >
+                  Отмена
+                </button>
+                <button
+                  type="button"
+                  onClick={handleApplyReadyScriptImport}
+                  disabled={!importRawText.trim()}
+                  className="btn-pill btn-solid text-xs px-5 py-2 bg-[#0E7C86] hover:bg-[#0A5A62] text-white border-none cursor-pointer disabled:opacity-50"
+                >
+                  Проверить и загрузить в таблицу
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Custom In-App Confirmation Modal before replacing imported/populated table via video analysis */}
+      {showReplaceTableModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4">
+          <div className="w-full max-w-md rounded-2xl bg-white border border-[rgba(22,21,17,0.18)] shadow-2xl p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center shrink-0">
+                <AlertCircle className="w-5 h-5" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-sm font-bold text-[#161511]">
+                  Таблица будет заменена
+                </h3>
+                <p className="text-xs text-[#5D594E] leading-relaxed">
+                  Включение авто-разбора видео через Gemini перезапишет текущую таблицу реплик ({turns.length} реплик) после загрузки видео. Если нужно только наложить озвучку на видео, оставьте флажок снятым.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setShowReplaceTableModal(false)}
+                className="btn-pill btn-ghost text-xs px-4 py-2 cursor-pointer"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmReplaceTableForVideo}
+                className="btn-pill btn-solid text-xs px-4 py-2 bg-[#C4552D] hover:bg-[#A6421E] text-white border-none cursor-pointer"
+              >
+                Да, заменить таблицу
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
