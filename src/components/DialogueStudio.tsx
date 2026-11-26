@@ -62,6 +62,8 @@ import {
   exportTurnsToJson,
   exportTurnsToCsv,
   shouldRunVideoAutoAnalysis,
+  pickBuiltInVoiceForGender,
+  checkSynthesisVoiceWarnings,
   ReadyScriptValidationError,
   ParsedSpeakerInfo,
 } from '../utils/readyScriptParser';
@@ -469,6 +471,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   const [importErrors, setImportErrors] = useState<ReadyScriptValidationError[]>([]);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const [showReplaceTableModal, setShowReplaceTableModal] = useState<boolean>(false);
+  const [showVoiceWarningModal, setShowVoiceWarningModal] = useState<boolean>(false);
+  const [pendingSynthResumeFlag, setPendingSynthResumeFlag] = useState<boolean>(false);
 
   // Subtitles / YouTube Import State
   const [youtubeImportUrl, setYoutubeImportUrl] = useState<string>('');
@@ -575,6 +579,27 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   const plannedMacroBlocks = useMemo(() => {
     return planDialogueMacroBlocks(turns, { maxSize: 25, minPauseSec: 0.5 });
   }, [turns]);
+
+  const synthesisVoiceWarnings = useMemo(() => {
+    if (turns.length === 0) return [];
+    return checkSynthesisVoiceWarnings(
+      [
+        {
+          speakerId: 'HOST_1',
+          name: speaker1Name,
+          gender: speaker1Gender,
+          voice: speaker1Profile,
+        },
+        {
+          speakerId: 'HOST_2',
+          name: speaker2Name,
+          gender: speaker2Gender,
+          voice: speaker2Profile,
+        },
+      ],
+      turns
+    );
+  }, [turns, speaker1Name, speaker1Gender, speaker1Profile, speaker2Name, speaker2Gender, speaker2Profile]);
 
   const dubbingCallsForecast = useMemo(() => {
     if (!turns.length) return { blocks: 0, estimatedCalls: 0, modeLabel: 'A' as 'A' | 'B' };
@@ -1143,7 +1168,42 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       return;
     }
 
-    setTurns(result.turns);
+    const sp1 = result.speakers.find((s) => s.speakerId === 'HOST_1') || result.speakers[0];
+    const sp2 = result.speakers.find((s) => s.speakerId === 'HOST_2') || result.speakers[1];
+
+    // Auto-assign built-in (non-cloned) voices matching each speaker's declared gender
+    const pickedVoice1 = sp1 ? pickBuiltInVoiceForGender(voices, sp1.gender) : undefined;
+    const pickedVoice2 = sp2
+      ? pickBuiltInVoiceForGender(voices, sp2.gender, pickedVoice1 ? [pickedVoice1.id] : [])
+      : undefined;
+
+    if (sp1) {
+      setSpeaker1Name(sp1.name);
+      setSpeaker1Gender(sp1.gender);
+      if (pickedVoice1) {
+        setSpeaker1VoiceId(pickedVoice1.id);
+      }
+    }
+    if (sp2) {
+      setSpeaker2Name(sp2.name);
+      setSpeaker2Gender(sp2.gender);
+      setSpeaker2GenderFilter('all');
+      if (pickedVoice2) {
+        setSpeaker2VoiceId(pickedVoice2.id);
+      }
+    }
+
+    const turnsWithBuiltInVoices = result.turns.map((t) => {
+      if (t.speakerId === 'HOST_1' && pickedVoice1) {
+        return { ...t, voiceId: pickedVoice1.id, baseVoice: pickedVoice1.baseVoice };
+      }
+      if (t.speakerId === 'HOST_2' && pickedVoice2) {
+        return { ...t, voiceId: pickedVoice2.id, baseVoice: pickedVoice2.baseVoice };
+      }
+      return t;
+    });
+
+    setTurns(turnsWithBuiltInVoices);
     setNoSpeechIntervals(result.noSpeechIntervals);
     setTotalVideoDurationSec(result.totalDurationSec);
     setMasterAudioMode('time_aligned');
@@ -1153,17 +1213,6 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     setSrtSubtitles('');
     setQuotaPausedInfo(null);
 
-    const sp1 = result.speakers.find((s) => s.speakerId === 'HOST_1') || result.speakers[0];
-    const sp2 = result.speakers.find((s) => s.speakerId === 'HOST_2') || result.speakers[1];
-    if (sp1) {
-      setSpeaker1Name(sp1.name);
-      setSpeaker1Gender(sp1.gender);
-    }
-    if (sp2) {
-      setSpeaker2Name(sp2.name);
-      setSpeaker2Gender(sp2.gender);
-    }
-
     // Protect imported table from automatic Gemini video analysis
     setIsImportedScript(true);
     setAutoExtractFromVideo(false);
@@ -1172,6 +1221,13 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       setTopic(importFileName.replace(/\.[^.]+$/, ''));
     }
 
+    const assignedSummary = [
+      sp1 && pickedVoice1 ? `${sp1.name} → ${pickedVoice1.name}` : null,
+      sp2 && pickedVoice2 ? `${sp2.name} → ${pickedVoice2.name}` : null,
+    ]
+      .filter(Boolean)
+      .join(', ');
+
     setImportErrors([]);
     setShowImportModal(false);
     setDialogueNotice(
@@ -1179,7 +1235,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         result.noSpeechIntervals.length > 0
           ? `, ${result.noSpeechIntervals.length} вставок «Без слов»`
           : ''
-      }). Выберите голоса спикеров в Шаге 02. Загрузка видео не перезапишет таблицу.`
+      }). Назначены встроенные голоса: ${assignedSummary || 'проверьте Шаг 02'}. Загрузка видео не перезапишет таблицу.`
     );
   };
 
@@ -2310,7 +2366,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   };
 
   // Synthesize Full Dialogue (macro-blocks 20-25 turns, strict timecode sync, 429 pause/resume)
-  const handleSynthesizeDialogue = async (resumeOnlyRemaining = false) => {
+  const handleSynthesizeDialogue = async (resumeOnlyRemaining = false, bypassVoiceConfirm = false) => {
     if (
       !requireAuth(
         () => {},
@@ -2322,6 +2378,12 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     const invalidTurn = turns.find((t) => !t.text.trim());
     if (invalidTurn) {
       setDialogueNotice('Все реплики должны содержать текст!');
+      return;
+    }
+
+    if (!bypassVoiceConfirm && synthesisVoiceWarnings.length > 0) {
+      setPendingSynthResumeFlag(resumeOnlyRemaining);
+      setShowVoiceWarningModal(true);
       return;
     }
 
@@ -4306,6 +4368,21 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
               </div>
             )}
 
+            {/* Pre-Synthesis Voice Gender Mismatch / Cloned Voice Warning Strip */}
+            {!isSynthesizing && synthesisVoiceWarnings.length > 0 && (
+              <div className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-950 space-y-1">
+                <div className="font-bold flex items-center gap-1.5 text-amber-900">
+                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>Внимание по выбранным голосам (потребуется подтверждение перед запуском):</span>
+                </div>
+                <ul className="list-disc pl-5 space-y-0.5 text-[11.5px]">
+                  {synthesisVoiceWarnings.map((w, idx) => (
+                    <li key={idx}>{w}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             {/* Add turn button & Synthesize action + Quota Forecast (Раздел 2.8) */}
             <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-3 flex-wrap">
               <button
@@ -4764,6 +4841,53 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 className="btn-pill btn-solid text-xs px-4 py-2 bg-[#C4552D] hover:bg-[#A6421E] text-white border-none cursor-pointer"
               >
                 Да, заменить таблицу
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Custom In-App Confirmation Modal for Voice Gender Mismatch or Cloned Voice Before Synthesis */}
+      {showVoiceWarningModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4">
+          <div className="w-full max-w-lg rounded-2xl bg-white border border-[rgba(22,21,17,0.18)] shadow-2xl p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center shrink-0">
+                <AlertCircle className="w-5 h-5" />
+              </div>
+              <div className="space-y-2">
+                <h3 className="text-sm font-bold text-[#161511]">
+                  Проверьте выбранные голоса перед озвучкой
+                </h3>
+                <ul className="list-disc pl-4 space-y-1 text-xs text-[#5D594E] leading-relaxed">
+                  {synthesisVoiceWarnings.map((warn, idx) => (
+                    <li key={idx} className="text-[#161511]">
+                      {warn}
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-[11px] text-[#5D594E]">
+                  Рекомендуем выбрать встроенные голоса, соответствующие полу каждого спикера в Шаге 02.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setShowVoiceWarningModal(false)}
+                className="btn-pill btn-ghost text-xs px-4 py-2 cursor-pointer"
+              >
+                Отмена (изменить голоса)
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowVoiceWarningModal(false);
+                  handleSynthesizeDialogue(pendingSynthResumeFlag, true);
+                }}
+                className="btn-pill btn-solid text-xs px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white border-none cursor-pointer"
+              >
+                Продолжить озвучку
               </button>
             </div>
           </div>

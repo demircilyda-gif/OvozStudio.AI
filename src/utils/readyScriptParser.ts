@@ -227,6 +227,7 @@ function parseSrtTimecodeRange(raw: string): {
 
 /**
  * Parse "Спикеры: Азиз (М), Вероника (Ж)" header line.
+ * Takes ONLY the text before the first "|" (e.g. ignores "| Всего реплик: 79 (...)").
  */
 function parseSpeakersHeaderLine(
   lineText: string,
@@ -237,7 +238,8 @@ function parseSpeakersHeaderLine(
   if (!match) return null;
 
   const map = new Map<string, ParsedSpeakerInfo>();
-  const rawEntries = match[1]
+  const speakersPart = match[1].split('|')[0].trim();
+  const rawEntries = speakersPart
     .split(/[,;]+/)
     .map((s) => s.trim())
     .filter(Boolean);
@@ -1521,3 +1523,147 @@ export function exportTurnsToCsv(
 
   return rows.join('\n');
 }
+
+export interface VoiceProfileLike {
+  id: string;
+  voiceId?: string;
+  name?: string;
+  gender?: string;
+  baseVoice?: string;
+  isReplicatedVoice?: boolean;
+  isUserCustomVoice?: boolean;
+  category?: string;
+}
+
+/**
+ * Detect whether a voice profile is a cloned / custom voice (non-built-in).
+ */
+export function isClonedVoiceProfile(voice: VoiceProfileLike | null | undefined): boolean {
+  if (!voice) return false;
+  const id = String(voice.voiceId || voice.id || '').toLowerCase();
+  return (
+    Boolean(voice.isReplicatedVoice || voice.isUserCustomVoice) ||
+    id === 'voice_17raj9ewke3g' ||
+    id === 'user-replicated' ||
+    id === 'shohrux' ||
+    id === 'shokhrukh' ||
+    id.startsWith('voice_')
+  );
+}
+
+/**
+ * Determine effective gender ('female' | 'male') of a voice profile.
+ */
+export function getVoiceProfileGender(voice: VoiceProfileLike | null | undefined): 'female' | 'male' {
+  if (!voice) return 'male';
+  if (voice.gender === 'female') return 'female';
+  if (voice.gender === 'male') return 'male';
+
+  const bv = String(voice.baseVoice || '').toLowerCase();
+  const femalePrebuilt = new Set([
+    'kore',
+    'aoede',
+    'zephyr',
+    'leda',
+    'autonoe',
+    'callirrhoe',
+    'despina',
+    'erinome',
+    'gacrux',
+    'laomedeia',
+    'pulcherrima',
+    'sulafat',
+    'vindemiatrix',
+  ]);
+  const malePrebuilt = new Set([
+    'charon',
+    'puck',
+    'fenrir',
+    'orus',
+    'achird',
+    'sadachbia',
+    'algenib',
+    'algieba',
+    'alnilam',
+    'enceladus',
+    'iapetus',
+    'rasalgethi',
+    'sadaltager',
+    'schedar',
+    'umbriel',
+    'zubenelgenubi',
+  ]);
+  if (femalePrebuilt.has(bv)) return 'female';
+  if (malePrebuilt.has(bv)) return 'male';
+
+  if (
+    /aziza|madina|dilnoza|zarina|nodira|malika|sevara|shahnoza|rayhon|gulzoda|umida|nigora|feruza|ayol/i.test(
+      `${voice.name || ''} ${voice.id || ''}`
+    )
+  ) {
+    return 'female';
+  }
+  return 'male';
+}
+
+/**
+ * Pick a built-in (strictly non-cloned) voice matching the speaker's gender.
+ * Avoids ids listed in excludeIds when another built-in voice of the same gender exists.
+ */
+export function pickBuiltInVoiceForGender<T extends VoiceProfileLike>(
+  voices: T[],
+  gender: 'female' | 'male',
+  excludeIds: string[] = []
+): T | undefined {
+  const excludeSet = new Set(excludeIds);
+  const builtInMatching = voices.filter(
+    (v) =>
+      !isClonedVoiceProfile(v) &&
+      v.category !== 'cartoon' &&
+      getVoiceProfileGender(v) === gender
+  );
+  if (builtInMatching.length === 0) return undefined;
+  return builtInMatching.find((v) => !excludeSet.has(v.id)) || builtInMatching[0];
+}
+
+export interface SynthesisVoiceCheckSpeaker {
+  speakerId: 'HOST_1' | 'HOST_2';
+  name: string;
+  gender: 'female' | 'male';
+  voice: VoiceProfileLike | null | undefined;
+}
+
+/**
+ * Returns human-readable Russian warnings before synthesis if:
+ * 1) a speaker's selected voice gender does not match the speaker's declared gender, or
+ * 2) a cloned voice is selected.
+ */
+export function checkSynthesisVoiceWarnings(
+  speakers: SynthesisVoiceCheckSpeaker[],
+  turns: Array<{ speakerId?: string }> = []
+): string[] {
+  const activeSpeakerIds =
+    turns.length > 0 ? new Set(turns.map((t) => t.speakerId || 'HOST_1')) : null;
+
+  const warnings: string[] = [];
+  for (const sp of speakers) {
+    if (activeSpeakerIds && !activeSpeakerIds.has(sp.speakerId)) continue;
+    if (!sp.voice) continue;
+
+    const voiceLabel = sp.voice.name || sp.voice.id;
+    const voiceGender = getVoiceProfileGender(sp.voice);
+
+    if (voiceGender !== sp.gender) {
+      warnings.push(
+        `Спикер «${sp.name}» (${sp.gender === 'female' ? 'Ж' : 'М'}): выбран голос «${voiceLabel}» противоположного пола (${voiceGender === 'female' ? 'Ж' : 'М'}).`
+      );
+    }
+    if (isClonedVoiceProfile(sp.voice)) {
+      warnings.push(
+        `Спикер «${sp.name}»: выбран клонированный голос («${voiceLabel}»). Озвучка пойдёт в раздельном режиме с повышенным расходом вызовов TTS.`
+      );
+    }
+  }
+  return warnings;
+}
+
