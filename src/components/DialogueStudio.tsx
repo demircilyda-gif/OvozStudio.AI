@@ -68,6 +68,7 @@ import {
   ParsedSpeakerInfo,
 } from '../utils/readyScriptParser';
 import { planDialogueMacroBlocks } from '../utils/dialogueMacroBlocks';
+import { stitchDialogueTurnsClient, decodeBase64ToBytes } from '../utils/clientMasterStitcher';
 import { useAuth } from '../context/AuthContext';
 import { YUGAY_BURKHANOV_TURNS, YUGAY_BURKHANOV_METADATA } from '../data/yugayBurkhanovPreset';
 
@@ -541,10 +542,31 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
   // Synthesis results
   const [masterAudioBase64, setMasterAudioBase64] = useState<string | null>(null);
+  const [masterAudioBlobUrl, setMasterAudioBlobUrl] = useState<string | null>(null);
   const [totalDuration, setTotalDuration] = useState<number>(0);
   const [synthesizedTurns, setSynthesizedTurns] = useState<DialogueTurn[]>([]);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [activeTurnIndex, setActiveTurnIndex] = useState<number>(-1);
+
+  // Convert masterAudioBase64 to an Object URL so 10-15 min (>25 MB) WAV files play smoothly without data: URI limits
+  useEffect(() => {
+    if (!masterAudioBase64) {
+      setMasterAudioBlobUrl(null);
+      return;
+    }
+    let url: string | null = null;
+    try {
+      const bytes = decodeBase64ToBytes(masterAudioBase64);
+      const blob = new Blob([bytes], { type: 'audio/wav' });
+      url = URL.createObjectURL(blob);
+      setMasterAudioBlobUrl(url);
+    } catch {
+      setMasterAudioBlobUrl(`data:audio/wav;base64,${masterAudioBase64}`);
+    }
+    return () => {
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [masterAudioBase64]);
 
   // Daily Gemini TTS quota (100 RPD) & pause/resume state for cloned voice 429
   const [ttsQuota, setTtsQuota] = useState<{
@@ -1879,27 +1901,18 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           playSingleTurn(turn.id, data.turn.audioBase64);
         }
 
-        // If all turns already have audioBase64 and masterAudioBase64 wasn't returned yet, re-stitch master audio
+        // If all turns already have audioBase64 and masterAudioBase64 wasn't returned yet, re-stitch locally in browser
         const allHaveAudio = updatedSynthesized.every((st) => Boolean(st.audioBase64));
         if (allHaveAudio && !data.masterAudioBase64) {
-          const stitchRes = await authFetch('/api/podcast/stitch-dialogue-turns', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              turns: updatedSynthesized,
-              masterAudioMode: effectiveMode,
-              totalVideoDurationSec: effectiveVideoDurationSec,
-            }),
+          const stitchData = stitchDialogueTurnsClient({
+            turns: updatedSynthesized,
+            masterAudioMode: effectiveMode,
+            totalVideoDurationSec: effectiveVideoDurationSec,
           });
-          if (stitchRes.ok) {
-            const stitchData = await stitchRes.json();
-            setMasterAudioBase64(stitchData.masterAudioBase64);
-            setTotalDuration(stitchData.totalDurationSeconds || 0);
-            if (Array.isArray(stitchData.turns)) {
-              setSynthesizedTurns(stitchData.turns);
-            }
-            if (stitchData.srtSubtitles) setSrtSubtitles(stitchData.srtSubtitles);
-          }
+          setMasterAudioBase64(stitchData.masterAudioBase64);
+          setTotalDuration(stitchData.totalDurationSeconds || 0);
+          setSynthesizedTurns(stitchData.turns);
+          if (stitchData.srtSubtitles) setSrtSubtitles(stitchData.srtSubtitles);
         }
       }
     } catch (e: any) {
@@ -1927,15 +1940,17 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           endSec: Number(t.endSec),
         }));
 
+      // Send raw binary WAV via multipart FormData to avoid +33% base64 JSON bloat against 32 MB HTTP limits
+      const wavBytes = decodeBase64ToBytes(masterAudioBase64);
+      const formData = new FormData();
+      formData.append('audio', new Blob([wavBytes], { type: 'audio/wav' }), 'master-dub.wav');
+      formData.append('fileId', uploadedVideoFileId);
+      formData.append('duckingMode', duckingMode);
+      formData.append('speechIntervals', JSON.stringify(speechIntervals));
+
       const res = await authFetch('/api/podcast/mux-dubbed-video', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fileId: uploadedVideoFileId,
-          masterAudioBase64,
-          duckingMode,
-          speechIntervals,
-        }),
+        body: formData,
       });
 
       if (!res.ok) {
@@ -2342,21 +2357,14 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           studioSourceMode === 'verbatim' || turns.some((t) => typeof t.startSec === 'number')
             ? 'time_aligned'
             : masterAudioMode;
-        const stitchRes = await authFetch('/api/podcast/stitch-dialogue-turns', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            turns: synthesizedTurns,
-            masterAudioMode: effectiveStopMode,
-            totalVideoDurationSec: effectiveStopDurationSec,
-          }),
+        const stitchData = stitchDialogueTurnsClient({
+          turns: synthesizedTurns,
+          masterAudioMode: effectiveStopMode,
+          totalVideoDurationSec: effectiveStopDurationSec,
         });
-        if (stitchRes.ok) {
-          const stitchData = await stitchRes.json();
-          setMasterAudioBase64(stitchData.masterAudioBase64);
-          setTotalDuration(stitchData.totalDurationSeconds || 0);
-          if (stitchData.srtSubtitles) setSrtSubtitles(stitchData.srtSubtitles);
-        }
+        setMasterAudioBase64(stitchData.masterAudioBase64);
+        setTotalDuration(stitchData.totalDurationSeconds || 0);
+        if (stitchData.srtSubtitles) setSrtSubtitles(stitchData.srtSubtitles);
       } catch (err) {
         console.warn('Stitch on stop error:', err);
       }
@@ -2720,61 +2728,51 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           statusText: `Сборка всех ${accumulatedTurns.length} реплик строго по таймкодам...`,
         });
 
-        const stitchRes = await authFetch('/api/podcast/stitch-dialogue-turns', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            turns: accumulatedTurns,
-            masterAudioMode: effectiveMode,
-            totalVideoDurationSec: effectiveVideoDurationSec,
-          }),
+        // Yield one frame so the 98% stitching indicator renders before synchronous local WAV assembly
+        await new Promise((r) => setTimeout(r, 0));
+
+        const stitchData = stitchDialogueTurnsClient({
+          turns: accumulatedTurns,
+          masterAudioMode: effectiveMode,
+          totalVideoDurationSec: effectiveVideoDurationSec,
         });
 
-        if (stitchRes.ok) {
-          const stitchData = await stitchRes.json();
-          setMasterAudioBase64(stitchData.masterAudioBase64);
-          setTotalDuration(stitchData.totalDurationSeconds || 0);
-          const finalTurns: DialogueTurn[] = Array.isArray(stitchData.turns)
-            ? stitchData.turns
-            : accumulatedTurns;
-          setSynthesizedTurns(finalTurns);
-          setTurns((prev) =>
-            prev.map((pt, i) => {
-              const matched = finalTurns.find((ft) => ft.id === pt.id) || finalTurns[i];
-              return matched
-                ? {
-                    ...pt,
-                    text: matched.text || pt.text,
-                    fitStepApplied: matched.fitStepApplied,
-                    originalDurationSec: matched.originalDurationSec,
-                    dubbedDurationSec: matched.dubbedDurationSec,
-                    atempoApplied: matched.atempoApplied,
-                    rephraseAttempts: matched.rephraseAttempts,
-                    syncStatus: matched.syncStatus,
-                  }
-                : pt;
-            })
-          );
-          if (stitchData.srtSubtitles) setSrtSubtitles(stitchData.srtSubtitles);
-          setIsPlaying(false);
-          setActiveTurnIndex(-1);
+        setMasterAudioBase64(stitchData.masterAudioBase64);
+        setTotalDuration(stitchData.totalDurationSeconds || 0);
+        const finalTurns: DialogueTurn[] = Array.isArray(stitchData.turns)
+          ? stitchData.turns
+          : accumulatedTurns;
+        setSynthesizedTurns(finalTurns);
+        setTurns((prev) =>
+          prev.map((pt, i) => {
+            const matched = finalTurns.find((ft) => ft.id === pt.id) || finalTurns[i];
+            return matched
+              ? {
+                  ...pt,
+                  text: matched.text || pt.text,
+                  fitStepApplied: matched.fitStepApplied,
+                  originalDurationSec: matched.originalDurationSec,
+                  dubbedDurationSec: matched.dubbedDurationSec,
+                  atempoApplied: matched.atempoApplied,
+                  rephraseAttempts: matched.rephraseAttempts,
+                  syncStatus: matched.syncStatus,
+                }
+              : pt;
+          })
+        );
+        if (stitchData.srtSubtitles) setSrtSubtitles(stitchData.srtSubtitles);
+        setIsPlaying(false);
+        setActiveTurnIndex(-1);
 
-          const okCount = finalTurns.filter((t) => t.syncStatus === 'ok').length;
-          const adjCount = finalTurns.filter((t) => t.syncStatus === 'adjusted').length;
-          const ovfCount = finalTurns.filter((t) => t.syncStatus === 'overflow').length;
-          const provLabel = Array.from(providersUsed).join('+') || 'google';
-          setDialogueNotice(
-            `Озвучка готова: ${totalTtsCallsUsed} вызовов TTS (${provLabel}) · ok: ${okCount}, ускорено: ${adjCount}, overflow: ${ovfCount}`
-          );
+        const okCount = finalTurns.filter((t) => t.syncStatus === 'ok').length;
+        const adjCount = finalTurns.filter((t) => t.syncStatus === 'adjusted').length;
+        const ovfCount = finalTurns.filter((t) => t.syncStatus === 'overflow').length;
+        const provLabel = Array.from(providersUsed).join('+') || 'google';
+        setDialogueNotice(
+          `Озвучка готова: ${totalTtsCallsUsed} вызовов TTS (${provLabel}) · ok: ${okCount}, ускорено: ${adjCount}, overflow: ${ovfCount}`
+        );
 
-          if (typeof stitchData.creditsRemaining === 'number') {
-            syncCredits(stitchData.creditsRemaining);
-          }
-          await logGeneration('podcast', topic || '2 Ovozli Dublyaj', 1);
-        } else {
-          const errData = await stitchRes.json().catch(() => ({}));
-          throw new Error(errData.error || 'Ошибка склейки реплик в мастер-трек');
-        }
+        await logGeneration('podcast', topic || '2 Ovozli Dublyaj', 1);
       }
     } catch (e: any) {
       if (e.name !== 'AbortError') {
@@ -4465,7 +4463,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
               <div className="space-y-4">
                 <audio
                   ref={audioRef}
-                  src={`data:audio/wav;base64,${masterAudioBase64}`}
+                  src={masterAudioBlobUrl || undefined}
                   onTimeUpdate={handleTimeUpdate}
                   onEnded={() => {
                     setIsPlaying(false);

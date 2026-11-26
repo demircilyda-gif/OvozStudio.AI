@@ -6343,12 +6343,19 @@ app.post("/api/podcast/stitch-dialogue-turns", requireCreditBalance(1), async (r
       } catch {}
     }
 
+    // Strip redundant per-turn audioBase64 from stitch response so large scripts stay under HTTP body limits
+    const lightTurns = updatedTurnsWithPlacement.map((t: any) => {
+      if (!t || typeof t !== "object") return t;
+      const { audioBase64: _droppedAudio, ...rest } = t;
+      return rest;
+    });
+
     res.json({
       status: "success",
       masterAudioBase64: masterWavBuffer.toString("base64"),
       totalDurationSeconds,
       totalVideoDurationSec: totalDurationSeconds,
-      turns: updatedTurnsWithPlacement,
+      turns: lightTurns,
       srtSubtitles,
       totalTurnsStitched: turns.length,
       creditsRemaining,
@@ -6951,20 +6958,55 @@ app.get("/api/podcast/dubbing-job/:jobId", (req, res) => {
   });
 });
 
+const uploadMuxAudioMiddleware = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, "/tmp"),
+    filename: (_req, _file, cb) =>
+      cb(null, `dubaudio_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.wav`),
+  }),
+  limits: {
+    fileSize: 32 * 1024 * 1024,
+  },
+});
+
+const optionalMuxAudioUpload: express.RequestHandler = (req, res, next) => {
+  if (req.is("multipart/form-data")) {
+    return uploadMuxAudioMiddleware.single("audio")(req, res, next);
+  }
+  return next();
+};
+
 // 4. Mux Dubbed Uzbek WAV Track with Uploaded Video (up to 15 min) via /usr/bin/ffmpeg
-app.post("/api/podcast/mux-dubbed-video", async (req, res) => {
+app.post("/api/podcast/mux-dubbed-video", optionalMuxAudioUpload, async (req, res) => {
   req.setTimeout(300000);
   res.setTimeout(300000);
+  const uploadedAudioPath = (req as any).file?.path as string | undefined;
   try {
+    const body = req.body || {};
     const {
       fileId,
       videoSessionId,
       masterAudioBase64,
-      turns = [],
-      speechIntervals = [],
       duckingMode,
       backgroundMode = "smart_ducking",
-    } = req.body;
+    } = body;
+
+    let turns = body.turns || [];
+    let speechIntervals = body.speechIntervals || [];
+    if (typeof speechIntervals === "string") {
+      try {
+        speechIntervals = JSON.parse(speechIntervals);
+      } catch {
+        speechIntervals = [];
+      }
+    }
+    if (typeof turns === "string") {
+      try {
+        turns = JSON.parse(turns);
+      } catch {
+        turns = [];
+      }
+    }
 
     const resolvedSessionId = videoSessionId || fileId;
     if (!resolvedSessionId || !uploadedVideoSessions.has(resolvedSessionId)) {
@@ -6972,7 +7014,7 @@ app.post("/api/podcast/mux-dubbed-video", async (req, res) => {
         error: "Видеофайл сессии не найден на сервере. Пожалуйста, выберите видео заново.",
       });
     }
-    if (!masterAudioBase64) {
+    if (!uploadedAudioPath && !masterAudioBase64) {
       return res.status(400).json({
         error: "Сначала сгенерируйте узбекскую аудиодорожку дубляжа.",
       });
@@ -6985,7 +7027,9 @@ app.post("/api/podcast/mux-dubbed-video", async (req, res) => {
       });
     }
 
-    const dubbedWavBuffer = Buffer.from(masterAudioBase64, "base64");
+    const dubbedWavBuffer = uploadedAudioPath
+      ? await fs.promises.readFile(uploadedAudioPath)
+      : Buffer.from(masterAudioBase64, "base64");
     const rawIntervals =
       Array.isArray(speechIntervals) && speechIntervals.length > 0
         ? speechIntervals
@@ -7029,6 +7073,10 @@ app.post("/api/podcast/mux-dubbed-video", async (req, res) => {
     res.status(500).json({
       error: err?.message || "Ошибка при сведении узбекского дубляжа с видео через ffmpeg.",
     });
+  } finally {
+    if (uploadedAudioPath) {
+      fs.promises.unlink(uploadedAudioPath).catch(() => {});
+    }
   }
 });
 
