@@ -524,8 +524,8 @@ export function sliceBatchPcmByVad(
       const s0 = Math.max(0, bounds[i]);
       const s1 = Math.min(totalSamples, bounds[i + 1]);
       const rawSlice = pcm.subarray(s0 * 2, s1 * 2);
-      const trimmed = trimSilenceEdgesPcm(rawSlice, 20);
-      const clean = applyMicroEdgeFades(trimmed, 6);
+      const trimmed = trimSilenceEdgesPcm(rawSlice, 5);
+      const clean = applyMicroEdgeFades(trimmed, 5);
       clips.push({
         index: i,
         pcm: clean,
@@ -677,12 +677,95 @@ export interface TranscribeAlignedResult {
   missingIndices: number[];
   rawSegmentsCount: number;
   wallTimeMs: number;
+  heardTranscript?: string;
   error?: string;
+}
+
+export function isFakeDubbingTtsEnabled(): boolean {
+  return process.env.DUBBING_FAKE_TTS === "1";
+}
+
+let fakeTranscribeQaOverride:
+  | ((expectedTurns: Array<{ index: number; speaker: string; text: string }>) => string | null)
+  | null = null;
+
+export function setFakeTranscribeQaOverrideForTesting(
+  fn: ((expectedTurns: Array<{ index: number; speaker: string; text: string }>) => string | null) | null
+) {
+  fakeTranscribeQaOverride = fn;
+}
+
+/**
+ * Генерирует чистый синтетический тон 24kHz 16-bit mono PCM заданной длительности
+ * (используется в тестовом режиме DUBBING_FAKE_TTS=1 — 0 реальных вызовов API).
+ */
+export function generateSyntheticTurnPcm(
+  durationSec: number,
+  freqHz: number = 340,
+  amplitude: number = 9000
+): Buffer {
+  const safeDur = Math.max(0.25, Number.isFinite(durationSec) ? durationSec : 1.0);
+  const totalSamples = Math.max(480, Math.round(safeDur * PCM_SAMPLE_RATE));
+  const pcm = Buffer.alloc(totalSamples * 2);
+  const omega = (2 * Math.PI * freqHz) / PCM_SAMPLE_RATE;
+  for (let i = 0; i < totalSamples; i++) {
+    const sample = Math.round(Math.sin(omega * i) * amplitude);
+    pcm.writeInt16LE(sample, i * 2);
+  }
+  return applyMicroEdgeFades(pcm, 10);
+}
+
+/**
+ * Собирает синтетический блочный PCM из списка реплик с длительностью (syllables / 4.8) с
+ * и чистыми паузами 450 мс между репликами, чтобы VAD-нарезка и QA работали 1:1.
+ */
+export function generateSyntheticBlockPcm(
+  turns: Array<{ syllables: number; speakerKey?: string; overrideDurationSec?: number }>,
+  interTurnSilenceSec: number = 0.45
+): {
+  pcm: Buffer;
+  boundaries: Array<{ startSec: number; endSec: number; durationSec: number }>;
+} {
+  const parts: Buffer[] = [];
+  const boundaries: Array<{ startSec: number; endSec: number; durationSec: number }> = [];
+  const silenceBuf = Buffer.alloc(Math.round(interTurnSilenceSec * PCM_SAMPLE_RATE) * 2, 0);
+  const speakerFreqMap = new Map<string, number>();
+  const freqPalette = [320, 440, 380, 510];
+
+  let cursorSec = 0;
+  for (let i = 0; i < turns.length; i++) {
+    const t = turns[i];
+    const spKey = t.speakerKey || "default";
+    let freq = speakerFreqMap.get(spKey);
+    if (!freq) {
+      freq = freqPalette[speakerFreqMap.size % freqPalette.length];
+      speakerFreqMap.set(spKey, freq);
+    }
+    const dur =
+      typeof t.overrideDurationSec === "number" && t.overrideDurationSec > 0
+        ? t.overrideDurationSec
+        : Math.max(0.35, Math.max(1, t.syllables) / 4.8);
+    const tonePcm = generateSyntheticTurnPcm(dur, freq);
+    const actualDur = tonePcm.length / PCM_BYTES_PER_SEC;
+    boundaries.push({
+      startSec: cursorSec,
+      endSec: cursorSec + actualDur,
+      durationSec: actualDur,
+    });
+    parts.push(tonePcm);
+    cursorSec += actualDur;
+    if (i + 1 < turns.length) {
+      parts.push(silenceBuf);
+      cursorSec += interTurnSilenceSec;
+    }
+  }
+  return { pcm: Buffer.concat(parts), boundaries };
 }
 
 /**
  * Часть 2.5: Точное выравнивание границ реплик в длинном блочном аудио через `gemini-3.5-transcribe`
  * с уточнением каждой точки реза по локальному минимуму энергии PCM (±220 мс), чтобы слово никогда не резалось.
+ * Гарантирует строгий монотонный порядок клипов без перекрытий (startMs >= prevEndMs).
  * Тратит 0 вызовов TTS!
  */
 export async function alignBatchAudioViaTranscribe(
@@ -706,6 +789,32 @@ export async function alignBatchAudioViaTranscribe(
     };
   }
 
+  // Тестовый режим DUBBING_FAKE_TTS=1: 0 реальных вызовов API — выравниваем по тишине/пропорциям
+  if (isFakeDubbingTtsEnabled()) {
+    const vad = sliceBatchPcmByVad(
+      pcm,
+      expectedTurns.map((t) => t.text),
+      { minSilenceMs: 200 }
+    );
+    if (vad.clips.length === expectedTurns.length) {
+      return {
+        success: true,
+        clips: vad.clips.map((c) => ({ ...c, method: "transcribe_aligned" })),
+        missingIndices: [],
+        rawSegmentsCount: vad.clips.length,
+        wallTimeMs: Date.now() - t0,
+      };
+    }
+    return {
+      success: false,
+      clips: expectedTurns.map(() => null),
+      missingIndices: expectedTurns.map((_, i) => i),
+      rawSegmentsCount: 0,
+      wallTimeMs: Date.now() - t0,
+      error: "Fake mode align fallback",
+    };
+  }
+
   try {
     const wavBuf = buildWav24k(pcm);
     const turnListText = expectedTurns
@@ -721,16 +830,18 @@ export async function alignBatchAudioViaTranscribe(
     const prompt = `Listen to this ${totalDurationSec.toFixed(2)}-second Uzbek audio recording and output ONLY timestamped alignment lines for each of the ${expectedTurns.length} scripted lines below in order.
 
 STRICT OUTPUT FORMAT (one line per turn, plain text, no markdown, no extra text):
-INDEX | START_SEC | END_SEC | FOUND
+INDEX | START_SEC | END_SEC | FOUND | SPOKEN_TEXT
 Example:
-0 | 0.00 | 3.45 | true
-1 | 3.60 | 6.90 | true
+0 | 0.00 | 3.45 | true | Assalomu alaykum hammaga
+1 | 3.60 | 6.90 | true | Bugun yangi mashinani sinab ko'ramiz
 
 RULES:
 - Every index from 0 to ${expectedTurns.length - 1} must appear once in ascending order.
 - START_SEC and END_SEC are decimal seconds within [0.00, ${totalDurationSec.toFixed(2)}].
 - Never cut mid-word: cover the complete spoken utterance for each line.
-- If a line was skipped in the audio, write: INDEX | 0 | 0 | false
+- Timestamps MUST be strictly non-overlapping and ascending: next START_SEC >= previous END_SEC.
+- SPOKEN_TEXT must transcribe verbatim what was ACTUALLY spoken in that audio interval (including any repeated words or English words if actually spoken).
+- If a line was skipped in the audio, write: INDEX | 0 | 0 | false |
 
 SCRIPTED LINES:
 ${turnListText}`;
@@ -754,22 +865,23 @@ ${turnListText}`;
     });
 
     const rawText = String(response.text || "").trim();
-    const segMap = new Map<number, { startSec: number; endSec: number; found: boolean }>();
+    const segMap = new Map<number, { startSec: number; endSec: number; found: boolean; spokenText?: string }>();
 
-    // Парсим формат "0 | 0.00 | 3.45 | true" или "[0] 0.00-3.45"
+    // Парсим формат "0 | 0.00 | 3.45 | true | spoken text" или "[0] 0.00-3.45"
     for (const line of rawText.split(/\r?\n/)) {
       const cleanLine = line.trim();
       if (!cleanLine) continue;
       const pipeMatch = cleanLine.match(
-        /^(\d+)\s*\|\s*(\d+(?:[.,]\d+)?)\s*\|\s*(\d+(?:[.,]\d+)?)(?:\s*\|\s*(true|false))?/i
+        /^(\d+)\s*\|\s*(\d+(?:[.,]\d+)?)\s*\|\s*(\d+(?:[.,]\d+)?)(?:\s*\|\s*(true|false))?(?:\s*\|\s*(.*))?$/i
       );
       if (pipeMatch) {
         const idx = parseInt(pipeMatch[1], 10);
         const s0 = parseFloat(pipeMatch[2].replace(",", "."));
         const s1 = parseFloat(pipeMatch[3].replace(",", "."));
         const found = pipeMatch[4] ? pipeMatch[4].toLowerCase() !== "false" : s1 > s0;
+        const spokenText = pipeMatch[5] ? pipeMatch[5].trim() : "";
         if (!isNaN(idx) && !isNaN(s0) && !isNaN(s1)) {
-          segMap.set(idx, { startSec: s0, endSec: s1, found });
+          segMap.set(idx, { startSec: s0, endSec: s1, found, spokenText });
         }
         continue;
       }
@@ -788,6 +900,7 @@ ${turnListText}`;
 
     const clips: Array<SlicedTurnClip | null> = [];
     const missingIndices: number[] = [];
+    let prevEndSample = 0;
 
     for (let i = 0; i < expectedTurns.length; i++) {
       const seg = segMap.get(i);
@@ -807,8 +920,13 @@ ${turnListText}`;
       const safeEndSec = Math.max(safeStartSec + 0.12, Math.min(totalDurationSec, seg.endSec));
 
       // Уточняем точки реза по локальному минимуму энергии PCM (±200 мс), чтобы не обрезать начало/конец слова
-      const startSample = refineCutSampleToEnergyMinimum(pcm, safeStartSec, 200);
+      let startSample = refineCutSampleToEnergyMinimum(pcm, safeStartSec, 200);
       const endSample = refineCutSampleToEnergyMinimum(pcm, safeEndSec, 200);
+
+      // Строгая защита от перекрытий и нарушения порядка между клипами
+      if (startSample < prevEndSample) {
+        startSample = prevEndSample;
+      }
 
       if (endSample <= startSample + Math.round(PCM_SAMPLE_RATE * 0.12)) {
         clips.push(null);
@@ -826,7 +944,15 @@ ${turnListText}`;
         durationSec: Math.round((clean.length / PCM_BYTES_PER_SEC) * 100) / 100,
         method: "transcribe_aligned",
       });
+      prevEndSample = endSample;
     }
+
+    const heardParts: string[] = [];
+    for (let i = 0; i < expectedTurns.length; i++) {
+      const s = segMap.get(i);
+      if (s?.spokenText) heardParts.push(s.spokenText);
+    }
+    const heardTranscript = heardParts.join(" ").trim() || undefined;
 
     return {
       success: missingIndices.length <= Math.min(3, Math.floor(expectedTurns.length * 0.2)),
@@ -834,6 +960,7 @@ ${turnListText}`;
       missingIndices,
       rawSegmentsCount: segMap.size,
       wallTimeMs: Date.now() - t0,
+      heardTranscript,
     };
   } catch (err: any) {
     return {
@@ -846,3 +973,63 @@ ${turnListText}`;
     };
   }
 }
+
+/**
+ * Этап 2: 1 вызов gemini-3.5-transcribe (простой текст) для QA-проверки подблока
+ * (повторы, пропуски, проговорённые "short pause" или посторонние английские слова).
+ * В режиме DUBBING_FAKE_TTS=1 возвращает ожидаемый текст (0 реальных вызовов API).
+ */
+export async function transcribePlainTextForQa(
+  ai: GoogleGenAI,
+  pcm: Buffer,
+  expectedTurns: Array<{ index: number; speaker: string; text: string }>,
+  transcribeModel: string = "gemini-3.5-transcribe"
+): Promise<{ text: string; usedApiCall: boolean; error?: string }> {
+  if (isFakeDubbingTtsEnabled()) {
+    if (fakeTranscribeQaOverride) {
+      const injected = fakeTranscribeQaOverride(expectedTurns);
+      if (typeof injected === "string") {
+        return { text: injected, usedApiCall: false };
+      }
+    }
+    const expectedJoined = expectedTurns
+      .map((t) => String(t.text || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim())
+      .filter(Boolean)
+      .join(" ");
+    return { text: expectedJoined, usedApiCall: false };
+  }
+
+  try {
+    const wavBuf = buildWav24k(pcm);
+    const response = await ai.models.generateContent({
+      model: transcribeModel,
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              inlineData: {
+                mimeType: "audio/wav",
+                data: wavBuf.toString("base64"),
+              },
+            },
+            {
+              text: "Transcribe every spoken word in this Uzbek audio verbatim as plain text. Preserve any repeated words, stutters, or English words if they are actually spoken in the audio. Output ONLY the spoken transcript text with no timestamps, no speaker names, and no commentary.",
+            },
+          ],
+        },
+      ],
+    });
+    return {
+      text: String(response.text || "").trim(),
+      usedApiCall: true,
+    };
+  } catch (err: any) {
+    return {
+      text: "",
+      usedApiCall: true,
+      error: String(err?.message || err),
+    };
+  }
+}
+

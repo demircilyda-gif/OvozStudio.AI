@@ -172,6 +172,33 @@ function buildMono16BitWav(samples: Int16Array, sampleRate: number): Uint8Array<
   return wav;
 }
 
+export const MASTER_FADE_OUT_MS = 120;
+
+/**
+ * Applies a linear fade-out over the last `fadeMs` milliseconds of 16-bit mono PCM samples,
+ * matching server-side `applyFadeOutOnLastPausePcm` in verbatimStoryboardService.ts.
+ */
+export function applyFadeOutInt16(
+  samples: Int16Array,
+  fadeMs = MASTER_FADE_OUT_MS,
+  sampleRate = 24000
+): Int16Array<ArrayBuffer> {
+  const out = new Int16Array(new ArrayBuffer(samples.length * 2));
+  out.set(samples);
+  const totalSamples = out.length;
+  const fadeSamples = Math.min(totalSamples, Math.max(1, Math.round((sampleRate * fadeMs) / 1000)));
+  if (fadeSamples <= 1 || totalSamples === 0) return out;
+
+  const startFadeSample = totalSamples - fadeSamples;
+  for (let i = 0; i < fadeSamples; i++) {
+    const sampleIdx = startFadeSample + i;
+    const gain = 1 - i / fadeSamples;
+    const scaled = Math.round(out[sampleIdx] * gain);
+    out[sampleIdx] = scaled > 32767 ? 32767 : scaled < -32768 ? -32768 : scaled;
+  }
+  return out;
+}
+
 function formatSrtTimestamp(sec: number): string {
   const safe = Math.max(0, Number.isFinite(sec) ? sec : 0);
   const h = Math.floor(safe / 3600);
@@ -238,16 +265,24 @@ export function stitchDialogueTurnsClient(input: ClientStitchInput): ClientStitc
   let updatedTurns: DialogueTurn[] = [];
 
   if (isTimeAligned) {
-    const MAX_SHIFT_SEC = 0.3;
+    const MIN_GAP_BETWEEN_TURNS_SEC = 0.08;
+    const MAX_SHIFT_SEC = 1.2;
+    const SCENE_START_MAX_SHIFT_SEC = 0.1;
+
+    const getSceneKey = (t: DialogueTurn | undefined): string =>
+      String(t?.sceneTitle || t?.chapter || '').trim();
+
     const placements: Array<{
       startSec: number;
       endSec: number;
+      shiftedStartBySec: number;
       originalDurationSec: number;
       dubbedDurationSec: number;
       syncStatus: 'ok' | 'adjusted' | 'overflow';
+      needsShorten: boolean;
     }> = [];
 
-    let nextTurnShiftSec = 0;
+    let prevEffectiveEndSec = 0;
     let maxEndSec =
       typeof input.totalVideoDurationSec === 'number' && input.totalVideoDurationSec > 0
         ? input.totalVideoDurationSec
@@ -263,39 +298,69 @@ export function stitchDialogueTurnsClient(input: ClientStitchInput): ClientStitc
           : origStartSec + dubbedDurationSec;
       const originalDurationSec = Math.round((origEndSec - origStartSec) * 100) / 100;
 
-      const appliedShift = Math.min(MAX_SHIFT_SEC, Math.max(0, nextTurnShiftSec));
-      const effectiveStartSec = origStartSec + appliedShift;
+      // Stage 4: NEVER overlap speech on top of speech!
+      // Shift accumulates across tight turns and naturally drains on subsequent pauses.
+      const effectiveStartSec =
+        i === 0 ? origStartSec : Math.max(origStartSec, prevEffectiveEndSec + MIN_GAP_BETWEEN_TURNS_SEC);
+      const shiftSec = Math.max(0, Math.round((effectiveStartSec - origStartSec) * 1000) / 1000);
       const effectiveEndSec = effectiveStartSec + dubbedDurationSec;
 
+      const prevScene = i > 0 ? getSceneKey(decodedClips[i - 1].turn) : '';
+      const currScene = getSceneKey(turn);
+      const isSceneStart = i > 0 && Boolean(currScene && prevScene && currScene !== prevScene);
+
+      const nextTurn = i + 1 < decodedClips.length ? decodedClips[i + 1].turn : undefined;
       const nextOrigStartSec =
-        i + 1 < decodedClips.length && typeof decodedClips[i + 1].turn.startSec === 'number'
-          ? decodedClips[i + 1].turn.startSec!
+        nextTurn && typeof nextTurn.startSec === 'number'
+          ? nextTurn.startSec
           : Math.max(maxEndSec, origEndSec);
+      const nextScene = getSceneKey(nextTurn);
+      const nextIsSceneStart = Boolean(nextTurn && currScene && nextScene && currScene !== nextScene);
 
-      const overflowBeyondNext = effectiveEndSec - (nextOrigStartSec - 0.02);
-      if (i + 1 < decodedClips.length && overflowBeyondNext > 0) {
-        nextTurnShiftSec = Math.min(MAX_SHIFT_SEC, overflowBeyondNext);
-      } else {
-        nextTurnShiftSec = 0;
+      const pushIntoNextSec =
+        i + 1 < decodedClips.length
+          ? Math.max(0, effectiveEndSec + MIN_GAP_BETWEEN_TURNS_SEC - nextOrigStartSec)
+          : 0;
+
+      const exceedsMaxShiftHere = shiftSec > MAX_SHIFT_SEC + 1e-4;
+      const exceedsSceneStartHere = isSceneStart && shiftSec > SCENE_START_MAX_SHIFT_SEC + 1e-4;
+      const pushesNextBeyondLimit =
+        i + 1 < decodedClips.length &&
+        (pushIntoNextSec > MAX_SHIFT_SEC + 1e-4 ||
+          (nextIsSceneStart && pushIntoNextSec > SCENE_START_MAX_SHIFT_SEC + 1e-4));
+
+      const isOverflow =
+        exceedsMaxShiftHere ||
+        exceedsSceneStartHere ||
+        pushesNextBeyondLimit ||
+        turn.syncStatus === 'overflow';
+
+      let syncStatus: 'ok' | 'adjusted' | 'overflow' = 'ok';
+      if (isOverflow) {
+        syncStatus = 'overflow';
+      } else if (
+        shiftSec > 0.02 ||
+        (typeof turn.atempoApplied === 'number' && turn.atempoApplied > 1.01) ||
+        (typeof turn.rephraseAttempts === 'number' && turn.rephraseAttempts > 0) ||
+        turn.syncStatus === 'adjusted'
+      ) {
+        syncStatus = 'adjusted';
       }
 
-      const existingSync = turn.syncStatus;
-      let syncStatus: 'ok' | 'adjusted' | 'overflow' = existingSync || 'ok';
-      if (!existingSync) {
-        if (i + 1 < decodedClips.length && effectiveEndSec > nextOrigStartSec + MAX_SHIFT_SEC + 0.05) {
-          syncStatus = 'overflow';
-        } else if (appliedShift > 0.02 || (typeof turn.atempoApplied === 'number' && turn.atempoApplied > 1.01)) {
-          syncStatus = 'adjusted';
-        }
-      }
+      const needsShorten = Boolean(
+        turn.needsShorten || pushesNextBeyondLimit || exceedsSceneStartHere || exceedsMaxShiftHere
+      );
 
+      prevEffectiveEndSec = effectiveEndSec;
       maxEndSec = Math.max(maxEndSec, origEndSec, effectiveEndSec);
       placements.push({
         startSec: Math.round(effectiveStartSec * 100) / 100,
         endSec: Math.round(effectiveEndSec * 100) / 100,
+        shiftedStartBySec: Math.round(shiftSec * 100) / 100,
         originalDurationSec,
         dubbedDurationSec,
         syncStatus,
+        needsShorten,
       });
     }
 
@@ -303,16 +368,30 @@ export function stitchDialogueTurnsClient(input: ClientStitchInput): ClientStitc
     masterSamples = new Int16Array(totalSamples);
 
     for (let i = 0; i < decodedClips.length; i++) {
-      const { samples } = decodedClips[i];
+      let clipSamples: Int16Array = decodedClips[i].samples;
       const placement = placements[i];
+
+      // Apply 120ms fade-out on turns marked overflow
+      if (placement.syncStatus === 'overflow') {
+        clipSamples = applyFadeOutInt16(clipSamples, MASTER_FADE_OUT_MS, sampleRate);
+      }
+
       const startSample = Math.max(0, Math.round(placement.startSec * sampleRate));
-      const limit = Math.min(samples.length, masterSamples.length - startSample);
+      const limit = Math.min(clipSamples.length, masterSamples.length - startSample);
+      if (limit <= 0) continue;
+
+      if (limit < clipSamples.length) {
+        clipSamples = applyFadeOutInt16(clipSamples.subarray(0, limit), MASTER_FADE_OUT_MS, sampleRate);
+      }
+
+      // Strictly disjoint placement (guaranteed >= 80ms silence gap between consecutive turns — zero speech overlap!)
       for (let s = 0; s < limit; s++) {
-        const mixed = masterSamples[startSample + s] + samples[s];
-        masterSamples[startSample + s] =
-          mixed > 32767 ? 32767 : mixed < -32768 ? -32768 : mixed;
+        masterSamples[startSample + s] = clipSamples[s];
       }
     }
+
+    // Apply 120ms smooth fade-out at the very end of the master track
+    masterSamples = applyFadeOutInt16(masterSamples, MASTER_FADE_OUT_MS, sampleRate);
 
     totalDurationSeconds = Math.round((masterSamples.length / sampleRate) * 10) / 10;
     updatedTurns = decodedClips.map(({ turn }, idx) => {
@@ -323,6 +402,8 @@ export function stitchDialogueTurnsClient(input: ClientStitchInput): ClientStitc
         originalDurationSec: turn.originalDurationSec ?? p.originalDurationSec,
         dubbedDurationSec: p.dubbedDurationSec,
         syncStatus: p.syncStatus,
+        shiftedStartBySec: p.shiftedStartBySec,
+        needsShorten: p.needsShorten,
         startTime: p.startSec,
         endTime: p.endSec,
       };
@@ -337,12 +418,16 @@ export function stitchDialogueTurnsClient(input: ClientStitchInput): ClientStitc
 
     let cursor = 0;
     updatedTurns = decodedClips.map(({ turn, samples }) => {
+      const clipToWrite =
+        turn.syncStatus === 'overflow'
+          ? applyFadeOutInt16(samples, MASTER_FADE_OUT_MS, sampleRate)
+          : samples;
       const startTime = Math.round((cursor / sampleRate) * 100) / 100;
-      masterSamples.set(samples, cursor);
-      cursor += samples.length;
+      masterSamples.set(clipToWrite, cursor);
+      cursor += clipToWrite.length;
       const endTime = Math.round((cursor / sampleRate) * 100) / 100;
       cursor += pauseSamples;
-      const dur = Math.round((samples.length / sampleRate) * 100) / 100;
+      const dur = Math.round((clipToWrite.length / sampleRate) * 100) / 100;
       return {
         ...turn,
         durationSeconds: dur,
@@ -351,6 +436,9 @@ export function stitchDialogueTurnsClient(input: ClientStitchInput): ClientStitc
         endTime,
       };
     });
+
+    // Apply 120ms smooth fade-out at the very end of the master track
+    masterSamples = applyFadeOutInt16(masterSamples, MASTER_FADE_OUT_MS, sampleRate);
     totalDurationSeconds = Math.round((masterSamples.length / sampleRate) * 10) / 10;
   }
 

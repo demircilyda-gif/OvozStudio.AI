@@ -116,6 +116,12 @@ export interface DialogueTurn {
   atempoApplied?: number;
   rephraseAttempts?: number;
   syncStatus?: 'ok' | 'adjusted' | 'overflow';
+  qa?: 'ok' | 'retried' | 'failed';
+  qaReason?: string;
+  slicingMethod?: string;
+  shiftedStartBySec?: number;
+  needsShorten?: boolean;
+  subBlockIndex?: number;
   gapAfterSec?: number;
   targetSyllables?: number;
   maxSyllables?: number;

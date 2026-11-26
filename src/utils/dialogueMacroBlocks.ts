@@ -1,5 +1,7 @@
 export interface MacroBlockTurnLike {
   id?: string;
+  speakerId?: string;
+  speakerName?: string;
   text?: string;
   cleanSpeechText?: string;
   style?: string;
@@ -426,3 +428,255 @@ export function splitTurnsIntoMacroBlocks<T extends MacroBlockTurnLike>(
 ): T[][] {
   return planDialogueMacroBlocks(turns, options).map((b) => b.turns);
 }
+
+// =========================================================================
+// STAGE 1: SUB-BLOCK PLANNER (<= 8 turns AND <= 40s sum of turn windows)
+// =========================================================================
+
+export interface SubBlockSplitOptions {
+  maxTurns?: number; // default 8
+  maxWindowSec?: number; // default 40
+  macroBlockOptions?: MacroBlockSplitOptions;
+}
+
+export interface PlannedSubBlock<T extends MacroBlockTurnLike = MacroBlockTurnLike> {
+  subBlockIndex: number;
+  macroBlockIndex: number;
+  turns: T[];
+  startTurnIndex: number;
+  endTurnIndex: number;
+  startSec: number;
+  endSec: number;
+  windowSumSec: number;
+  startTimecode: string;
+  endTimecode: string;
+  sceneTitles: string[];
+}
+
+function getTurnWindowSec(t: MacroBlockTurnLike): number {
+  if (
+    typeof t.startSec === 'number' &&
+    Number.isFinite(t.startSec) &&
+    typeof t.endSec === 'number' &&
+    Number.isFinite(t.endSec) &&
+    t.endSec > t.startSec
+  ) {
+    return Math.max(0.5, Math.round((t.endSec - t.startSec) * 100) / 100);
+  }
+  const clean = String(t.cleanSpeechText || t.text || '')
+    .replace(/<[^>]+>/g, ' ')
+    .trim();
+  // Approximate speech window from character length (~14 chars/sec) if no timecodes
+  return Math.max(1.0, Math.round((clean.length / 14) * 10) / 10);
+}
+
+function getTurnWordCount(t: MacroBlockTurnLike): number {
+  const clean = String(t.cleanSpeechText || t.text || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/[«»"“”„()[\]{}.,!?;:—–-]+/g, ' ')
+    .trim();
+  if (!clean) return 0;
+  return clean.split(/\s+/).filter(Boolean).length;
+}
+
+function isQuestionTurn(t: MacroBlockTurnLike): boolean {
+  const raw = String(t.text || t.cleanSpeechText || '').trim();
+  return /\?[\s"'»”’)]*$/.test(raw);
+}
+
+function getTurnSpeakerKey(t: MacroBlockTurnLike): string {
+  return String(t.speakerId || t.speakerName || '').trim().toLowerCase();
+}
+
+/**
+ * Splits a single macro-block slice into the minimum number of sub-blocks such that EVERY sub-block has:
+ * - turns.length <= maxTurns (default 8)
+ * - sum(turnWindowSec) <= maxWindowSec (default 40s), unless a single turn itself > maxWindowSec
+ *
+ * Among minimum-count partitions, DP chooses the highest boundary score:
+ * - strongly prefers cutting on a speaker change + longest pause (+ scene boundary)
+ * - strongly avoids separating a question (?) from its immediate answer
+ * - strongly avoids leaving a 1–2 word turn at the start or end edge of a sub-block
+ */
+function splitMacroSliceIntoSubBlocksDp<T extends MacroBlockTurnLike>(
+  slice: T[],
+  maxTurns: number,
+  maxWindowSec: number
+): T[][] {
+  const n = slice.length;
+  if (n === 0) return [];
+
+  const windows = slice.map(getTurnWindowSec);
+  const wordCounts = slice.map(getTurnWordCount);
+  const questions = slice.map(isQuestionTurn);
+  const speakers = slice.map(getTurnSpeakerKey);
+  const scenes = slice.map((t) => getSceneKey(t));
+
+  // Prefix sums of window durations for O(1) range sum
+  const prefixWin = new Array<number>(n + 1).fill(0);
+  for (let i = 0; i < n; i++) {
+    prefixWin[i + 1] = prefixWin[i] + windows[i];
+  }
+
+  // Score for placing a cut between turn (cutIdx - 1) and turn (cutIdx)
+  // Positive bonuses sum to at most +120 (< SUB_BLOCK_COST = 200), so extra sub-blocks are
+  // NEVER created just to chase pauses — ONLY to prevent Q->A splits (-350) or 1-2 word edges (-260).
+  const cutBoundaryScore = (cutIdx: number): number => {
+    const prevIdx = cutIdx - 1;
+    const nextIdx = cutIdx;
+    let score = 0;
+
+    // Scene transition is an ideal natural cut
+    if (scenes[prevIdx] && scenes[nextIdx] && scenes[prevIdx] !== scenes[nextIdx]) {
+      score += 35;
+    }
+
+    // Speaker change preference
+    if (speakers[prevIdx] && speakers[nextIdx] && speakers[prevIdx] !== speakers[nextIdx]) {
+      score += 25;
+    } else {
+      score -= 12;
+    }
+
+    // Longest pause preference (capped so it never creates unnecessary sub-blocks)
+    const gap = getPauseBetweenTurns(slice[prevIdx], slice[nextIdx]);
+    score += Math.min(10, gap) * 6;
+    if (gap < 0.5 && speakers[prevIdx] === speakers[nextIdx]) {
+      score -= 18;
+    }
+
+    // Do NOT separate an answer from a question (strictly outweighs adding +1 sub-block)
+    if (questions[prevIdx]) {
+      score -= 350;
+    }
+
+    // Do NOT leave a 1–2 word turn on either edge of a sub-block
+    if (wordCounts[prevIdx] > 0 && wordCounts[prevIdx] <= 2) {
+      score -= 260;
+    }
+    if (wordCounts[nextIdx] > 0 && wordCounts[nextIdx] <= 2) {
+      score -= 260;
+    }
+
+    return score;
+  };
+
+  const SUB_BLOCK_COST = 200;
+  const dpScore = new Array<number>(n + 1).fill(-Infinity);
+  const parent = new Array<number>(n + 1).fill(-1);
+
+  dpScore[0] = 0;
+
+  for (let j = 1; j <= n; j++) {
+    const minI = Math.max(0, j - maxTurns);
+    for (let i = minI; i < j; i++) {
+      if (!Number.isFinite(dpScore[i])) continue;
+      const chunkCount = j - i;
+      const chunkWin = prefixWin[j] - prefixWin[i];
+
+      // Hard constraints: <= maxTurns AND <= maxWindowSec (allow 1-turn sub-block if single turn > maxWindowSec)
+      if (chunkCount > maxTurns) continue;
+      if (chunkCount > 1 && chunkWin > maxWindowSec + 1e-6) continue;
+
+      let candScore = dpScore[i] - SUB_BLOCK_COST;
+      if (i > 0) {
+        candScore += cutBoundaryScore(i);
+      }
+
+      // Slight penalty against 1-turn chunks when avoidable
+      if (chunkCount === 1 && n > 1) {
+        candScore -= 30;
+      }
+      // Slight balance bonus favoring fuller sub-blocks (~4–7 turns)
+      candScore += Math.min(chunkCount, 6) * 2.0;
+
+      if (candScore > dpScore[j]) {
+        dpScore[j] = candScore;
+        parent[j] = i;
+      }
+    }
+  }
+
+  // Reconstruct optimal partition
+  const subBlocks: T[][] = [];
+  let cur = n;
+  while (cur > 0) {
+    const prev = parent[cur];
+    if (prev < 0) {
+      subBlocks.push(slice.slice(0, cur));
+      break;
+    }
+    subBlocks.push(slice.slice(prev, cur));
+    cur = prev;
+  }
+  subBlocks.reverse();
+  return subBlocks;
+}
+
+/**
+ * Stage 1 shared sub-block planner used by BOTH server (`batchDialogueEngine.ts`)
+ * and UI (`DialogueStudio.tsx` quota forecast & sub-block regenerate).
+ *
+ * Groups turns into macro-blocks first (respecting scene boundaries), then splits each
+ * macro-block into optimal sub-blocks of <= 8 turns AND <= 40s cumulative turn window duration.
+ */
+export function planDialogueSubBlocks<T extends MacroBlockTurnLike>(
+  turns: T[],
+  options: SubBlockSplitOptions = {}
+): PlannedSubBlock<T>[] {
+  if (!Array.isArray(turns) || turns.length === 0) return [];
+
+  const maxTurns = Math.max(1, options.maxTurns ?? 8);
+  const maxWindowSec = Math.max(5, options.maxWindowSec ?? 40);
+
+  const macroBlocks = planDialogueMacroBlocks(turns, options.macroBlockOptions);
+  const result: PlannedSubBlock<T>[] = [];
+  let runningSubIdx = 0;
+
+  for (const mb of macroBlocks) {
+    const subSlices = splitMacroSliceIntoSubBlocksDp(mb.turns, maxTurns, maxWindowSec);
+    let localTurnOffset = mb.startTurnIndex;
+
+    for (const subTurns of subSlices) {
+      const first = subTurns[0];
+      const last = subTurns[subTurns.length - 1];
+      const startSec = typeof first?.startSec === 'number' ? first.startSec : 0;
+      const endSec = typeof last?.endSec === 'number' ? last.endSec : startSec;
+      const windowSumSec =
+        Math.round(subTurns.reduce((acc, t) => acc + getTurnWindowSec(t), 0) * 100) / 100;
+
+      const sceneTitles: string[] = [];
+      for (const t of subTurns) {
+        const st = getSceneKey(t);
+        if (st && !sceneTitles.includes(st)) sceneTitles.push(st);
+      }
+
+      result.push({
+        subBlockIndex: runningSubIdx,
+        macroBlockIndex: mb.blockIndex,
+        turns: subTurns,
+        startTurnIndex: localTurnOffset,
+        endTurnIndex: localTurnOffset + subTurns.length - 1,
+        startSec,
+        endSec,
+        windowSumSec,
+        startTimecode: formatSecMmSs(startSec),
+        endTimecode: formatSecMmSs(endSec),
+        sceneTitles,
+      });
+
+      localTurnOffset += subTurns.length;
+      runningSubIdx += 1;
+    }
+  }
+
+  return result;
+}
+
+export function splitTurnsIntoSubBlocks<T extends MacroBlockTurnLike>(
+  turns: T[],
+  options: SubBlockSplitOptions = {}
+): T[][] {
+  return planDialogueSubBlocks(turns, options).map((sb) => sb.turns);
+}
+

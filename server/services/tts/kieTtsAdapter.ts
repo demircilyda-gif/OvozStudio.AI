@@ -116,8 +116,13 @@ export function setKieTestOverrideHandler(
  * Цикл работы: создание задачи -> опрос статуса -> скачивание файла -> перекодирование ffmpeg в 24kHz PCM.
  */
 export async function synthesizeViaKieAi(params: KieTtsParams): Promise<{ pcm: Buffer }> {
+  const cleanParams: KieTtsParams = {
+    ...params,
+    text: sanitizeKieSpeechText(params.text),
+    style: sanitizeKieSpeechStyle(params.style),
+  };
   if (testKieOverrideHandler) {
-    const pcm = await testKieOverrideHandler(params);
+    const pcm = await testKieOverrideHandler(cleanParams);
     return { pcm };
   }
 
@@ -144,14 +149,14 @@ export async function synthesizeViaKieAi(params: KieTtsParams): Promise<{ pcm: B
         speakers: [
           {
             speaker_id: speakerId,
-            voice_name: params.voiceName,
-            ...(params.style ? { style: params.style } : {}),
+            voice_name: cleanParams.voiceName,
+            ...(cleanParams.style ? { style: cleanParams.style } : {}),
           },
         ],
         dialogue_turns: [
           {
             speaker_id: speakerId,
-            text: params.text,
+            text: cleanParams.text,
           },
         ],
         temperature: 1.0,
@@ -275,6 +280,22 @@ export function setKieDialogueTestOverrideHandler(
   testKieDialogueOverrideHandler = handler;
 }
 
+function sanitizeKieSpeechText(text: string): string {
+  return String(text || "")
+    .replace(/<\s*short\s+pause\s*>/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function sanitizeKieSpeechStyle(style?: string): string | undefined {
+  if (!style) return undefined;
+  const cleaned = String(style)
+    .replace(/\.?\s*End\s+(?:the\s+sentence\s+)?cleanly\s+with\s+a\s+distinct\s+pause\.?/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned || undefined;
+}
+
 /**
  * Раздел 2.8: Запасной канал для пакетного дубляжа (встроенные голоса при 429 от Google).
  * Отправляет тот же блок той же моделью google/gemini-3-8-flash-tts через kie.ai с dialogue_turns и style на реплику.
@@ -282,8 +303,14 @@ export function setKieDialogueTestOverrideHandler(
 export async function synthesizeDialogueBlockViaKieAi(
   turns: KieDialogueTurnInput[]
 ): Promise<{ pcm: Buffer }> {
+  const sanitizedTurns: KieDialogueTurnInput[] = turns.map((t) => ({
+    ...t,
+    text: sanitizeKieSpeechText(t.text),
+    style: sanitizeKieSpeechStyle(t.style),
+  }));
+
   if (testKieDialogueOverrideHandler) {
-    const pcm = await testKieDialogueOverrideHandler(turns);
+    const pcm = await testKieDialogueOverrideHandler(sanitizedTurns);
     return { pcm };
   }
 
@@ -303,7 +330,7 @@ export async function synthesizeDialogueBlockViaKieAi(
     string,
     { speaker_id: string; voice_name: string; style?: string }
   >();
-  for (const t of turns) {
+  for (const t of sanitizedTurns) {
     let speakerId = speakerNameToId.get(t.speaker);
     if (!speakerId) {
       speakerId = `Speaker ${speakerNameToId.size + 1}`;
@@ -327,7 +354,7 @@ export async function synthesizeDialogueBlockViaKieAi(
       model: TTS_MODELS_CONFIG.kieModel,
       input: {
         speakers: uniqueSpeakers,
-        dialogue_turns: turns.map((t) => ({
+        dialogue_turns: sanitizedTurns.map((t) => ({
           speaker_id: speakerNameToId.get(t.speaker) || "Speaker 1",
           text: t.text,
         })),

@@ -41,6 +41,10 @@ import {
   isGoogleSafetyOrPolicyError,
 } from "./server/config/characterVoices.ts";
 import { resolveFfmpegPath } from "./server/utils/ffmpegBinary.ts";
+import {
+  muxAudioChunkStore,
+  MUX_AUDIO_CHUNK_MAX_BYTES,
+} from "./server/services/muxAudioChunkStore.ts";
 import { translateOrTransliterateTtsText } from "./server/services/tts/ttsTranslate.ts";
 import {
   generateTtsAgentProposals,
@@ -60,9 +64,16 @@ import {
 } from "./server/services/tts/ttsQuotaTracker.ts";
 import {
   synthesizeDialogueInMacroBlocks,
+  buildTurnPaceDirective,
+  stripLegacyPauseArtifacts,
+  stripLegacyStylePauseDirective,
   type BatchInputTurn,
   type ResolvedBatchSpeaker,
 } from "./server/services/dubbing/batchDialogueEngine.ts";
+import {
+  isFakeDubbingTtsEnabled,
+  generateSyntheticTurnPcm,
+} from "./server/services/dubbing/batchAudioSlicer.ts";
 
 const RUNTIME_ENV_KEYS = {
   API_KEY: (process.env.API_KEY || "").trim(),
@@ -5686,6 +5697,7 @@ async function synthesizeTurnWithDurationCascade({
   gapAfterSec = 0,
   measuredPace = DUBBING_MODELS_CONFIG.PACE || 5.0,
   forceRephraseShorter = false,
+  forceFastPace = false,
   voiceId,
   baseVoice,
   speakerName,
@@ -5696,6 +5708,7 @@ async function synthesizeTurnWithDurationCascade({
   gapAfterSec?: number;
   measuredPace?: number;
   forceRephraseShorter?: boolean;
+  forceFastPace?: boolean;
   voiceId: string;
   baseVoice: string;
   speakerName: string;
@@ -5712,11 +5725,15 @@ async function synthesizeTurnWithDurationCascade({
   atempoApplied: number;
   rephraseAttempts: number;
   syncStatus: TurnSyncStatus;
+  needsShorten: boolean;
+  qa: "ok" | "retried" | "failed";
+  qaReason?: string;
+  slicingMethod: string;
   unscaledSyllables: number;
   unscaledDurationSec: number;
   failed: boolean;
 }> {
-  let activeText = String(turn.text || "").trim() || "...";
+  let activeText = stripLegacyPauseArtifacts(String(turn.text || "").trim()) || "...";
   const hasValidWindow =
     strictTimeWindow &&
     typeof turn.startSec === "number" &&
@@ -5724,7 +5741,7 @@ async function synthesizeTurnWithDurationCascade({
     turn.endSec > turn.startSec;
 
   const windowSec = hasValidWindow
-    ? Math.round(Math.max(0.8, turn.endSec - turn.startSec) * 100) / 100
+    ? Math.round(Math.max(0.5, turn.endSec - turn.startSec) * 100) / 100
     : 0;
   const safeGapAfterSec =
     typeof gapAfterSec === "number" && gapAfterSec >= 0
@@ -5733,18 +5750,19 @@ async function synthesizeTurnWithDurationCascade({
       ? turn.gapAfterSec
       : 0;
   const available = hasValidWindow
-    ? Math.max(0.5, Math.round((windowSec + safeGapAfterSec - 0.05) * 100) / 100)
+    ? Math.max(0.4, Math.round((windowSec + safeGapAfterSec - 0.08) * 100) / 100)
     : 0;
 
   let rephraseAttempts = Number(turn.rephraseAttempts) || 0;
-  const maxAtempo = DUBBING_MODELS_CONFIG.maxAtempoSpeedRatio || 1.1;
+  const normalMaxAtempo = DUBBING_MODELS_CONFIG.maxAtempoSpeedRatio || 1.1;
+  const singleTurnBoostMaxAtempo = 1.15;
   const effectivePace =
     typeof measuredPace === "number" && measuredPace > 1.5 && measuredPace < 10
       ? measuredPace
       : DUBBING_MODELS_CONFIG.PACE || 5.0;
 
   try {
-    // Optional explicit "Короче" button trigger from UI
+    // Optional explicit "Короче" button trigger from UI (never triggered automatically)
     if (forceRephraseShorter) {
       const currentSyl = countSyllables(activeText);
       const targetForButton =
@@ -5759,70 +5777,105 @@ async function synthesizeTurnWithDurationCascade({
         emotion: turn.intonationRu || turn.emotion,
         inlineTags: turn.inlineTags,
       });
+      activeText = stripLegacyPauseArtifacts(activeText) || activeText;
       rephraseAttempts += 1;
     }
 
+    const paceDirective = buildTurnPaceDirective(
+      {
+        cleanSpeechText: activeText,
+        startSec: turn.startSec,
+        endSec: turn.endSec,
+        forceFastPace: Boolean(forceFastPace),
+      },
+      Boolean(forceFastPace)
+    );
+    const cleanStyle = [
+      stripLegacyStylePauseDirective(combinedTurnStyle || ""),
+      paceDirective,
+    ]
+      .filter(Boolean)
+      .join(". ");
+
     const synthesizeCleanPcm = async (txt: string): Promise<Buffer> => {
+      if (isFakeDubbingTtsEnabled()) {
+        const syl = Math.max(1, countSyllables(txt));
+        const pace = forceFastPace ? 5.6 : 4.8;
+        return generateSyntheticTurnPcm(Math.max(0.35, syl / pace), 340);
+      }
       const res = await generateGeminiSpeechPcm({
         text: txt,
         voiceName: baseVoice,
         voiceId,
-        speechStyle: combinedTurnStyle,
+        speechStyle: cleanStyle,
         speakerName,
       });
       return trimTrailingAndLeadingSilencePcm(res.pcm, 24000);
     };
 
-    let rawUnstretchedPcm = await synthesizeCleanPcm(activeText);
-    let rawDurationSec = rawUnstretchedPcm.length / 48000;
-
-    // Раздел 2.4: автоматический цикл перефраз + повторный TTS удалён ради экономии квоты 100 RPD.
-    // Ручная кнопка «Короче» (forceRephraseShorter) на одной реплике сохранена выше.
+    const rawUnstretchedPcm = await synthesizeCleanPcm(activeText);
+    const rawDurationSec = rawUnstretchedPcm.length / 48000;
 
     const unscaledSyllables = countSyllables(activeText);
     const unscaledDurationSec = Math.max(0.2, rawDurationSec);
 
     let pcm = rawUnstretchedPcm;
     let atempoApplied = 1.0;
-    let fitStepApplied = rephraseAttempts > 0 ? `rephrased_${rephraseAttempts}x` : "original";
+    let fitStepApplied = forceFastPace
+      ? "fast_pace"
+      : rephraseAttempts > 0
+      ? `rephrased_${rephraseAttempts}x`
+      : "original";
+    let needsShorten = false;
 
     if (hasValidWindow && rawDurationSec > available) {
-      const neededRatio = Math.min(maxAtempo, rawDurationSec / available);
-      if (neededRatio > 1.008) {
-        pcm = await applyMildAtempoPcm(rawUnstretchedPcm, neededRatio, 24000, maxAtempo);
-        atempoApplied = Math.round(neededRatio * 100) / 100;
-        fitStepApplied =
-          rephraseAttempts > 0
-            ? `rephrased_${rephraseAttempts}x+atempo_${atempoApplied}x`
-            : `atempo_${atempoApplied}x`;
-      }
-    } else if (
-      hasValidWindow &&
-      rawDurationSec > windowSec + Math.min(safeGapAfterSec * 0.7, Math.max(0, safeGapAfterSec - 0.05))
-    ) {
-      const comfortTarget =
-        windowSec + Math.min(safeGapAfterSec * 0.7, Math.max(0, safeGapAfterSec - 0.05));
-      const neededRatio = Math.min(maxAtempo, rawDurationSec / Math.max(0.5, comfortTarget));
-      if (neededRatio > 1.008) {
-        pcm = await applyMildAtempoPcm(rawUnstretchedPcm, neededRatio, 24000, maxAtempo);
-        atempoApplied = Math.round(neededRatio * 100) / 100;
-        fitStepApplied =
-          rephraseAttempts > 0
-            ? `rephrased_${rephraseAttempts}x+atempo_${atempoApplied}x`
-            : `atempo_${atempoApplied}x`;
+      const rawNeeded = rawDurationSec / available;
+      if (rawNeeded <= normalMaxAtempo) {
+        const ratio = Math.min(normalMaxAtempo, rawNeeded);
+        if (ratio > 1.008) {
+          pcm = await applyMildAtempoPcm(rawUnstretchedPcm, ratio, 24000, normalMaxAtempo);
+          atempoApplied = Math.round(ratio * 100) / 100;
+          fitStepApplied = `${fitStepApplied}+atempo_${atempoApplied}x`;
+        }
+      } else {
+        // Stage 4: Single-turn boost up to 1.15x ONLY for this overflowing turn
+        const boostRatio = Math.min(singleTurnBoostMaxAtempo, rawNeeded);
+        pcm = await applyMildAtempoPcm(rawUnstretchedPcm, boostRatio, 24000, singleTurnBoostMaxAtempo);
+        atempoApplied = Math.round(boostRatio * 100) / 100;
+        fitStepApplied = `${fitStepApplied}+atempo_boost_${atempoApplied}x`;
       }
     }
 
-    const dubbedDurationSec = Math.round((pcm.length / 48000) * 100) / 100;
+    let dubbedDurationSec = Math.round((pcm.length / 48000) * 100) / 100;
     const originalDurationSec = hasValidWindow ? windowSec : dubbedDurationSec;
 
     let syncStatus: TurnSyncStatus = "ok";
-    if (hasValidWindow && dubbedDurationSec > available + 0.32) {
-      syncStatus = "overflow";
-    } else if (rephraseAttempts > 0 || atempoApplied > 1.01) {
+    if (hasValidWindow && dubbedDurationSec > available + 0.05) {
+      needsShorten = true;
+      fitStepApplied = `${fitStepApplied}+needs_shorten`;
+      if (dubbedDurationSec > available + 1.2) {
+        syncStatus = "overflow";
+        // Apply 120ms linear fade-out on overflowing tail
+        const fadeSamples = Math.min(Math.floor(pcm.length / 2), Math.round((24000 * 120) / 1000));
+        if (fadeSamples > 0) {
+          const faded = Buffer.from(pcm);
+          const totalSamples = Math.floor(faded.length / 2);
+          const startFade = totalSamples - fadeSamples;
+          for (let s = 0; s < fadeSamples; s++) {
+            const idx = (startFade + s) * 2;
+            const gain = 1 - s / Math.max(1, fadeSamples);
+            faded.writeInt16LE(Math.round(faded.readInt16LE(idx) * gain), idx);
+          }
+          pcm = faded;
+        }
+      } else {
+        syncStatus = "adjusted";
+      }
+    } else if (rephraseAttempts > 0 || atempoApplied > 1.01 || forceFastPace) {
       syncStatus = "adjusted";
     }
 
+    dubbedDurationSec = Math.round((pcm.length / 48000) * 100) / 100;
     const finalWav = buildWavBuffer(pcm, 24000, 1, 16);
     return {
       pcm,
@@ -5835,6 +5888,9 @@ async function synthesizeTurnWithDurationCascade({
       atempoApplied,
       rephraseAttempts,
       syncStatus,
+      needsShorten,
+      qa: "ok",
+      slicingMethod: forceFastPace ? "single_turn_fast" : "single_turn",
       unscaledSyllables,
       unscaledDurationSec,
       failed: false,
@@ -5853,6 +5909,10 @@ async function synthesizeTurnWithDurationCascade({
       atempoApplied: 1.0,
       rephraseAttempts,
       syncStatus: "overflow",
+      needsShorten: false,
+      qa: "failed",
+      qaReason: err?.message || "Ошибка синтеза одиночной реплики",
+      slicingMethod: "failed",
       unscaledSyllables: countSyllables(activeText),
       unscaledDurationSec: 0.5,
       failed: true,
@@ -6021,6 +6081,7 @@ app.post(
         strictTimeWindow: isTimeAlignedMode,
         startingCompletedBlocks: Number(req.body?.startingCompletedBlocks) || 0,
         totalProjectBlocks: Number(req.body?.totalProjectBlocks) || undefined,
+        bypassCache: Boolean(req.body?.bypassCache),
       });
 
       // Если квота 429 исчерпана на клонированном голосе — сохраняем уже озвученные блоки без подмены голоса
@@ -6044,7 +6105,12 @@ app.post(
             endTime: Math.round((startTime + r.dubbedDurationSec) * 100) / 100,
             fitStepApplied: r.fitStepApplied,
             slicingMethod: r.slicingMethod,
-            synthesisFailed: false,
+            qa: r.qa,
+            qaReason: r.qaReason,
+            needsShorten: r.needsShorten,
+            subBlockIndex: r.subBlockIndex,
+            shiftedStartBySec: 0,
+            synthesisFailed: r.qa === "failed",
           };
         });
 
@@ -6054,6 +6120,9 @@ app.post(
           quotaPauseMessageRu: batchResult.quotaPauseMessageRu,
           blocksTotal: batchResult.blocksTotal,
           blocksCompleted: batchResult.blocksCompleted,
+          subBlocksTotal: batchResult.subBlocksTotal,
+          subBlocksCompleted: batchResult.subBlocksCompleted,
+          retriesUsed: batchResult.retriesUsed,
           ttsCallsUsed: batchResult.ttsCallsUsed,
           transcribeCallsUsed: batchResult.transcribeCallsUsed,
           provider: batchResult.provider,
@@ -6089,11 +6158,16 @@ app.post(
               endTime: Math.round((startTime + r.dubbedDurationSec) * 100) / 100,
               fitStepApplied: r.fitStepApplied,
               slicingMethod: r.slicingMethod,
-              synthesisFailed: false,
+              qa: r.qa,
+              qaReason: r.qaReason,
+              needsShorten: r.needsShorten,
+              subBlockIndex: r.subBlockIndex,
+              shiftedStartBySec: 0,
+              synthesisFailed: r.qa === "failed",
             });
           });
         } else {
-          // Строгая сборка мастер-дорожки по таймкодам (без обрезки посреди слова, atempo <= 1.10x, сдвиг <= 0.3s, overflow + 120ms fade-out)
+          // Строгая сборка мастер-дорожки по таймкодам (Stage 4: 0 перекрытий, сдвиг <= 1.2s, начало сцены <= 0.1s, 120ms fade-out)
           const assembled = await assembleStrictTimecodeMasterPcm(
             batchResult.turns.map((r) => {
               const orig = batchInputTurns[r.index]?.rawTurn || {};
@@ -6105,10 +6179,12 @@ app.post(
               return {
                 startSec,
                 endSec,
+                sceneTitle: orig.sceneTitle || orig.chapter || undefined,
                 pcm: r.pcm,
                 rawUnstretchedPcm: r.pcm,
                 atempoApplied: r.atempoApplied,
                 rephraseAttempts: r.rephraseAttempts,
+                needsShorten: r.needsShorten,
               };
             }),
             resolvedTotalVideoDurationSec,
@@ -6136,9 +6212,14 @@ app.post(
               syncStatus: placement.syncStatus,
               startTime: placement.startSec,
               endTime: placement.endSec,
+              shiftedStartBySec: placement.shiftedStartBySec,
               fitStepApplied: r.fitStepApplied,
               slicingMethod: r.slicingMethod,
-              synthesisFailed: false,
+              qa: r.qa,
+              qaReason: r.qaReason,
+              needsShorten: Boolean(r.needsShorten || placement.needsShorten),
+              subBlockIndex: r.subBlockIndex,
+              synthesisFailed: r.qa === "failed",
             });
           });
         }
@@ -6173,9 +6254,14 @@ app.post(
             syncStatus: r.syncStatus,
             startTime: turnStartTime,
             endTime: turnEndTime,
+            shiftedStartBySec: 0,
             fitStepApplied: r.fitStepApplied,
             slicingMethod: r.slicingMethod,
-            synthesisFailed: false,
+            qa: r.qa,
+            qaReason: r.qaReason,
+            needsShorten: r.needsShorten,
+            subBlockIndex: r.subBlockIndex,
+            synthesisFailed: r.qa === "failed",
           });
         }
 
@@ -6191,6 +6277,10 @@ app.post(
         ok: synthesizedTurns.filter((t) => t.syncStatus === "ok").length,
         adjusted: synthesizedTurns.filter((t) => t.syncStatus === "adjusted").length,
         overflow: synthesizedTurns.filter((t) => t.syncStatus === "overflow").length,
+        qaOk: synthesizedTurns.filter((t) => !t.qa || t.qa === "ok").length,
+        qaRetried: synthesizedTurns.filter((t) => t.qa === "retried").length,
+        qaFailed: synthesizedTurns.filter((t) => t.qa === "failed").length,
+        needsShorten: synthesizedTurns.filter((t) => Boolean(t.needsShorten)).length,
       };
 
       let creditsRemaining = (req as any).userBalance;
@@ -6217,6 +6307,9 @@ app.post(
         modeUsed: batchResult.modeUsed,
         blocksTotal: batchResult.blocksTotal,
         blocksCompleted: batchResult.blocksCompleted,
+        subBlocksTotal: batchResult.subBlocksTotal,
+        subBlocksCompleted: batchResult.subBlocksCompleted,
+        retriesUsed: batchResult.retriesUsed,
         quotaPaused: false,
         stats: finalStats,
         quotaRemaining: batchResult.quotaRemaining,
@@ -6297,9 +6390,11 @@ app.post("/api/podcast/stitch-dialogue-turns", requireCreditBalance(1), async (r
         extractedTurns.map((et) => ({
           startSec: et.startSec,
           endSec: et.endSec,
+          sceneTitle: et.turn.sceneTitle || et.turn.chapter || undefined,
           pcm: et.pcm,
           atempoApplied: et.turn.atempoApplied,
           rephraseAttempts: et.turn.rephraseAttempts,
+          needsShorten: et.turn.needsShorten,
         })),
         resolvedTotalVideoDurationSec,
         24000
@@ -6319,6 +6414,8 @@ app.post("/api/podcast/stitch-dialogue-turns", requireCreditBalance(1), async (r
           syncStatus: placement.syncStatus,
           startTime: placement.startSec,
           endTime: placement.endSec,
+          shiftedStartBySec: placement.shiftedStartBySec,
+          needsShorten: Boolean(et.turn.needsShorten || placement.needsShorten),
         };
       });
     } else {
@@ -6422,6 +6519,7 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
       totalVideoDurationSec,
       totalTimelineSec,
       forceRephraseShorter = false,
+      forceFastPace = false,
       measuredPace,
     } = req.body;
 
@@ -6481,6 +6579,7 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
       gapAfterSec: computedGapAfterSec,
       measuredPace: Number(measuredPace) || DUBBING_MODELS_CONFIG.PACE || 5.0,
       forceRephraseShorter: Boolean(forceRephraseShorter),
+      forceFastPace: Boolean(forceFastPace),
       voiceId: resolved.voiceId,
       baseVoice: resolved.baseVoice,
       speakerName: resolved.speakerName,
@@ -6489,7 +6588,7 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
     });
 
     if (cascadeResult.failed) {
-      return res.status(502).json({ error: "Не удалось переозвучить выбранную реплику." });
+      return res.status(502).json({ error: cascadeResult.qaReason || "Не удалось переозвучить выбранную реплику." });
     }
 
     let updatedTurn = {
@@ -6505,6 +6604,11 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
       rephraseAttempts: cascadeResult.rephraseAttempts,
       syncStatus: cascadeResult.syncStatus,
       fitStepApplied: cascadeResult.fitStepApplied,
+      slicingMethod: cascadeResult.slicingMethod,
+      qa: cascadeResult.qa,
+      qaReason: cascadeResult.qaReason,
+      needsShorten: cascadeResult.needsShorten,
+      shiftedStartBySec: 0,
       synthesisFailed: false,
     };
 
@@ -6539,9 +6643,11 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
               typeof t.endSec === "number"
                 ? t.endSec
                 : (t.startSec || 0) + pcmBuf.length / 48000,
+            sceneTitle: t.sceneTitle || t.chapter || undefined,
             pcm: pcmBuf,
             atempoApplied: t.atempoApplied,
             rephraseAttempts: t.rephraseAttempts,
+            needsShorten: t.needsShorten,
           };
         });
         const assembled = await assembleStrictTimecodeMasterPcm(
@@ -6563,6 +6669,8 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
             atempoApplied: pl.atempoApplied,
             rephraseAttempts: pl.rephraseAttempts,
             syncStatus: pl.syncStatus,
+            shiftedStartBySec: pl.shiftedStartBySec,
+            needsShorten: Boolean(updatedTurn.needsShorten || pl.needsShorten),
           };
         }
       }
@@ -6969,6 +7077,13 @@ const uploadMuxAudioMiddleware = multer({
   },
 });
 
+const uploadMuxChunkMiddleware = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: MUX_AUDIO_CHUNK_MAX_BYTES,
+  },
+});
+
 const optionalMuxAudioUpload: express.RequestHandler = (req, res, next) => {
   if (req.is("multipart/form-data")) {
     return uploadMuxAudioMiddleware.single("audio")(req, res, next);
@@ -6976,20 +7091,69 @@ const optionalMuxAudioUpload: express.RequestHandler = (req, res, next) => {
   return next();
 };
 
-// 4. Mux Dubbed Uzbek WAV Track with Uploaded Video (up to 15 min) via /usr/bin/ffmpeg
+const optionalMuxChunkUpload: express.RequestHandler = (req, res, next) => {
+  if (req.is("multipart/form-data")) {
+    return uploadMuxChunkMiddleware.single("chunk")(req, res, next);
+  }
+  return next();
+};
+
+// 3b. Receive master WAV in <=8 MB chunks and assemble on server for >32 MB (20+ min) MP4 muxing
+app.post("/api/podcast/mux-audio-chunk", optionalMuxChunkUpload, async (req, res) => {
+  req.setTimeout(120000);
+  res.setTimeout(120000);
+  try {
+    const body = req.body || {};
+    const uploadId = String(body.uploadId || "").trim();
+    const index = Number(body.index);
+    const total = Number(body.total);
+    const ownerUid = String((req as any).user?.uid || "");
+
+    let chunkBuffer: Buffer | null = null;
+    if ((req as any).file?.buffer && Buffer.isBuffer((req as any).file.buffer)) {
+      chunkBuffer = (req as any).file.buffer;
+    } else if (typeof body.chunkBase64 === "string" && body.chunkBase64.length > 0) {
+      chunkBuffer = Buffer.from(body.chunkBase64, "base64");
+    }
+
+    if (!chunkBuffer || chunkBuffer.length === 0) {
+      return res.status(400).json({ error: "Отсутствуют бинарные данные части аудио (chunk)." });
+    }
+
+    const result = await muxAudioChunkStore.saveChunk({
+      uploadId,
+      index,
+      total,
+      chunkBuffer,
+      ownerUid,
+    });
+
+    return res.json(result);
+  } catch (err: any) {
+    console.error("[mux-audio-chunk] Error:", err);
+    return res.status(400).json({
+      error: err?.message || "Ошибка при загрузке части мастер-аудио.",
+    });
+  }
+});
+
+// 4. Mux Dubbed Uzbek WAV Track with Uploaded Video (up to 15-20+ min) via /usr/bin/ffmpeg
 app.post("/api/podcast/mux-dubbed-video", optionalMuxAudioUpload, async (req, res) => {
   req.setTimeout(300000);
   res.setTimeout(300000);
   const uploadedAudioPath = (req as any).file?.path as string | undefined;
+  let assembledCleanup: (() => Promise<void>) | null = null;
   try {
     const body = req.body || {};
     const {
       fileId,
       videoSessionId,
+      uploadId,
       masterAudioBase64,
       duckingMode,
       backgroundMode = "smart_ducking",
     } = body;
+    const ownerUid = String((req as any).user?.uid || "");
 
     let turns = body.turns || [];
     let speechIntervals = body.speechIntervals || [];
@@ -7014,7 +7178,7 @@ app.post("/api/podcast/mux-dubbed-video", optionalMuxAudioUpload, async (req, re
         error: "Видеофайл сессии не найден на сервере. Пожалуйста, выберите видео заново.",
       });
     }
-    if (!uploadedAudioPath && !masterAudioBase64) {
+    if (!uploadId && !uploadedAudioPath && !masterAudioBase64) {
       return res.status(400).json({
         error: "Сначала сгенерируйте узбекскую аудиодорожку дубляжа.",
       });
@@ -7027,9 +7191,17 @@ app.post("/api/podcast/mux-dubbed-video", optionalMuxAudioUpload, async (req, re
       });
     }
 
-    const dubbedWavBuffer = uploadedAudioPath
-      ? await fs.promises.readFile(uploadedAudioPath)
-      : Buffer.from(masterAudioBase64, "base64");
+    let dubbedWavBuffer: Buffer;
+    if (uploadId) {
+      const assembled = await muxAudioChunkStore.consumeAssembled(String(uploadId), ownerUid);
+      assembledCleanup = assembled.cleanup;
+      dubbedWavBuffer = await fs.promises.readFile(assembled.filePath);
+    } else if (uploadedAudioPath) {
+      dubbedWavBuffer = await fs.promises.readFile(uploadedAudioPath);
+    } else {
+      dubbedWavBuffer = Buffer.from(masterAudioBase64, "base64");
+    }
+
     const rawIntervals =
       Array.isArray(speechIntervals) && speechIntervals.length > 0
         ? speechIntervals
@@ -7076,6 +7248,9 @@ app.post("/api/podcast/mux-dubbed-video", optionalMuxAudioUpload, async (req, re
   } finally {
     if (uploadedAudioPath) {
       fs.promises.unlink(uploadedAudioPath).catch(() => {});
+    }
+    if (assembledCleanup) {
+      await assembledCleanup();
     }
   }
 });

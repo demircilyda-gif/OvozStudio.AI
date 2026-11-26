@@ -1661,6 +1661,7 @@ export interface AssembledTurnPlacement {
   rephraseAttempts: number;
   syncStatus: TurnSyncStatus;
   shiftedStartBySec: number;
+  needsShorten?: boolean;
   pcm: Buffer;
 }
 
@@ -1682,6 +1683,8 @@ export async function assembleStrictTimecodeMasterPcm(
     rawUnstretchedPcm?: Buffer;
     atempoApplied?: number;
     rephraseAttempts?: number;
+    sceneTitle?: string;
+    needsShorten?: boolean;
   }>,
   totalVideoDurationSec?: number,
   sampleRate = 24000
@@ -1692,28 +1695,29 @@ export async function assembleStrictTimecodeMasterPcm(
 }> {
   const bytesPerSample = 2;
   const bytesPerSec = sampleRate * bytesPerSample;
-  const maxFallbackAtempo = DUBBING_MODELS_CONFIG.maxAtempoFallbackRatio || 1.1;
-  const maxShiftSec = DUBBING_MODELS_CONFIG.maxNextTurnShiftSec || 0.3;
+  const singleTurnMaxAtempo = 1.15;
+  const MIN_GAP_BETWEEN_TURNS_SEC = 0.08;
+  const MAX_SHIFT_SEC = 1.2;
+  const SCENE_START_MAX_SHIFT_SEC = 0.1;
 
+  const prepared: Array<{
+    pcm: Buffer;
+    effectiveStartSec: number;
+    effectiveEndSec: number;
+    shiftSec: number;
+    originalDurationSec: number;
+    dubbedDurationSec: number;
+    atempoApplied: number;
+    rephraseAttempts: number;
+    syncStatus: TurnSyncStatus;
+    needsShorten: boolean;
+  }> = [];
+
+  let prevEffectiveEndSec = 0;
   let maxEndSec =
     typeof totalVideoDurationSec === "number" && totalVideoDurationSec > 0
       ? totalVideoDurationSec
       : 0;
-  for (const t of turnsWithPcm) {
-    maxEndSec = Math.max(maxEndSec, t.endSec || 0, t.startSec || 0);
-  }
-  if (maxEndSec <= 0) {
-    for (const t of turnsWithPcm) {
-      const durSec = t.pcm.length / bytesPerSec;
-      maxEndSec = Math.max(maxEndSec, (t.startSec || 0) + durSec);
-    }
-  }
-
-  const totalSamples = Math.max(sampleRate, Math.round(maxEndSec * sampleRate));
-  const masterPcm = Buffer.alloc(totalSamples * bytesPerSample, 0);
-  const actualPlacements: AssembledTurnPlacement[] = [];
-
-  let nextTurnShiftSec = 0;
 
   for (let i = 0; i < turnsWithPcm.length; i++) {
     const current = turnsWithPcm[i];
@@ -1724,13 +1728,15 @@ export async function assembleStrictTimecodeMasterPcm(
         : origStartSec + current.pcm.length / bytesPerSec;
     const originalDurationSec = Math.round((origEndSec - origStartSec) * 100) / 100;
 
+    // Stage 4: Never overlap speech on top of speech
+    const effectiveStartSec =
+      i === 0 ? origStartSec : Math.max(origStartSec, prevEffectiveEndSec + MIN_GAP_BETWEEN_TURNS_SEC);
+    const shiftSec = Math.max(0, Math.round((effectiveStartSec - origStartSec) * 1000) / 1000);
+
     const nextOrigStartSec =
       i + 1 < turnsWithPcm.length && typeof turnsWithPcm[i + 1].startSec === "number"
         ? turnsWithPcm[i + 1].startSec
-        : maxEndSec;
-
-    const appliedShiftHere = Math.min(maxShiftSec, Math.max(0, nextTurnShiftSec));
-    const effectiveStartSec = origStartSec + appliedShiftHere;
+        : Math.max(maxEndSec, origEndSec);
 
     let currentPcm = current.pcm;
     let atempoApplied =
@@ -1738,25 +1744,21 @@ export async function assembleStrictTimecodeMasterPcm(
         ? current.atempoApplied
         : 1.0;
     const rephraseAttempts = current.rephraseAttempts || 0;
-
     let dubbedDurationSec = currentPcm.length / bytesPerSec;
-    const availableWithoutShiftSec = Math.max(0.2, nextOrigStartSec - effectiveStartSec - 0.02);
-    const maxNextShiftAllowed = i + 1 < turnsWithPcm.length ? maxShiftSec : 0;
-    const availableWithMaxShiftSec = Math.max(
-      0.2,
-      nextOrigStartSec + maxNextShiftAllowed - effectiveStartSec - 0.02
+
+    const availableWithoutShiftSec = Math.max(
+      0.35,
+      nextOrigStartSec - effectiveStartSec - MIN_GAP_BETWEEN_TURNS_SEC
     );
 
-    // Step 5: If after Step 4 the turn is still longer than available space,
-    // apply atempo up to 1.15 and shift the next turn by up to 0.3 s
-    if (dubbedDurationSec > availableWithoutShiftSec + 0.02 && atempoApplied < maxFallbackAtempo) {
+    // Точечное ускорение до 1.15x только для этой реплики, если не влезает
+    if (dubbedDurationSec > availableWithoutShiftSec + 0.02 && atempoApplied < singleTurnMaxAtempo) {
       const sourcePcm = current.rawUnstretchedPcm || currentPcm;
       const baseRatio = current.rawUnstretchedPcm ? 1.0 : atempoApplied;
-      const unscaledDurSec = (sourcePcm.length / bytesPerSec) * (current.rawUnstretchedPcm ? 1.0 : atempoApplied);
-
-      // First try to fit without shifting next turn if <= 1.15, otherwise use up to 1.15
+      const unscaledDurSec =
+        (sourcePcm.length / bytesPerSec) * (current.rawUnstretchedPcm ? 1.0 : atempoApplied);
       const desiredTotalRatio = Math.min(
-        maxFallbackAtempo,
+        singleTurnMaxAtempo,
         Math.max(atempoApplied, unscaledDurSec / availableWithoutShiftSec)
       );
       const ratioToApplyOnSource = desiredTotalRatio / baseRatio;
@@ -1765,52 +1767,72 @@ export async function assembleStrictTimecodeMasterPcm(
           sourcePcm,
           ratioToApplyOnSource,
           sampleRate,
-          maxFallbackAtempo
+          singleTurnMaxAtempo
         );
         atempoApplied = Math.round(desiredTotalRatio * 100) / 100;
         dubbedDurationSec = currentPcm.length / bytesPerSec;
       }
     }
 
-    let syncStatus: TurnSyncStatus = "ok";
-    const endAfterPlacementSec = effectiveStartSec + dubbedDurationSec;
+    const effectiveEndSec = effectiveStartSec + dubbedDurationSec;
+    const prevScene = i > 0 ? String(turnsWithPcm[i - 1].sceneTitle || "").trim() : "";
+    const currScene = String(current.sceneTitle || "").trim();
+    const isSceneStart = i > 0 && Boolean(currScene && prevScene && currScene !== prevScene);
 
-    if (endAfterPlacementSec > nextOrigStartSec + maxNextShiftAllowed + 0.02) {
-      // Even with atempo up to 1.15 and shifting next turn by 0.3s, it still overflows:
-      // Lay down the full turn (never cut mid-word!) with a 120 ms fade-out on the last pause and mark "overflow"
+    const nextScene =
+      i + 1 < turnsWithPcm.length ? String(turnsWithPcm[i + 1].sceneTitle || "").trim() : "";
+    const nextIsSceneStart = Boolean(
+      i + 1 < turnsWithPcm.length && currScene && nextScene && currScene !== nextScene
+    );
+    const pushIntoNextSec =
+      i + 1 < turnsWithPcm.length
+        ? Math.max(0, effectiveEndSec + MIN_GAP_BETWEEN_TURNS_SEC - nextOrigStartSec)
+        : 0;
+
+    const isOverflow =
+      shiftSec > MAX_SHIFT_SEC + 1e-4 ||
+      (isSceneStart && shiftSec > SCENE_START_MAX_SHIFT_SEC + 1e-4) ||
+      pushIntoNextSec > MAX_SHIFT_SEC + 1e-4 ||
+      (nextIsSceneStart && pushIntoNextSec > SCENE_START_MAX_SHIFT_SEC + 1e-4);
+
+    let syncStatus: TurnSyncStatus = "ok";
+    if (isOverflow) {
       currentPcm = applyFadeOutOnLastPausePcm(currentPcm, 120, sampleRate);
       dubbedDurationSec = currentPcm.length / bytesPerSec;
       syncStatus = "overflow";
-      nextTurnShiftSec = maxNextShiftAllowed;
-    } else {
-      // Fits within window + gap + <=0.3s shift
-      if (endAfterPlacementSec > nextOrigStartSec - 0.02 && i + 1 < turnsWithPcm.length) {
-        nextTurnShiftSec = Math.min(
-          maxShiftSec,
-          Math.max(0, endAfterPlacementSec + 0.02 - nextOrigStartSec)
-        );
-      } else {
-        nextTurnShiftSec = 0;
-      }
-
-      const usedShift = appliedShiftHere > 0.02 || nextTurnShiftSec > 0.02;
-      const usedAtempo = atempoApplied > 1.01;
-      const usedRephrase = rephraseAttempts > 0;
-
-      if (usedRephrase || usedAtempo || usedShift) {
-        syncStatus = "adjusted";
-      } else {
-        syncStatus = "ok";
-      }
+    } else if (shiftSec > 0.02 || atempoApplied > 1.01 || rephraseAttempts > 0) {
+      syncStatus = "adjusted";
     }
 
-    // Never cut a turn in the middle of sound: mix full currentPcm onto masterPcm
-    const startSample = Math.max(0, Math.floor(effectiveStartSec * sampleRate));
+    const finalEndSec = effectiveStartSec + dubbedDurationSec;
+    prevEffectiveEndSec = finalEndSec;
+    maxEndSec = Math.max(maxEndSec, origEndSec, finalEndSec);
+
+    prepared.push({
+      pcm: currentPcm,
+      effectiveStartSec,
+      effectiveEndSec: finalEndSec,
+      shiftSec,
+      originalDurationSec,
+      dubbedDurationSec,
+      atempoApplied,
+      rephraseAttempts,
+      syncStatus,
+      needsShorten: Boolean(current.needsShorten || isOverflow),
+    });
+  }
+
+  const totalSamples = Math.max(sampleRate, Math.ceil(maxEndSec * sampleRate));
+  const masterPcm = Buffer.alloc(totalSamples * bytesPerSample, 0);
+  const actualPlacements: AssembledTurnPlacement[] = [];
+
+  for (const item of prepared) {
+    let currentPcm = item.pcm;
+    const startSample = Math.max(0, Math.round(item.effectiveStartSec * sampleRate));
     const numTurnSamples = Math.floor(currentPcm.length / bytesPerSample);
     const maxSamplesInMaster = Math.max(0, totalSamples - startSample);
     const samplesToWrite = Math.min(numTurnSamples, maxSamplesInMaster);
 
-    // If the very last turn reaches the absolute end of the video buffer, apply 120ms fade-out at the boundary
     if (samplesToWrite < numTurnSamples && samplesToWrite > 0) {
       currentPcm = applyFadeOutOnLastPausePcm(
         currentPcm.subarray(0, samplesToWrite * bytesPerSample),
@@ -1819,35 +1841,36 @@ export async function assembleStrictTimecodeMasterPcm(
       );
     }
 
+    // Строго без наложения речи на речь
     for (let s = 0; s < samplesToWrite; s++) {
       const masterByteOffset = (startSample + s) * bytesPerSample;
-      const existingSample = masterPcm.readInt16LE(masterByteOffset);
-      const turnSample = currentPcm.readInt16LE(s * bytesPerSample);
-      const mixed = Math.max(-32768, Math.min(32767, existingSample + turnSample));
-      masterPcm.writeInt16LE(mixed, masterByteOffset);
+      masterPcm.writeInt16LE(currentPcm.readInt16LE(s * bytesPerSample), masterByteOffset);
     }
 
     const roundedDubbedDur = Math.round((samplesToWrite / sampleRate) * 100) / 100;
-    const roundedStart = Math.round(effectiveStartSec * 100) / 100;
-    const roundedEnd = Math.round((effectiveStartSec + roundedDubbedDur) * 100) / 100;
+    const roundedStart = Math.round(item.effectiveStartSec * 100) / 100;
+    const roundedEnd = Math.round((item.effectiveStartSec + roundedDubbedDur) * 100) / 100;
 
     actualPlacements.push({
       startSec: roundedStart,
       endSec: roundedEnd,
       durationSec: roundedDubbedDur,
-      originalDurationSec,
+      originalDurationSec: item.originalDurationSec,
       dubbedDurationSec: roundedDubbedDur,
-      atempoApplied: Math.round(atempoApplied * 100) / 100,
-      rephraseAttempts,
-      syncStatus,
-      shiftedStartBySec: Math.round(appliedShiftHere * 100) / 100,
+      atempoApplied: Math.round(item.atempoApplied * 100) / 100,
+      rephraseAttempts: item.rephraseAttempts,
+      syncStatus: item.syncStatus,
+      shiftedStartBySec: Math.round(item.shiftSec * 100) / 100,
+      needsShorten: item.needsShorten,
       pcm: currentPcm.subarray(0, samplesToWrite * bytesPerSample),
     });
   }
 
-  const finalDurationSec = Math.round((masterPcm.length / bytesPerSec) * 10) / 10;
+  // Плавный fade-out 120 мс в самом конце мастер-дорожки
+  const fadedMaster = applyFadeOutOnLastPausePcm(masterPcm, 120, sampleRate);
+  const finalDurationSec = Math.round((fadedMaster.length / bytesPerSec) * 10) / 10;
   return {
-    masterPcm,
+    masterPcm: fadedMaster,
     totalDurationSec: finalDurationSec,
     actualPlacements,
   };
