@@ -15,9 +15,17 @@ export const DUBBING_MODELS_CONFIG = {
   ],
 
   /**
-   * Специализированная модель дословного распознавания речи.
+   * Специализированная модель дословного распознавания речи (только чистый текст без JSON/таймкодов).
    */
   transcribeModel: process.env.DUBBING_TRANSCRIBE_MODEL || "gemini-3.5-transcribe",
+
+  /**
+   * Мультимодальная модель для структурированного выравнивания подблока аудио
+   * (JSON responseSchema: index, startSec, endSec, found, voice male/female, spokenText).
+   * gemini-3.5-transcribe возвращает только plain-text ASR без колонок и таймкодов, поэтому для
+   * выравнивания и верификации голоса используется gemini-4-hydrogen.
+   */
+  audioAlignmentModel: process.env.DUBBING_ALIGNMENT_MODEL || "gemini-4-hydrogen",
 
   /**
    * Параметры бюджета слогов при переводе:

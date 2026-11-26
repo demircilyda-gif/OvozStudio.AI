@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel, Type } from "@google/genai";
 
 export const PCM_SAMPLE_RATE = 24000;
 export const PCM_BYTES_PER_SAMPLE = 2; // 16-bit mono LE
@@ -435,6 +435,43 @@ export interface SlicedTurnClip {
   endMs: number;
   durationSec: number;
   method: "vad_exact" | "vad_dp" | "transcribe_aligned" | "single_fallback";
+  spokenText?: string;
+  detectedVoice?: "male" | "female" | "unknown";
+  boundarySnapped?: boolean;
+  boundaryIssue?: string;
+}
+
+/**
+ * Находит ближайшую паузу-кандидат (>= 120 мс) в пределах ±maxToleranceSec (по умолчанию 0.6 с)
+ * от целевой границы модели. Если подходящей паузы нет — возвращает null (брак границы).
+ */
+export function findNearestSilenceCandidate(
+  pauses: SilenceRun[],
+  targetSec: number,
+  maxToleranceSec: number = 0.6,
+  minSampleExclusive: number = -1
+): SilenceRun | null {
+  let best: SilenceRun | null = null;
+  let bestDist = Infinity;
+
+  for (const run of pauses) {
+    if (run.midSample <= minSampleExclusive) continue;
+    const startSec = run.startMs / 1000;
+    const endSec = run.endMs / 1000;
+    const midSec = run.midMs / 1000;
+    const distToInterval =
+      targetSec < startSec ? startSec - targetSec : targetSec > endSec ? targetSec - endSec : 0;
+    const distToMid = Math.abs(midSec - targetSec);
+    if (distToInterval > maxToleranceSec && distToMid > maxToleranceSec) continue;
+
+    // Приоритет: минимальное расстояние до интервала паузы, затем до середины паузы
+    const score = distToInterval * 10 + distToMid;
+    if (score < bestDist) {
+      bestDist = score;
+      best = run;
+    }
+  }
+  return best;
 }
 
 /**
@@ -671,14 +708,41 @@ export function trimSilenceEdgesPcm(pcm: Buffer, marginMs: number = 25): Buffer 
   return Buffer.from(pcm.subarray(s0 * 2, s1 * 2));
 }
 
+export interface TranscribeTurnAlignment {
+  index: number;
+  startSec: number;
+  endSec: number;
+  found: boolean;
+  voice: "male" | "female" | "unknown";
+  spokenText: string;
+  boundarySnapped: boolean;
+  boundaryIssue?: string;
+}
+
 export interface TranscribeAlignedResult {
   success: boolean;
   clips: Array<SlicedTurnClip | null>;
+  turnAlignments: TranscribeTurnAlignment[];
   missingIndices: number[];
   rawSegmentsCount: number;
   wallTimeMs: number;
   heardTranscript?: string;
+  usedApiCall: boolean;
   error?: string;
+}
+
+export interface AlignExpectedTurnInput {
+  index: number;
+  speaker: string;
+  text: string;
+  gender?: "male" | "female";
+}
+
+export interface FakeTurnAlignmentOverride {
+  spokenText?: string;
+  voice?: "male" | "female" | "unknown";
+  boundarySnapped?: boolean;
+  boundaryIssue?: string;
 }
 
 export function isFakeDubbingTtsEnabled(): boolean {
@@ -762,56 +826,354 @@ export function generateSyntheticBlockPcm(
   return { pcm: Buffer.concat(parts), boundaries };
 }
 
+export interface ParsedAlignmentRow {
+  startSec: number;
+  endSec: number;
+  found: boolean;
+  voice: "male" | "female" | "unknown";
+  spokenText: string;
+}
+
+function normalizeAlignmentVoiceTag(raw?: unknown): "male" | "female" | "unknown" {
+  const v = String(raw ?? "").trim().toLowerCase();
+  if (v === "male" || v === "m" || v === "man" || v === "муж" || v === "м") return "male";
+  if (v === "female" || v === "f" || v === "woman" || v === "жен" || v === "ж") return "female";
+  return "unknown";
+}
+
 /**
- * Часть 2.5: Точное выравнивание границ реплик в длинном блочном аудио через `gemini-3.5-transcribe`
- * с уточнением каждой точки реза по локальному минимуму энергии PCM (±220 мс), чтобы слово никогда не резалось.
- * Гарантирует строгий монотонный порядок клипов без перекрытий (startMs >= prevEndMs).
- * Тратит 0 вызовов TTS!
+ * Парсит ответ модели выравнивания:
+ * 1) Структурированный JSON `{ turns: [{ index, startSec, endSec, found, voice, spokenText }] }`
+ *    (или JSON-массив `[...]`, с опциональными markdown-ограждениями ```json ... ```);
+ * 2) Резервный текстовый формат `INDEX | START_SEC | END_SEC | FOUND | VOICE | SPOKEN_TEXT`.
+ * Если модель вернула обычный сплошной текст без структуры (как gemini-3.5-transcribe),
+ * вернёт пустую Map.
+ */
+export function parseAlignmentModelOutput(rawText: string): Map<number, ParsedAlignmentRow> {
+  const segMap = new Map<number, ParsedAlignmentRow>();
+  const trimmed = String(rawText || "").trim();
+  if (!trimmed) return segMap;
+
+  // 1) Попытка распарсить JSON (в том числе в ```json ... ```)
+  const unfenced = trimmed
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+
+  if (unfenced.startsWith("{") || unfenced.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(unfenced);
+      const rows = Array.isArray(parsed)
+        ? parsed
+        : parsed && typeof parsed === "object" && Array.isArray((parsed as any).turns)
+          ? (parsed as any).turns
+          : null;
+
+      if (rows) {
+        for (const item of rows) {
+          if (!item || typeof item !== "object") continue;
+          const idxRaw = (item as any).index;
+          const idx = typeof idxRaw === "number" ? Math.trunc(idxRaw) : parseInt(String(idxRaw), 10);
+          const s0Raw = (item as any).startSec ?? (item as any).start_sec;
+          const s1Raw = (item as any).endSec ?? (item as any).end_sec;
+          const s0 =
+            typeof s0Raw === "number" ? s0Raw : parseFloat(String(s0Raw ?? "").replace(",", "."));
+          const s1 =
+            typeof s1Raw === "number" ? s1Raw : parseFloat(String(s1Raw ?? "").replace(",", "."));
+          if (!Number.isFinite(idx) || idx < 0 || !Number.isFinite(s0) || !Number.isFinite(s1)) {
+            continue;
+          }
+          const foundRaw = (item as any).found;
+          const found =
+            typeof foundRaw === "boolean"
+              ? foundRaw && s1 > s0
+              : String(foundRaw ?? "true").trim().toLowerCase() !== "false" && s1 > s0;
+          const voice = normalizeAlignmentVoiceTag((item as any).voice);
+          const spokenText = String(
+            (item as any).spokenText ?? (item as any).spoken_text ?? ""
+          ).trim();
+          segMap.set(idx, { startSec: s0, endSec: s1, found, voice, spokenText });
+        }
+        if (segMap.size > 0) return segMap;
+      }
+    } catch {
+      // Fallback to pipe-delimited parser below
+    }
+  }
+
+  // 2) Резервный парсер "0 | 0.05 | 3.45 | true | male | spoken text" (или 4–5 колонок)
+  for (const line of trimmed.split(/\r?\n/)) {
+    const cleanLine = line.replace(/^[-*>\s]+/, "").trim();
+    if (!cleanLine || !cleanLine.includes("|")) continue;
+    const cols = cleanLine.split("|").map((c) => c.trim());
+    if (cols.length < 3) continue;
+    const idx = parseInt(cols[0], 10);
+    const s0 = parseFloat(cols[1].replace(",", "."));
+    const s1 = parseFloat(cols[2].replace(",", "."));
+    if (isNaN(idx) || isNaN(s0) || isNaN(s1)) continue;
+
+    let found = s1 > s0;
+    let voice: "male" | "female" | "unknown" = "unknown";
+    let spokenText = "";
+
+    if (cols.length >= 6) {
+      found = cols[3].toLowerCase() !== "false" && s1 > s0;
+      voice = normalizeAlignmentVoiceTag(cols[4]);
+      spokenText = cols.slice(5).join(" | ").trim();
+    } else if (cols.length === 5) {
+      found = cols[3].toLowerCase() !== "false" && s1 > s0;
+      const maybeVoice = normalizeAlignmentVoiceTag(cols[4]);
+      if (maybeVoice !== "unknown") {
+        voice = maybeVoice;
+      } else {
+        spokenText = cols[4];
+      }
+    } else if (cols.length === 4) {
+      found = cols[3].toLowerCase() !== "false" && s1 > s0;
+    }
+
+    segMap.set(idx, { startSec: s0, endSec: s1, found, voice, spokenText });
+  }
+
+  return segMap;
+}
+
+/**
+ * Выравнивание границ реплик И верификация (SPOKEN_TEXT + VOICE male/female) в ОДНОМ запросе
+ * к мультимодальной модели `gemini-4-hydrogen` (JSON responseSchema) на подблок.
+ *
+ * Правила нарезки:
+ * - Кандидаты разрезов — реальные паузы по тишине (>= 120 мс) в PCM.
+ * - Каждая внутренняя граница реплики привязывается строго к ближайшей паузе-кандидату
+ *   в пределах ±0.6 с от границы модели. Если паузы в ±0.6 с нет — boundarySnapped = false (брак!).
+ * - Гарантирует строгий монотонный порядок клипов без перекрытий (startMs >= prevEndMs).
+ * - Тратит 0 вызовов TTS!
  */
 export async function alignBatchAudioViaTranscribe(
   ai: GoogleGenAI,
   pcm: Buffer,
-  expectedTurns: Array<{ index: number; speaker: string; text: string }>,
-  transcribeModel: string = "gemini-3.5-transcribe"
+  expectedTurns: AlignExpectedTurnInput[],
+  alignmentModel: string = "gemini-4-hydrogen",
+  options?: {
+    silenceMinMs?: number;
+    snapToleranceSec?: number;
+    fakeTurnOverrides?: Array<FakeTurnAlignmentOverride | null | undefined>;
+    fakeWholeTranscriptOverride?: string;
+  }
 ): Promise<TranscribeAlignedResult> {
   const t0 = Date.now();
   const totalSamples = Math.floor(pcm.length / 2);
   const totalDurationSec = totalSamples / PCM_SAMPLE_RATE;
+  const silenceMinMs = options?.silenceMinMs ?? 120;
+  const snapToleranceSec = options?.snapToleranceSec ?? 0.6;
 
   if (expectedTurns.length === 0 || totalSamples < 480) {
     return {
       success: false,
       clips: [],
+      turnAlignments: [],
       missingIndices: expectedTurns.map((t) => t.index),
       rawSegmentsCount: 0,
       wallTimeMs: Date.now() - t0,
+      usedApiCall: false,
       error: "Empty PCM or turns",
     };
   }
 
-  // Тестовый режим DUBBING_FAKE_TTS=1: 0 реальных вызовов API — выравниваем по тишине/пропорциям
+  // Кандидаты разрезов — все паузы по тишине >= 120 мс в PCM
+  const silenceCandidates = detectSilenceRuns(pcm, {
+    frameMs: 10,
+    minSilenceMs: silenceMinMs,
+  });
+
+  // Вычисляем реальное начало и конец речи в PCM для корректного допуска на 0-й и последней реплике
+  let firstSpeechSample = 0;
+  let lastSpeechSample = totalSamples;
+  {
+    const threshold = 160;
+    let first = 0;
+    while (first < totalSamples && Math.abs(pcm.readInt16LE(first * 2)) < threshold) {
+      first += 24;
+    }
+    let last = totalSamples - 1;
+    while (last > first && Math.abs(pcm.readInt16LE(last * 2)) < threshold) {
+      last -= 24;
+    }
+    firstSpeechSample = Math.min(first, totalSamples);
+    lastSpeechSample = Math.max(firstSpeechSample + 240, Math.min(totalSamples, last + 1));
+  }
+  const firstSpeechSec = firstSpeechSample / PCM_SAMPLE_RATE;
+  const lastSpeechSec = lastSpeechSample / PCM_SAMPLE_RATE;
+
+  // Тестовый режим DUBBING_FAKE_TTS=1: 0 реальных вызовов API — строим выравнивание строго по паузам >= 120 мс
   if (isFakeDubbingTtsEnabled()) {
+    const turnOverrides = options?.fakeTurnOverrides || [];
+    const wholeOverride = options?.fakeWholeTranscriptOverride;
+
+    const getFakeSpoken = (idx: number): string => {
+      const ov = turnOverrides[idx];
+      if (ov && typeof ov.spokenText === "string") return ov.spokenText;
+      if (typeof wholeOverride === "string") {
+        // Если тест подменил всю транскрипцию подблока целиком — приписываем её в 0-ю реплику / делим по репликам
+        if (idx === 0) return wholeOverride;
+        return "";
+      }
+      return String(expectedTurns[idx].text || "")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    };
+
+    const getFakeVoice = (idx: number): "male" | "female" | "unknown" => {
+      const ov = turnOverrides[idx];
+      if (ov?.voice) return ov.voice;
+      return expectedTurns[idx].gender || "unknown";
+    };
+
+    if (expectedTurns.length === 1) {
+      const clean = applyMicroEdgeFades(trimSilenceEdgesPcm(pcm, 20), 6);
+      const durSec = Math.round((clean.length / PCM_BYTES_PER_SEC) * 100) / 100;
+      const ov0 = turnOverrides[0];
+      const spoken0 = getFakeSpoken(0);
+      const voice0 = getFakeVoice(0);
+      const snapped0 = ov0?.boundarySnapped ?? true;
+      const issue0 = ov0?.boundaryIssue ?? (snapped0 ? undefined : "no_silence_boundary_near_cut");
+      const clip: SlicedTurnClip = {
+        index: 0,
+        pcm: clean,
+        startMs: 0,
+        endMs: Math.max(100, Math.round(totalDurationSec * 1000)),
+        durationSec: durSec,
+        method: "transcribe_aligned",
+        spokenText: spoken0,
+        detectedVoice: voice0,
+        boundarySnapped: snapped0,
+        boundaryIssue: issue0,
+      };
+      return {
+        success: snapped0,
+        clips: [clip],
+        turnAlignments: [
+          {
+            index: 0,
+            startSec: 0,
+            endSec: totalDurationSec,
+            found: true,
+            voice: voice0,
+            spokenText: spoken0,
+            boundarySnapped: snapped0,
+            boundaryIssue: issue0,
+          },
+        ],
+        missingIndices: [],
+        rawSegmentsCount: 1,
+        wallTimeMs: Date.now() - t0,
+        heardTranscript: typeof wholeOverride === "string" ? wholeOverride : spoken0,
+        usedApiCall: false,
+      };
+    }
+
+    // Несколько реплик в фейковом PCM: находим разрезы строго по паузам-кандидатам (>= 120 мс)
     const vad = sliceBatchPcmByVad(
       pcm,
       expectedTurns.map((t) => t.text),
-      { minSilenceMs: 200 }
+      { minSilenceMs: silenceMinMs }
     );
+
     if (vad.clips.length === expectedTurns.length) {
+      const clips: Array<SlicedTurnClip | null> = [];
+      const turnAlignments: TranscribeTurnAlignment[] = [];
+      for (let i = 0; i < expectedTurns.length; i++) {
+        const baseClip = vad.clips[i];
+        const ov = turnOverrides[i];
+        const spoken = getFakeSpoken(i);
+        const voice = getFakeVoice(i);
+        // Проверяем, что внутренние границы реально лежат на паузе >= 120 мс в пределах ±0.6с
+        let snapped = ov?.boundarySnapped ?? true;
+        let issue = ov?.boundaryIssue;
+        if (snapped && i > 0) {
+          const nearStart = findNearestSilenceCandidate(
+            silenceCandidates,
+            baseClip.startMs / 1000,
+            snapToleranceSec
+          );
+          if (!nearStart) {
+            snapped = false;
+            issue = `no_silence_boundary_near_start (turn ${i})`;
+          }
+        }
+        if (snapped && i + 1 < expectedTurns.length) {
+          const nearEnd = findNearestSilenceCandidate(
+            silenceCandidates,
+            baseClip.endMs / 1000,
+            snapToleranceSec
+          );
+          if (!nearEnd) {
+            snapped = false;
+            issue = `no_silence_boundary_near_end (turn ${i})`;
+          }
+        }
+        clips.push({
+          ...baseClip,
+          method: "transcribe_aligned",
+          spokenText: spoken,
+          detectedVoice: voice,
+          boundarySnapped: snapped,
+          boundaryIssue: issue,
+        });
+        turnAlignments.push({
+          index: i,
+          startSec: baseClip.startMs / 1000,
+          endSec: baseClip.endMs / 1000,
+          found: true,
+          voice,
+          spokenText: spoken,
+          boundarySnapped: snapped,
+          boundaryIssue: issue,
+        });
+      }
+
+      const heardTranscript =
+        typeof wholeOverride === "string"
+          ? wholeOverride
+          : turnAlignments
+              .map((a) => a.spokenText)
+              .filter(Boolean)
+              .join(" ")
+              .trim();
+
       return {
-        success: true,
-        clips: vad.clips.map((c) => ({ ...c, method: "transcribe_aligned" })),
+        success: turnAlignments.every((a) => a.boundarySnapped),
+        clips,
+        turnAlignments,
         missingIndices: [],
-        rawSegmentsCount: vad.clips.length,
+        rawSegmentsCount: clips.length,
         wallTimeMs: Date.now() - t0,
+        heardTranscript,
+        usedApiCall: false,
       };
     }
+
+    // Недостаточно пауз >= 120 мс в фейковом PCM (например, тест без пауз или с пропущенной репликой)
     return {
       success: false,
       clips: expectedTurns.map(() => null),
+      turnAlignments: expectedTurns.map((_, i) => ({
+        index: i,
+        startSec: 0,
+        endSec: 0,
+        found: false,
+        voice: "unknown",
+        spokenText: "",
+        boundarySnapped: false,
+        boundaryIssue: `no_silence_boundary_near_cut (pauses=${silenceCandidates.length}, needed=${expectedTurns.length - 1})`,
+      })),
       missingIndices: expectedTurns.map((_, i) => i),
       rawSegmentsCount: 0,
       wallTimeMs: Date.now() - t0,
-      error: "Fake mode align fallback",
+      heardTranscript: typeof wholeOverride === "string" ? wholeOverride : undefined,
+      usedApiCall: false,
+      error: "Fake mode align: insufficient silence candidates (>=120ms)",
     };
   }
 
@@ -820,34 +1182,47 @@ export async function alignBatchAudioViaTranscribe(
     const turnListText = expectedTurns
       .map(
         (t, i) =>
-          `${i}: [${t.speaker}] ${String(t.text || "")
+          `${i}: [${t.speaker}${t.gender ? `/${t.gender}` : ""}] ${String(t.text || "")
             .replace(/<[^>]+>/g, " ")
             .replace(/\s+/g, " ")
             .trim()}`
       )
       .join("\n");
 
-    const prompt = `Listen to this ${totalDurationSec.toFixed(2)}-second Uzbek audio recording and output ONLY timestamped alignment lines for each of the ${expectedTurns.length} scripted lines below in order.
+    const silenceSummary =
+      silenceCandidates.length > 0
+        ? silenceCandidates
+            .slice(0, 60)
+            .map(
+              (s) =>
+                `${(s.startMs / 1000).toFixed(2)}–${(s.endMs / 1000).toFixed(2)}s (mid ${(s.midMs / 1000).toFixed(2)}s, ${s.durationMs}ms)`
+            )
+            .join(", ")
+        : "none detected";
 
-STRICT OUTPUT FORMAT (one line per turn, plain text, no markdown, no extra text):
-INDEX | START_SEC | END_SEC | FOUND | SPOKEN_TEXT
-Example:
-0 | 0.00 | 3.45 | true | Assalomu alaykum hammaga
-1 | 3.60 | 6.90 | true | Bugun yangi mashinani sinab ko'ramiz
+    const isStructuredMultimodalModel = !/transcribe|tts/i.test(alignmentModel);
+    const supportsThinkingLevel =
+      isStructuredMultimodalModel && /^gemini-(3|4)/i.test(alignmentModel);
+
+    const prompt = `Listen carefully to this ${totalDurationSec.toFixed(2)}-second Uzbek dialogue audio recording and align each of the ${expectedTurns.length} scripted turns below in order.
+
+DETECTED PCM SILENCE PAUSES (>= ${silenceMinMs}ms) IN THIS AUDIO:
+${silenceSummary}
 
 RULES:
-- Every index from 0 to ${expectedTurns.length - 1} must appear once in ascending order.
-- START_SEC and END_SEC are decimal seconds within [0.00, ${totalDurationSec.toFixed(2)}].
-- Never cut mid-word: cover the complete spoken utterance for each line.
-- Timestamps MUST be strictly non-overlapping and ascending: next START_SEC >= previous END_SEC.
-- SPOKEN_TEXT must transcribe verbatim what was ACTUALLY spoken in that audio interval (including any repeated words or English words if actually spoken).
-- If a line was skipped in the audio, write: INDEX | 0 | 0 | false |
+- Return every turn index from 0 to ${expectedTurns.length - 1} once in ascending order.
+- startSec and endSec are decimal seconds within [0.00, ${totalDurationSec.toFixed(2)}], covering the full spoken utterance without cutting any word.
+- Align inter-turn boundaries to the real silence pauses listed above whenever a pause separates two turns.
+- Timestamps MUST be strictly non-overlapping and ascending: next startSec >= previous endSec.
+- voice MUST be strictly "male" or "female" based on the ACTUAL voice heard in that audio interval (use "unknown" only if silent/unintelligible). Do NOT blindly copy the script gender if the wrong voice spoke that line.
+- spokenText MUST transcribe VERBATIM what was ACTUALLY spoken in Uzbek in that exact interval (do NOT copy from the script if the audio differed; include any repeated words, cut-offs, or English words actually heard).
+- If a scripted line was skipped/missing in the audio, set found=false, startSec=0, endSec=0, voice="unknown", spokenText="".
 
-SCRIPTED LINES:
+SCRIPTED TURNS:
 ${turnListText}`;
 
-    const response = await ai.models.generateContent({
-      model: transcribeModel,
+    const requestParams: any = {
+      model: alignmentModel,
       contents: [
         {
           role: "user",
@@ -862,43 +1237,55 @@ ${turnListText}`;
           ],
         },
       ],
-    });
+    };
+
+    if (isStructuredMultimodalModel) {
+      requestParams.config = {
+        ...(supportsThinkingLevel
+          ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+          : {}),
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            turns: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  index: { type: Type.INTEGER },
+                  startSec: { type: Type.NUMBER },
+                  endSec: { type: Type.NUMBER },
+                  found: { type: Type.BOOLEAN },
+                  voice: { type: Type.STRING },
+                  spokenText: { type: Type.STRING },
+                },
+                required: ["index", "startSec", "endSec", "found", "voice", "spokenText"],
+              },
+            },
+          },
+          required: ["turns"],
+        },
+      };
+    }
+
+    const response = await ai.models.generateContent(requestParams);
 
     const rawText = String(response.text || "").trim();
-    const segMap = new Map<number, { startSec: number; endSec: number; found: boolean; spokenText?: string }>();
-
-    // Парсим формат "0 | 0.00 | 3.45 | true | spoken text" или "[0] 0.00-3.45"
-    for (const line of rawText.split(/\r?\n/)) {
-      const cleanLine = line.trim();
-      if (!cleanLine) continue;
-      const pipeMatch = cleanLine.match(
-        /^(\d+)\s*\|\s*(\d+(?:[.,]\d+)?)\s*\|\s*(\d+(?:[.,]\d+)?)(?:\s*\|\s*(true|false))?(?:\s*\|\s*(.*))?$/i
-      );
-      if (pipeMatch) {
-        const idx = parseInt(pipeMatch[1], 10);
-        const s0 = parseFloat(pipeMatch[2].replace(",", "."));
-        const s1 = parseFloat(pipeMatch[3].replace(",", "."));
-        const found = pipeMatch[4] ? pipeMatch[4].toLowerCase() !== "false" : s1 > s0;
-        const spokenText = pipeMatch[5] ? pipeMatch[5].trim() : "";
-        if (!isNaN(idx) && !isNaN(s0) && !isNaN(s1)) {
-          segMap.set(idx, { startSec: s0, endSec: s1, found, spokenText });
-        }
-        continue;
-      }
-      const rangeMatch = cleanLine.match(
-        /^\[?(\d+)\]?[:.\s]+(\d+(?:[.,]\d+)?)\s*[-–]\s*(\d+(?:[.,]\d+)?)/
-      );
-      if (rangeMatch) {
-        const idx = parseInt(rangeMatch[1], 10);
-        const s0 = parseFloat(rangeMatch[2].replace(",", "."));
-        const s1 = parseFloat(rangeMatch[3].replace(",", "."));
-        if (!isNaN(idx) && !isNaN(s0) && !isNaN(s1)) {
-          segMap.set(idx, { startSec: s0, endSec: s1, found: s1 > s0 });
-        }
-      }
+    const segMap = parseAlignmentModelOutput(rawText);
+    const parseError =
+      segMap.size === 0
+        ? `alignment_parse_empty (${alignmentModel}): ${rawText.slice(0, 120) || "empty response"}`
+        : undefined;
+    if (parseError) {
+      console.warn("[alignBatchAudioViaTranscribe] 0 segments parsed from alignment output:", {
+        model: alignmentModel,
+        rawPreview: rawText.slice(0, 240),
+      });
     }
 
     const clips: Array<SlicedTurnClip | null> = [];
+    const turnAlignments: TranscribeTurnAlignment[] = [];
     const missingIndices: number[] = [];
     let prevEndSample = 0;
 
@@ -909,32 +1296,122 @@ ${turnListText}`;
         !seg.found ||
         typeof seg.startSec !== "number" ||
         typeof seg.endSec !== "number" ||
-        seg.endSec <= seg.startSec + 0.12
+        seg.endSec <= seg.startSec + 0.1
       ) {
         clips.push(null);
         missingIndices.push(i);
+        turnAlignments.push({
+          index: i,
+          startSec: seg?.startSec ?? 0,
+          endSec: seg?.endSec ?? 0,
+          found: false,
+          voice: seg?.voice ?? "unknown",
+          spokenText: seg?.spokenText ?? "",
+          boundarySnapped: false,
+          boundaryIssue: `turn_not_found_in_transcribe (turn ${i})`,
+        });
         continue;
       }
 
       const safeStartSec = Math.max(0, Math.min(totalDurationSec - 0.1, seg.startSec));
-      const safeEndSec = Math.max(safeStartSec + 0.12, Math.min(totalDurationSec, seg.endSec));
+      const safeEndSec = Math.max(safeStartSec + 0.1, Math.min(totalDurationSec, seg.endSec));
 
-      // Уточняем точки реза по локальному минимуму энергии PCM (±200 мс), чтобы не обрезать начало/конец слова
-      let startSample = refineCutSampleToEnergyMinimum(pcm, safeStartSec, 200);
-      const endSample = refineCutSampleToEnergyMinimum(pcm, safeEndSec, 200);
+      let boundarySnapped = true;
+      let boundaryIssue: string | undefined;
 
-      // Строгая защита от перекрытий и нарушения порядка между клипами
-      if (startSample < prevEndSample) {
-        startSample = prevEndSample;
+      // 1) Привязка START к ближайшей паузе-кандидату (>= 120 мс) в пределах ±0.6 с
+      let startSample: number;
+      if (i === 0) {
+        if (safeStartSec <= snapToleranceSec || Math.abs(safeStartSec - firstSpeechSec) <= snapToleranceSec) {
+          startSample = 0;
+        } else {
+          const candStart = findNearestSilenceCandidate(silenceCandidates, safeStartSec, snapToleranceSec);
+          if (candStart) {
+            startSample = candStart.midSample;
+          } else {
+            boundarySnapped = false;
+            boundaryIssue = `no_silence_boundary_near_start (turn 0 @ ${safeStartSec.toFixed(2)}s)`;
+            startSample = Math.round(safeStartSec * PCM_SAMPLE_RATE);
+          }
+        }
+      } else {
+        // Внутренняя граница: проверяем, попадает ли предыдущая привязанная пауза или ближайшая пауза в ±0.6с
+        const candStart = findNearestSilenceCandidate(
+          silenceCandidates,
+          safeStartSec,
+          snapToleranceSec,
+          Math.max(-1, prevEndSample - Math.round(PCM_SAMPLE_RATE * 0.05))
+        );
+        if (candStart) {
+          startSample = Math.max(prevEndSample, candStart.midSample);
+        } else if (Math.abs(prevEndSample / PCM_SAMPLE_RATE - safeStartSec) <= snapToleranceSec) {
+          // Предыдущая граница уже была привязана к паузе-кандидату в пределах ±0.6 с
+          startSample = prevEndSample;
+        } else {
+          boundarySnapped = false;
+          boundaryIssue = `no_silence_boundary_near_start (turn ${i} @ ${safeStartSec.toFixed(2)}s)`;
+          startSample = Math.max(prevEndSample, Math.round(safeStartSec * PCM_SAMPLE_RATE));
+        }
       }
 
-      if (endSample <= startSample + Math.round(PCM_SAMPLE_RATE * 0.12)) {
+      // 2) Привязка END к ближайшей паузе-кандидату (>= 120 мс) в пределах ±0.6 с
+      let endSample: number;
+      if (i === expectedTurns.length - 1) {
+        if (
+          totalDurationSec - safeEndSec <= snapToleranceSec ||
+          Math.abs(safeEndSec - lastSpeechSec) <= snapToleranceSec
+        ) {
+          endSample = totalSamples;
+        } else {
+          const candEnd = findNearestSilenceCandidate(
+            silenceCandidates,
+            safeEndSec,
+            snapToleranceSec,
+            startSample
+          );
+          if (candEnd) {
+            endSample = candEnd.midSample;
+          } else {
+            boundarySnapped = false;
+            boundaryIssue =
+              boundaryIssue || `no_silence_boundary_near_end (turn ${i} @ ${safeEndSec.toFixed(2)}s)`;
+            endSample = Math.min(totalSamples, Math.round(safeEndSec * PCM_SAMPLE_RATE));
+          }
+        }
+      } else {
+        const candEnd = findNearestSilenceCandidate(
+          silenceCandidates,
+          safeEndSec,
+          snapToleranceSec,
+          startSample
+        );
+        if (candEnd) {
+          endSample = candEnd.midSample;
+        } else {
+          boundarySnapped = false;
+          boundaryIssue =
+            boundaryIssue || `no_silence_boundary_near_end (turn ${i} @ ${safeEndSec.toFixed(2)}s)`;
+          endSample = Math.min(totalSamples, Math.round(safeEndSec * PCM_SAMPLE_RATE));
+        }
+      }
+
+      if (endSample <= startSample + Math.round(PCM_SAMPLE_RATE * 0.1)) {
         clips.push(null);
         missingIndices.push(i);
+        turnAlignments.push({
+          index: i,
+          startSec: safeStartSec,
+          endSec: safeEndSec,
+          found: false,
+          voice: seg.voice,
+          spokenText: seg.spokenText,
+          boundarySnapped: false,
+          boundaryIssue: boundaryIssue || `degenerate_clip_bounds (turn ${i})`,
+        });
         continue;
       }
 
-      const slice = trimSilenceEdgesPcm(pcm.subarray(startSample * 2, endSample * 2), 25);
+      const slice = trimSilenceEdgesPcm(pcm.subarray(startSample * 2, endSample * 2), 20);
       const clean = applyMicroEdgeFades(slice, 6);
       clips.push({
         index: i,
@@ -943,32 +1420,62 @@ ${turnListText}`;
         endMs: Math.round((endSample / PCM_SAMPLE_RATE) * 1000),
         durationSec: Math.round((clean.length / PCM_BYTES_PER_SEC) * 100) / 100,
         method: "transcribe_aligned",
+        spokenText: seg.spokenText,
+        detectedVoice: seg.voice,
+        boundarySnapped,
+        boundaryIssue,
+      });
+      turnAlignments.push({
+        index: i,
+        startSec: startSample / PCM_SAMPLE_RATE,
+        endSec: endSample / PCM_SAMPLE_RATE,
+        found: true,
+        voice: seg.voice,
+        spokenText: seg.spokenText,
+        boundarySnapped,
+        boundaryIssue,
       });
       prevEndSample = endSample;
     }
 
-    const heardParts: string[] = [];
-    for (let i = 0; i < expectedTurns.length; i++) {
-      const s = segMap.get(i);
-      if (s?.spokenText) heardParts.push(s.spokenText);
-    }
-    const heardTranscript = heardParts.join(" ").trim() || undefined;
+    const heardTranscript = turnAlignments
+      .map((a) => a.spokenText)
+      .filter(Boolean)
+      .join(" ")
+      .trim() || undefined;
 
     return {
-      success: missingIndices.length <= Math.min(3, Math.floor(expectedTurns.length * 0.2)),
+      success:
+        !parseError &&
+        missingIndices.length === 0 &&
+        turnAlignments.every((a) => a.boundarySnapped),
       clips,
+      turnAlignments,
       missingIndices,
       rawSegmentsCount: segMap.size,
       wallTimeMs: Date.now() - t0,
       heardTranscript,
+      usedApiCall: true,
+      error: parseError,
     };
   } catch (err: any) {
     return {
       success: false,
       clips: expectedTurns.map(() => null),
+      turnAlignments: expectedTurns.map((_, i) => ({
+        index: i,
+        startSec: 0,
+        endSec: 0,
+        found: false,
+        voice: "unknown",
+        spokenText: "",
+        boundarySnapped: false,
+        boundaryIssue: String(err?.message || err),
+      })),
       missingIndices: expectedTurns.map((_, i) => i),
       rawSegmentsCount: 0,
       wallTimeMs: Date.now() - t0,
+      usedApiCall: true,
       error: String(err?.message || err),
     };
   }

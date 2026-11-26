@@ -3,11 +3,18 @@
  * Replaces localStorage to store heavy WAV audio base64 buffers (which easily exceed 5MB limit).
  */
 import { CMSPodcastItem } from '../components/PodcastCMS';
+import {
+  DUBBING_CACHE_VERSION,
+  type CachedDialogueSubBlock,
+} from './dubbingSubBlockCache';
+
+export { DUBBING_CACHE_VERSION, type CachedDialogueSubBlock };
 
 const DB_NAME = 'podkast_uz_db';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE_PODCASTS = 'podcasts';
 const STORE_TURN_AUDIO = 'dialogue_turn_audio';
+const STORE_SUBBLOCK_CACHE = 'dialogue_subblock_cache';
 
 export interface CachedDialogueTurnAudio {
   cacheKey: string;
@@ -35,14 +42,14 @@ export interface CachedDialogueTurnAudio {
 
 /**
  * Deterministic 64-bit dual FNV-1a hash for turn cache invalidation
- * keyed by (text, voice, style). Works in both browser and Node tests.
+ * keyed by (DUBBING_CACHE_VERSION, text, voice, style). Works in both browser and Node tests.
  */
 export function computeTurnAudioHash(params: {
   text: string;
   voiceKey: string;
   styleKey: string;
 }): string {
-  const payload = `${params.text.trim()}\u001f${params.voiceKey.trim()}\u001f${params.styleKey.trim()}`;
+  const payload = `${DUBBING_CACHE_VERSION}\u001f${params.text.trim()}\u001f${params.voiceKey.trim()}\u001f${params.styleKey.trim()}`;
   let h1 = 0x811c9dc5;
   let h2 = 0x9e3779b9;
   for (let i = 0; i < payload.length; i++) {
@@ -62,7 +69,7 @@ export function buildTurnAudioCacheKey(
   turnId: string,
   contentHash: string
 ): string {
-  return `${projectKey}::${turnId}::${contentHash}`;
+  return `${projectKey}::${DUBBING_CACHE_VERSION}::${turnId}::${contentHash}`;
 }
 
 function openDatabase(): Promise<IDBDatabase> {
@@ -83,11 +90,127 @@ function openDatabase(): Promise<IDBDatabase> {
         const turnStore = db.createObjectStore(STORE_TURN_AUDIO, { keyPath: 'cacheKey' });
         turnStore.createIndex('by_project', 'projectKey', { unique: false });
       }
+      if (!db.objectStoreNames.contains(STORE_SUBBLOCK_CACHE)) {
+        const sbStore = db.createObjectStore(STORE_SUBBLOCK_CACHE, { keyPath: 'cacheKey' });
+        sbStore.createIndex('by_project', 'projectKey', { unique: false });
+      }
     };
 
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
+}
+
+/**
+ * Persists complete v3 sub-blocks (only qa = ok | retried) to IndexedDB.
+ */
+export async function saveDialogueSubBlockBatch(
+  entries: CachedDialogueSubBlock[]
+): Promise<void> {
+  if (!entries || entries.length === 0) return;
+  const validEntries = entries.filter(
+    (e) =>
+      e &&
+      e.cacheKey &&
+      e.cacheVersion === DUBBING_CACHE_VERSION &&
+      (e.qa === 'ok' || e.qa === 'retried') &&
+      Array.isArray(e.turns) &&
+      e.turns.length > 0 &&
+      e.turns.every(
+        (t) =>
+          Boolean(t.audioBase64) &&
+          (t.qa === 'ok' || t.qa === 'retried')
+      )
+  );
+  if (validEntries.length === 0) return;
+  try {
+    const db = await openDatabase();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_SUBBLOCK_CACHE, 'readwrite');
+      const store = tx.objectStore(STORE_SUBBLOCK_CACHE);
+      for (const entry of validEntries) {
+        store.put(entry);
+      }
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error('IndexedDB subblock transaction aborted'));
+    });
+  } catch (err) {
+    console.warn('Failed to persist dialogue sub-block cache to IndexedDB:', err);
+  }
+}
+
+/**
+ * Reads complete v3 sub-blocks from IndexedDB by cacheKey.
+ * Strictly ignores any entry missing cacheVersion === 'v3' or containing failed turns.
+ */
+export async function getDialogueSubBlocksByKeys(
+  cacheKeys: string[]
+): Promise<Map<string, CachedDialogueSubBlock>> {
+  const result = new Map<string, CachedDialogueSubBlock>();
+  if (!cacheKeys || cacheKeys.length === 0) return result;
+  try {
+    const db = await openDatabase();
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_SUBBLOCK_CACHE, 'readonly');
+      const store = tx.objectStore(STORE_SUBBLOCK_CACHE);
+      let pending = cacheKeys.length;
+
+      const finish = () => {
+        pending -= 1;
+        if (pending <= 0) resolve(result);
+      };
+
+      for (const key of cacheKeys) {
+        const req = store.get(key);
+        req.onsuccess = () => {
+          const item = req.result as Partial<CachedDialogueSubBlock> | undefined;
+          if (
+            item &&
+            item.cacheVersion === DUBBING_CACHE_VERSION &&
+            (item.qa === 'ok' || item.qa === 'retried') &&
+            Array.isArray(item.turns) &&
+            item.turns.length > 0
+          ) {
+            result.set(key, item as CachedDialogueSubBlock);
+          }
+          finish();
+        };
+        req.onerror = () => finish();
+      }
+
+      tx.onerror = () => resolve(result);
+      tx.onabort = () => resolve(result);
+    });
+  } catch (err) {
+    console.warn('Failed to load dialogue sub-blocks from IndexedDB:', err);
+    return result;
+  }
+}
+
+export async function clearProjectSubBlocksFromDb(projectKey: string): Promise<void> {
+  if (!projectKey) return;
+  try {
+    const db = await openDatabase();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_SUBBLOCK_CACHE, 'readwrite');
+      const store = tx.objectStore(STORE_SUBBLOCK_CACHE);
+      const index = store.index('by_project');
+      const range = IDBKeyRange.only(projectKey);
+      const cursorReq = index.openCursor(range);
+      cursorReq.onsuccess = () => {
+        const cursor = cursorReq.result;
+        if (cursor) {
+          cursor.delete();
+          cursor.continue();
+        }
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (err) {
+    console.warn('Failed to clear project sub-blocks from IndexedDB:', err);
+  }
 }
 
 export async function saveDialogueTurnAudioBatch(

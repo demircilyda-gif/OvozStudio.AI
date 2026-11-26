@@ -8,3 +8,6 @@ data/
 uploads/
 .env*
 !.env.example
+public/assets/aistudio/*.wav
+public/assets/aistudio/*.txt
+public/assets/aistudio/*.png

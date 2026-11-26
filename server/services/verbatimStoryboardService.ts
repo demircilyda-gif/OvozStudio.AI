@@ -409,10 +409,6 @@ export function mapRussianIntonationToStyle(
     }
   }
 
-  styleParts.push(
-    "100% authentic native Uzbek pronunciation with zero foreign accent. Interpret inline vocal tags (<laugh>, <sigh>, <short pause>, <breath>, <cough>) as natural human vocalizations."
-  );
-
   return {
     emotion,
     speechStyle: styleParts.join(". "),

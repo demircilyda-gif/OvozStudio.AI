@@ -65,6 +65,7 @@ import {
 import {
   synthesizeDialogueInMacroBlocks,
   buildTurnPaceDirective,
+  buildCleanTurnStyleForTts,
   stripLegacyPauseArtifacts,
   stripLegacyStylePauseDirective,
   type BatchInputTurn,
@@ -5608,6 +5609,7 @@ function resolveSpeakerVoiceProfile(
   voiceId: string;
   baseVoice: string;
   speakerName: string;
+  gender: "female" | "male";
   baseSpeechStyle: string;
 } {
   const customEntry =
@@ -5671,15 +5673,12 @@ function resolveSpeakerVoiceProfile(
     customEntry.name ||
     (isFemale ? "Malika" : speakerId === "HOST_1" ? "Shohrux" : "Ekspert");
 
-  const baseSpeechStyle = isFemale
-    ? `Natural female Uzbek speaker (${speakerName}). Melodious, expressive, clear feminine voice, 100% authentic Uzbek pronunciation.`
-    : `Natural male Uzbek speaker (${speakerName}). Clear, confident, warm baritone voice, 100% authentic Uzbek pronunciation.`;
-
   return {
     voiceId: rawVoiceId,
     baseVoice,
     speakerName,
-    baseSpeechStyle,
+    gender: (isFemale ? "female" : "male") as "female" | "male",
+    baseSpeechStyle: "",
   };
 }
 
@@ -5781,21 +5780,19 @@ async function synthesizeTurnWithDurationCascade({
       rephraseAttempts += 1;
     }
 
-    const paceDirective = buildTurnPaceDirective(
+    const cleanStyle = buildCleanTurnStyleForTts(
       {
         cleanSpeechText: activeText,
         startSec: turn.startSec,
         endSec: turn.endSec,
         forceFastPace: Boolean(forceFastPace),
+        intonationRu: turn.intonationRu,
+        emotion: turn.emotion,
+        style: combinedTurnStyle || turn.speechStyle || "",
       },
+      undefined,
       Boolean(forceFastPace)
     );
-    const cleanStyle = [
-      stripLegacyStylePauseDirective(combinedTurnStyle || ""),
-      paceDirective,
-    ]
-      .filter(Boolean)
-      .join(". ");
 
     const synthesizeCleanPcm = async (txt: string): Promise<Buffer> => {
       if (isFakeDubbingTtsEnabled()) {
@@ -6002,9 +5999,10 @@ app.post(
             speakerName: resolved.speakerName,
             baseVoice: resolved.baseVoice,
             voiceId: resolved.voiceId,
+            gender: resolved.gender,
             isCloned: cloned,
             replicatedVoiceConfig: replicatedCfg,
-            baseSpeechStyle: resolved.baseSpeechStyle,
+            baseSpeechStyle: "",
           });
         }
 
@@ -6020,11 +6018,11 @@ app.post(
           sanitizeDocumentedTtsTags(spokenText || cleanedTurnText || String(turn.text || "").trim()) ||
           "...";
 
-        const styleTokens = [resolved.baseSpeechStyle];
+        const styleTokens: string[] = [];
         if (turn.speechStyle) styleTokens.push(String(turn.speechStyle));
-        if (turn.intonationRu) styleTokens.push(`Delivery: ${String(turn.intonationRu)}`);
+        if (turn.intonationRu) styleTokens.push(String(turn.intonationRu));
         if (turnExtractedStyles && turnExtractedStyles.length > 0) {
-          styleTokens.push(`Acting & emotional cues: ${turnExtractedStyles.join(", ")}`);
+          styleTokens.push(turnExtractedStyles.join(", "));
         }
 
         const nextStartSec =
@@ -6049,16 +6047,20 @@ app.post(
           speakerName: turn.speakerName || resolved.speakerName,
           text: String(turn.text || "").trim() || "...",
           cleanSpeechText,
-          style: styleTokens.filter(Boolean).join(". "),
+          style: styleTokens.filter(Boolean).join(", "),
           startSec: typeof turn.startSec === "number" ? turn.startSec : undefined,
           endSec: typeof turn.endSec === "number" ? turn.endSec : undefined,
           gapAfterSec,
           emotion: turn.emotion,
           intonationRu: turn.intonationRu,
           originalTextRu: turn.originalTextRu || turn.originalText,
-          speakerGender: turn.speakerGender,
+          speakerGender: turn.speakerGender || resolved.gender,
           sceneTitle: turn.sceneTitle || turn.chapter || undefined,
           inlineTags: turn.inlineTags,
+          plannedSubBlockIndex:
+            typeof turn.plannedSubBlockIndex === "number" && Number.isFinite(turn.plannedSubBlockIndex)
+              ? turn.plannedSubBlockIndex
+              : undefined,
           rawTurn: turn,
         };
       });
@@ -6081,6 +6083,11 @@ app.post(
         strictTimeWindow: isTimeAlignedMode,
         startingCompletedBlocks: Number(req.body?.startingCompletedBlocks) || 0,
         totalProjectBlocks: Number(req.body?.totalProjectBlocks) || undefined,
+        totalProjectSubBlocks: Number(req.body?.totalProjectSubBlocks) || undefined,
+        maxExtraTtsCalls:
+          typeof req.body?.maxExtraTtsCalls === "number" && Number.isFinite(req.body.maxExtraTtsCalls)
+            ? Number(req.body.maxExtraTtsCalls)
+            : undefined,
         bypassCache: Boolean(req.body?.bypassCache),
       });
 
@@ -6123,6 +6130,9 @@ app.post(
           subBlocksTotal: batchResult.subBlocksTotal,
           subBlocksCompleted: batchResult.subBlocksCompleted,
           retriesUsed: batchResult.retriesUsed,
+          extraTtsCallsUsed: batchResult.extraTtsCallsUsed,
+          extraTtsBudget: batchResult.extraTtsBudget,
+          failedSubBlocks: batchResult.failedSubBlocks,
           ttsCallsUsed: batchResult.ttsCallsUsed,
           transcribeCallsUsed: batchResult.transcribeCallsUsed,
           provider: batchResult.provider,
@@ -6310,6 +6320,9 @@ app.post(
         subBlocksTotal: batchResult.subBlocksTotal,
         subBlocksCompleted: batchResult.subBlocksCompleted,
         retriesUsed: batchResult.retriesUsed,
+        extraTtsCallsUsed: batchResult.extraTtsCallsUsed,
+        extraTtsBudget: batchResult.extraTtsBudget,
+        failedSubBlocks: batchResult.failedSubBlocks,
         quotaPaused: false,
         stats: finalStats,
         quotaRemaining: batchResult.quotaRemaining,
@@ -6551,12 +6564,12 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
 
     const { extractedStyles } = cleanScriptForSpeech(turn.text || "");
     const combinedTurnStyle = [
-      resolved.baseSpeechStyle,
       turn.speechStyle,
-      extractedStyles.length > 0 ? `Acting & emotional cues: ${extractedStyles.join(", ")}` : "",
+      turn.intonationRu,
+      extractedStyles.length > 0 ? extractedStyles.join(", ") : "",
     ]
       .filter(Boolean)
-      .join(". ");
+      .join(", ");
 
     let computedGapAfterSec = typeof turn.gapAfterSec === "number" ? turn.gapAfterSec : 0;
     if (Array.isArray(allTurns) && allTurns.length > 0) {

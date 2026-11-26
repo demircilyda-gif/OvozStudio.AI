@@ -291,7 +291,12 @@ function sanitizeKieSpeechStyle(style?: string): string | undefined {
   if (!style) return undefined;
   const cleaned = String(style)
     .replace(/\.?\s*End\s+(?:the\s+sentence\s+)?cleanly\s+with\s+a\s+distinct\s+pause\.?/gi, "")
+    .replace(/\.?\s*Say\s+the\s+line\s+exactly\s+once[^.]*\.?/gi, "")
+    .replace(/Natural\s+(?:male|female)\s+Uzbek\s+speaker[^.]*\.?/gi, "")
+    .replace(/100%\s*authentic[^.]*\.?/gi, "")
+    .replace(/\b(?:baritone|feminine|masculine|male|female)\b/gi, "")
     .replace(/\s+/g, " ")
+    .replace(/^[.,;\s]+|[.,;\s]+$/g, "")
     .trim();
   return cleaned || undefined;
 }

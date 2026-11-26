@@ -12,9 +12,7 @@ import {
 import {
   extractRawPcm24k,
   buildWav24k,
-  sliceBatchPcmByVad,
   alignBatchAudioViaTranscribe,
-  transcribePlainTextForQa,
   applyTailFadeOut,
   applyMicroEdgeFades,
   trimSilenceEdgesPcm,
@@ -23,7 +21,9 @@ import {
   generateSyntheticBlockPcm,
   PCM_BYTES_PER_SEC,
   type SlicedTurnClip,
+  type FakeTurnAlignmentOverride,
 } from "./batchAudioSlicer.ts";
+import { normalizeUzbekSpeech } from "../../../src/utils/uzbekNormalizer.ts";
 import {
   applyMildAtempoPcm,
   countSyllables,
@@ -40,7 +40,8 @@ import {
 } from "../tts/ttsQuotaTracker.ts";
 
 const BLOCK_CACHE_DIR = path.resolve(process.cwd(), "data", "dubbing-block-cache");
-export const DUBBING_PROMPT_VERSION = "v2_no_short_pause_pace_qa";
+export const DUBBING_CACHE_VERSION = "v3";
+export const DUBBING_PROMPT_VERSION = "v3";
 
 function ensureBlockCacheDir() {
   if (!fs.existsSync(BLOCK_CACHE_DIR)) {
@@ -55,6 +56,7 @@ export interface ResolvedBatchSpeaker {
   speakerName: string;
   baseVoice: string;
   voiceId?: string;
+  gender?: "male" | "female";
   isCloned: boolean;
   replicatedVoiceConfig?: any;
   baseSpeechStyle: string;
@@ -78,6 +80,7 @@ export interface BatchInputTurn {
   sceneTitle?: string;
   inlineTags?: string[];
   forceFastPace?: boolean;
+  plannedSubBlockIndex?: number;
   rawTurn: any;
 }
 
@@ -114,10 +117,20 @@ export interface SubBlockQaEvaluation {
   badMethods: string[];
 }
 
+export interface FailedSubBlockSummary {
+  subBlockIndex: number;
+  startTimecode: string;
+  endTimecode: string;
+  turnIds: string[];
+  reasons: string[];
+}
+
 export interface BatchDialogueExecutionResult {
   turns: BatchSynthesizedTurnResult[];
   ttsCallsUsed: number;
   transcribeCallsUsed: number;
+  extraTtsCallsUsed: number;
+  extraTtsBudget: number;
   provider: "google" | "kie.ai" | "cache" | "fake" | "mixed";
   modeUsed: "mode_a_multispeaker" | "mode_b_per_speaker" | "cache" | "fake";
   blocksTotal: number;
@@ -125,6 +138,7 @@ export interface BatchDialogueExecutionResult {
   subBlocksTotal: number;
   subBlocksCompleted: number;
   retriesUsed: number;
+  failedSubBlocks: FailedSubBlockSummary[];
   quotaPaused: boolean;
   quotaPauseMessageRu?: string;
   stats: {
@@ -150,10 +164,12 @@ export function setSimulateDubbingGoogle429ForTesting(val: boolean) {
 
 export interface FakeAttemptFault {
   overrideTranscript?: string;
+  fakeTurnOverrides?: Array<FakeTurnAlignmentOverride | null | undefined>;
   durationMultiplier?: number;
   perTurnDurationMultipliers?: number[];
   forceMethod?: string;
   omitLastTurnInAudio?: boolean;
+  noInterTurnSilence?: boolean;
 }
 
 type FakeFaultInjector = (ctx: {
@@ -212,8 +228,12 @@ export function stripLegacyPauseArtifacts(text: string): string {
 export function stripLegacyStylePauseDirective(style: string): string {
   return String(style || "")
     .replace(/\.?\s*End\s+(?:the\s+sentence\s+)?cleanly\s+with\s+a\s+distinct\s+pause\.?/gi, "")
+    .replace(/\.?\s*Say\s+the\s+line\s+exactly\s+once[^.]*\.?/gi, "")
+    .replace(/Natural\s+(?:male|female)\s+Uzbek\s+speaker[^.]*\.?/gi, "")
+    .replace(/100%\s*authentic[^.]*\.?/gi, "")
+    .replace(/\b(?:baritone|feminine|masculine|male|female)\b/gi, "")
     .replace(/\s+/g, " ")
-    .replace(/^[.\s]+|[.\s]+$/g, "")
+    .replace(/^[.,;\s]+|[.,;\s]+$/g, "")
     .trim();
 }
 
@@ -238,36 +258,75 @@ export function computeTurnSyllableDensity(
 }
 
 /**
- * Этап 1: Подсказка темпа по плотности окна (слоги / (endSec - startSec)):
- * - >= 5.5 (или forceFastPace) -> "fast, brisk dubbing pace, no pauses inside or after the sentence"
- * - 4.5–5.5 -> "lively natural conversational pace"
- * - < 4.5 -> "relaxed natural pace"
- * Всегда добавляет: "Say the line exactly once, word for word."
+ * Стиль темпа по документации Gemini 3.8 TTS (слоги / (endSec - startSec)):
+ * - >= 5.5 (или forceFastPace) -> "speaking rapidly"
+ * - 4.5–5.5 -> "natural conversational pace"
+ * - < 4.5 -> "relaxed pace"
  */
 export function buildTurnPaceDirective(
   turn: { cleanSpeechText: string; startSec?: number; endSec?: number; forceFastPace?: boolean },
   forceFastPace?: boolean
 ): string {
   const density = computeTurnSyllableDensity(turn.cleanSpeechText, turn.startSec, turn.endSec);
-  const paceHint =
-    forceFastPace || turn.forceFastPace || density >= 5.5
-      ? "fast, brisk dubbing pace, no pauses inside or after the sentence"
-      : density >= 4.5
-        ? "lively natural conversational pace"
-        : "relaxed natural pace";
-  return `${paceHint}. Say the line exactly once, word for word.`;
+  if (forceFastPace || turn.forceFastPace || density >= 5.5) {
+    return "speaking rapidly";
+  }
+  if (density >= 4.5) {
+    return "natural conversational pace";
+  }
+  return "relaxed pace";
 }
 
+/**
+ * Короткая подача (строго 2–4 слова на английском) без имени, пола, baritone и длинных инструкций.
+ */
+export function buildShortEnglishDelivery(turn: {
+  intonationRu?: string;
+  emotion?: string;
+  style?: string;
+}): string {
+  const hint = `${turn.intonationRu || ""} ${turn.emotion || ""} ${turn.style || ""}`.toLowerCase();
+
+  if (/восторг|восхищ|удивл|вау|пораж|amazed|excited|surprised|wow/i.test(hint)) {
+    return "excited, amazed";
+  }
+  if (/радост|весел|бодр|энергич|улыб|сме[её]|шутл|живо|cheerful|lively|energetic|bright|smiling/i.test(hint)) {
+    return "cheerful, lively";
+  }
+  if (/любопыт|интерес|вопрос|спраш|заинтерес|curious|engaging|inquisitive/i.test(hint)) {
+    return "curious, engaging";
+  }
+  if (/ирон|скепт|сомн|подкол|подшуч|playful|skeptical|teasing/i.test(hint)) {
+    return "playful, skeptical";
+  }
+  if (/тревож|обеспок|взволн|эмоц|драмат|concerned|emotional|urgent/i.test(hint)) {
+    return "expressive, concerned";
+  }
+  if (/уверен|эксперт|делов|ч[её]тк|информат|по делу|confident|clear|assertive|authoritative/i.test(hint)) {
+    return "confident, clear";
+  }
+  if (/серь[её]з|сдержан|задумч|вдумч|calm|thoughtful|serious|measured/i.test(hint)) {
+    return "calm, thoughtful";
+  }
+  if (/спокойн|мягк|тепл|дружел|приветл|warm|friendly|gentle/i.test(hint)) {
+    return "warm, friendly";
+  }
+  return "warm, natural";
+}
+
+/**
+ * Gemini 3.8 TTS style: короткая подача (2–4 слова на английском) + темп.
+ * Без имени, пола, baritone, "100% authentic" и "Say the line exactly once".
+ * Голос задаётся исключительно в voiceConfig.
+ */
 export function buildCleanTurnStyleForTts(
-  turn: BatchInputTurn,
-  extraContext?: string,
+  turn: Pick<BatchInputTurn, "cleanSpeechText" | "startSec" | "endSec" | "forceFastPace" | "intonationRu" | "emotion" | "style">,
+  _extraContext?: string,
   forceFastPace?: boolean
 ): string {
-  const baseStyle = stripLegacyStylePauseDirective(turn.style || "");
+  const delivery = buildShortEnglishDelivery(turn);
   const pace = buildTurnPaceDirective(turn, forceFastPace);
-  return [baseStyle, extraContext ? stripLegacyStylePauseDirective(extraContext) : "", pace]
-    .filter(Boolean)
-    .join(". ");
+  return `${delivery}, ${pace}`;
 }
 
 /**
@@ -365,28 +424,57 @@ export function estimateDubbingTtsCalls(
 }
 
 // =========================================================================
-// STAGE 3: CACHE v2 (KEYED BY TEXT, VOICE, STYLE, COMPOSITION, PROMPT VERSION)
+// CACHE v3 (SUB-BLOCK ONLY: VERSION v3 + BOTH SPEAKERS' VOICES + TEXTS + STYLES)
 // =========================================================================
 
 const DISALLOWED_CACHE_METHODS = new Set([
   "vad_dp_soft",
   "proportional_energy_cut",
   "failed",
+  "missing_turn",
 ]);
+
+function inferSpeakerGender(
+  sp?: ResolvedBatchSpeaker,
+  turn?: BatchInputTurn
+): "male" | "female" | undefined {
+  if (sp?.gender === "male" || sp?.gender === "female") return sp.gender;
+  if (turn?.speakerGender === "male" || turn?.speakerGender === "female") return turn.speakerGender;
+  const bv = String(sp?.baseVoice || "").toLowerCase();
+  if (bv === "kore" || bv === "aoede" || bv === "zephyr" || bv === "leda") return "female";
+  if (bv === "charon" || bv === "fenrir" || bv === "puck" || bv === "achird" || bv === "sadachbia") return "male";
+  return undefined;
+}
 
 export function computeSubBlockCacheHash(
   subBlockTurns: BatchInputTurn[],
   speakerMap: Map<string, ResolvedBatchSpeaker>,
   mode: "A" | "B"
 ): string {
+  const participatingSpeakerIds = Array.from(
+    new Set(subBlockTurns.map((t) => String(t.speakerId || "HOST_1")))
+  ).sort();
+
+  const speakersPayload = participatingSpeakerIds.map((spId) => {
+    const sp = speakerMap.get(spId);
+    return {
+      speakerId: spId,
+      voice: sp?.isCloned ? sp.voiceId || "cloned" : sp?.baseVoice || "Charon",
+      gender: inferSpeakerGender(sp) || "unknown",
+    };
+  });
+
   const payload = {
-    v: 2,
+    v: 3,
+    cacheVersion: DUBBING_CACHE_VERSION,
     promptVersion: DUBBING_PROMPT_VERSION,
     mode,
+    speakers: speakersPayload,
     turns: subBlockTurns.map((t) => {
       const sp = speakerMap.get(t.speakerId);
       return {
         id: t.id,
+        speakerId: t.speakerId,
         text: stripLegacyPauseArtifacts(t.cleanSpeechText),
         voice: sp?.isCloned ? sp.voiceId || "cloned" : sp?.baseVoice || "Charon",
         style: buildCleanTurnStyleForTts(t),
@@ -396,8 +484,9 @@ export function computeSubBlockCacheHash(
   return crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 24);
 }
 
-interface CachedBlockEntryV2 {
-  v: 2;
+interface CachedBlockEntryV3 {
+  v: 3;
+  cacheVersion: string;
   promptVersion: string;
   qa: TurnQaStatus;
   methods: string[];
@@ -405,21 +494,28 @@ interface CachedBlockEntryV2 {
   clips: string[];
 }
 
-function loadCachedBlockPcmsV2(
+function loadCachedBlockPcmsV3(
   hash: string,
   expectedCount: number
 ): { pcms: Buffer[]; methods: string[]; qa: TurnQaStatus } | null {
   try {
     const metaPath = path.join(BLOCK_CACHE_DIR, `${hash}.json`);
     if (!fs.existsSync(metaPath)) return null;
-    const meta = JSON.parse(fs.readFileSync(metaPath, "utf8")) as Partial<CachedBlockEntryV2>;
-    // Строго только кэш v2 с пройденной QA и чистой нарезкой
-    if (meta?.v !== 2 || meta?.promptVersion !== DUBBING_PROMPT_VERSION) return null;
+    const meta = JSON.parse(fs.readFileSync(metaPath, "utf8")) as Partial<CachedBlockEntryV3>;
+    // Строго только кэш v3 с пройденной QA и чистой нарезкой
+    if (
+      meta?.v !== 3 ||
+      meta?.cacheVersion !== DUBBING_CACHE_VERSION ||
+      meta?.promptVersion !== DUBBING_PROMPT_VERSION
+    ) {
+      return null;
+    }
     if (meta.qa !== "ok" && meta.qa !== "retried") return null;
     if (!Array.isArray(meta.clips) || meta.clips.length !== expectedCount) return null;
-    const methods = Array.isArray(meta.methods) && meta.methods.length === expectedCount
-      ? meta.methods
-      : new Array(expectedCount).fill("cache");
+    const methods =
+      Array.isArray(meta.methods) && meta.methods.length === expectedCount
+        ? meta.methods
+        : new Array(expectedCount).fill("cache");
     if (methods.some((m) => DISALLOWED_CACHE_METHODS.has(m))) return null;
     return {
       pcms: meta.clips.map((b64) => Buffer.from(b64, "base64")),
@@ -437,7 +533,7 @@ export function canSaveSubBlockToCache(qa: TurnQaStatus, methods: string[]): boo
   return !methods.some((m) => DISALLOWED_CACHE_METHODS.has(m));
 }
 
-function saveCachedBlockPcmsV2(
+function saveCachedBlockPcmsV3(
   hash: string,
   pcms: Buffer[],
   methods: string[],
@@ -447,8 +543,9 @@ function saveCachedBlockPcmsV2(
   try {
     ensureBlockCacheDir();
     const metaPath = path.join(BLOCK_CACHE_DIR, `${hash}.json`);
-    const entry: CachedBlockEntryV2 = {
-      v: 2,
+    const entry: CachedBlockEntryV3 = {
+      v: 3,
+      cacheVersion: DUBBING_CACHE_VERSION,
       promptVersion: DUBBING_PROMPT_VERSION,
       qa,
       methods,
@@ -524,11 +621,28 @@ const OBVIOUS_ENGLISH_LEAK_WORDS = new Set([
   "could",
 ]);
 
+export function unifyApostrophes(text: string): string {
+  return String(text || "").replace(/[ʻʼ‘’`´′ʹ']/g, "'");
+}
+
+/**
+ * Нормализация текста перед QA-сравнением:
+ * 1. Все варианты апострофов (ʻ ʼ ‘ ’ ` ') -> один (')
+ * 2. Цифры -> узбекские слова (normalizeUzbekSpeech)
+ * 3. Повторная унификация апострофов и разбиение на токены
+ */
 export function tokenizeForQa(text: string): string[] {
-  const cleaned = String(text || "")
+  const withoutTags = unifyApostrophes(String(text || "").replace(/<[^>]+>/g, " "));
+  let normalized = withoutTags;
+  try {
+    normalized = normalizeUzbekSpeech(withoutTags, {
+      decimalStyle: DUBBING_MODELS_CONFIG.decimalPronunciationStyle || "butun",
+    });
+  } catch {}
+
+  const cleaned = unifyApostrophes(normalized)
     .toLowerCase()
     .replace(/<[^>]+>/g, " ")
-    .replace(/[‘’`´']/g, "'")
     .replace(/[^a-z0-9а-яёўқғҳ'-]+/gi, " ")
     .trim();
   if (!cleaned) return [];
@@ -539,16 +653,17 @@ export function tokenizeForQa(text: string): string[] {
 }
 
 /**
- * Этап 2: Полная проверка подблока перед кэшированием и возвратом клиенту:
- * 1. Бесплатные проверки длительности и порядка:
- *    - суммарная длина речи подблока / (sum(syllables)/4.8) в [0.7, 1.35]
- *    - каждая нарезанная реплика / (syllables/4.8) в [0.6, 1.6]
- *    - клипы идут строго по порядку и без перекрытий (startMs >= prevEndMs)
- *    - отсутствие ненадёжных методов нарезки (vad_dp_soft, proportional_energy_cut)
- * 2. Проверка по тексту транскрипции (1 вызов gemini-3.5-transcribe):
- *    - отношение числа слов к ожидаемому в [0.8, 1.2] (>1.2 повтор, <0.8 пропуск)
- *    - повторы, которые реально есть в сценарии подблока, браком не считаются
- *    - присутствие "short", "pause" или посторонних английских слов, которых нет в тексте -> брак
+ * Полная проверка подблока (нарезка + порепликовая верификация из одного запроса транскрипции):
+ * 1. Граница реплики должна быть привязана к паузе-кандидату (>= 120 мс) в пределах ±0.6 с; нет — брак.
+ * 2. Проверка длительности:
+ *    - реплики до 4 слогов (<= 4): клип строго в [0.3, 1.6] с вместо отношения длительностей;
+ *    - остальные реплики: клип / (syllables/4.8) в [0.6, 1.6];
+ *    - блок целиком: [0.7, 1.35].
+ * 3. Проверка каждой реплики по SPOKEN_TEXT и VOICE:
+ *    - совпадение слов SPOKEN_TEXT с ожидаемым текстом >= 75% (после унификации апострофов и normalizeUzbekSpeech);
+ *    - последнее слово реплики присутствует в её клипе;
+ *    - VOICE (male/female) совпадает с полом спикера (если пол у пары разный).
+ * 4. Отсутствие перекрытий, ненадёжных методов, "short pause" и английских утечек.
  */
 export function evaluateSubBlockQa(params: {
   expectedTurns: BatchInputTurn[];
@@ -558,10 +673,15 @@ export function evaluateSubBlockQa(params: {
     endMs: number;
     durationSec: number;
     method: string;
+    spokenText?: string;
+    detectedVoice?: "male" | "female" | "unknown";
+    boundarySnapped?: boolean;
+    boundaryIssue?: string;
   }>;
   transcriptText?: string;
+  speakerMap?: Map<string, ResolvedBatchSpeaker>;
 }): SubBlockQaEvaluation {
-  const { expectedTurns, slicedClips, transcriptText } = params;
+  const { expectedTurns, slicedClips, transcriptText, speakerMap } = params;
   const reasons: string[] = [];
   const badClipIndices: number[] = [];
   const badMethods: string[] = [];
@@ -577,11 +697,32 @@ export function evaluateSubBlockQa(params: {
     };
   }
 
-  // 1. Проверка методов нарезки
+  // Определяем, различается ли пол спикеров в диалоге/подблоке (для проверки VOICE)
+  const knownGenders = new Set<"male" | "female">();
+  if (speakerMap) {
+    for (const sp of speakerMap.values()) {
+      const g = inferSpeakerGender(sp);
+      if (g) knownGenders.add(g);
+    }
+  }
+  for (const t of expectedTurns) {
+    const g = inferSpeakerGender(speakerMap?.get(t.speakerId), t);
+    if (g) knownGenders.add(g);
+  }
+  const hasMixedGenders = knownGenders.has("male") && knownGenders.has("female");
+
+  // 1. Проверка методов нарезки и привязки границ к паузе >= 120 мс в пределах ±0.6 с
   for (let i = 0; i < slicedClips.length; i++) {
-    const m = slicedClips[i].method;
+    const clip = slicedClips[i];
+    const m = clip.method;
     if (DISALLOWED_CACHE_METHODS.has(m)) {
       if (!badMethods.includes(m)) badMethods.push(m);
+      if (!badClipIndices.includes(i)) badClipIndices.push(i);
+    }
+    if (clip.boundarySnapped === false) {
+      reasons.push(
+        clip.boundaryIssue || `no_silence_boundary_near_cut (turn ${i})`
+      );
       if (!badClipIndices.includes(i)) badClipIndices.push(i);
     }
   }
@@ -605,44 +746,140 @@ export function evaluateSubBlockQa(params: {
   }
 
   // 3. Проверка длительности подблока и каждой реплики
+  // Для реплик <= 4 слогов: допустимый клип 0.3–1.6 с вместо отношения длительностей
   let expectedBlockSec = 0;
   let actualBlockSpeechSec = 0;
+  let nonShortTurnCount = 0;
 
   for (let i = 0; i < expectedTurns.length; i++) {
     const cleanText = stripLegacyPauseArtifacts(expectedTurns[i].cleanSpeechText);
     const syl = Math.max(1, countSyllables(cleanText));
     const expectedTurnSec = Math.max(0.35, syl / 4.8);
     const actualTurnSec = Math.max(0, slicedClips[i].pcm.length / PCM_BYTES_PER_SEC);
-    expectedBlockSec += expectedTurnSec;
-    actualBlockSpeechSec += actualTurnSec;
 
-    const turnRatio = actualTurnSec / expectedTurnSec;
-    if (turnRatio < 0.6 || turnRatio > 1.6) {
-      reasons.push(
-        `clip_duration_ratio (turn ${i}: ${actualTurnSec.toFixed(2)}s vs exp ${expectedTurnSec.toFixed(2)}s, ratio=${turnRatio.toFixed(2)})`
-      );
-      if (!badClipIndices.includes(i)) badClipIndices.push(i);
+    if (syl <= 4) {
+      if (actualTurnSec < 0.3 || actualTurnSec > 1.6) {
+        reasons.push(
+          `short_turn_duration (turn ${i}: ${actualTurnSec.toFixed(2)}s outside 0.3–1.6s, syl=${syl})`
+        );
+        if (!badClipIndices.includes(i)) badClipIndices.push(i);
+      }
+      // В общий баланс блока для коротких реплик подставляем фактическую длину (если в пределах 0.3–1.6 с),
+      // чтобы короткие возгласы ("Yo'q!", "Ha!") не ломали blockDurationRatio
+      expectedBlockSec += actualTurnSec >= 0.3 && actualTurnSec <= 1.6 ? actualTurnSec : expectedTurnSec;
+      actualBlockSpeechSec += actualTurnSec;
+    } else {
+      nonShortTurnCount += 1;
+      expectedBlockSec += expectedTurnSec;
+      actualBlockSpeechSec += actualTurnSec;
+
+      const turnRatio = actualTurnSec / expectedTurnSec;
+      if (turnRatio < 0.6 || turnRatio > 1.6) {
+        reasons.push(
+          `clip_duration_ratio (turn ${i}: ${actualTurnSec.toFixed(2)}s vs exp ${expectedTurnSec.toFixed(2)}s, ratio=${turnRatio.toFixed(2)})`
+        );
+        if (!badClipIndices.includes(i)) badClipIndices.push(i);
+      }
     }
   }
 
   const blockDurationRatio =
     Math.round((actualBlockSpeechSec / Math.max(0.35, expectedBlockSec)) * 100) / 100;
-  if (blockDurationRatio < 0.7 || blockDurationRatio > 1.35) {
+  if (nonShortTurnCount > 0 && (blockDurationRatio < 0.7 || blockDurationRatio > 1.35)) {
     reasons.push(
       `block_duration_ratio (${actualBlockSpeechSec.toFixed(2)}s vs exp ${expectedBlockSec.toFixed(2)}s, ratio=${blockDurationRatio.toFixed(2)})`
     );
   }
 
-  // 4. Проверка транскрипции (слова, повторы, пропуски, "short pause" / английский мусор)
+  // 4. Порепликовая проверка SPOKEN_TEXT (>= 75% слов + последнее слово в клипе) и VOICE (пол)
+  const perTurnSpokenParts: string[] = [];
+  for (let i = 0; i < expectedTurns.length; i++) {
+    const clip = slicedClips[i];
+    const turn = expectedTurns[i];
+
+    // 4a. Проверка пола голоса (если пол у пары разный)
+    if (hasMixedGenders) {
+      const expectedGender = inferSpeakerGender(speakerMap?.get(turn.speakerId), turn);
+      if (
+        expectedGender &&
+        (clip.detectedVoice === "male" || clip.detectedVoice === "female") &&
+        clip.detectedVoice !== expectedGender
+      ) {
+        reasons.push(
+          `turn_voice_gender_mismatch (turn ${i}: expected ${expectedGender}, heard ${clip.detectedVoice})`
+        );
+        if (!badClipIndices.includes(i)) badClipIndices.push(i);
+      }
+    }
+
+    // 4b. Порепликовое совпадение текста >= 75% и наличие последнего слова реплики в клипе
+    if (typeof clip.spokenText === "string") {
+      perTurnSpokenParts.push(clip.spokenText);
+      const expTokens = tokenizeForQa(stripLegacyPauseArtifacts(turn.cleanSpeechText));
+      const actTokens = tokenizeForQa(clip.spokenText);
+
+      if (expTokens.length > 0) {
+        if (actTokens.length === 0) {
+          reasons.push(`turn_text_mismatch (turn ${i}: empty spoken text)`);
+          if (!badClipIndices.includes(i)) badClipIndices.push(i);
+        } else {
+          const expFreq = new Map<string, number>();
+          const actFreq = new Map<string, number>();
+          for (const w of expTokens) expFreq.set(w, (expFreq.get(w) || 0) + 1);
+          for (const w of actTokens) actFreq.set(w, (actFreq.get(w) || 0) + 1);
+
+          let matched = 0;
+          for (const [w, cnt] of expFreq.entries()) {
+            matched += Math.min(cnt, actFreq.get(w) || 0);
+          }
+
+          const recall = matched / expTokens.length;
+          const symmetricOverlap = matched / Math.max(expTokens.length, actTokens.length);
+          const overlapScore = Math.min(recall, symmetricOverlap);
+
+          if (overlapScore < 0.75) {
+            reasons.push(
+              `turn_text_mismatch (turn ${i}: overlap=${Math.round(overlapScore * 100)}% < 75%)`
+            );
+            if (!badClipIndices.includes(i)) badClipIndices.push(i);
+          }
+
+          // Последнее слово реплики должно присутствовать в её клипе (в хвостовом окне, чтобы ловить обрез/сдвиг хвоста)
+          const lastExpectedWord = expTokens[expTokens.length - 1];
+          const tailWindow = actTokens.slice(Math.max(0, actTokens.length - 3));
+          const hasLastWordInClip =
+            expTokens.length <= 3
+              ? actTokens.includes(lastExpectedWord)
+              : tailWindow.includes(lastExpectedWord);
+
+          if (!hasLastWordInClip) {
+            reasons.push(
+              `turn_text_mismatch (turn ${i}: missing last word "${lastExpectedWord}")`
+            );
+            if (!badClipIndices.includes(i)) badClipIndices.push(i);
+          }
+        }
+      }
+    }
+  }
+
+  // 5. Общая проверка транскрипции (слова, повторы, пропуски, "short pause" / английский мусор)
+  const effectiveTranscript =
+    typeof transcriptText === "string"
+      ? transcriptText
+      : perTurnSpokenParts.length === expectedTurns.length
+        ? perTurnSpokenParts.join(" ")
+        : undefined;
+
   let transcriptWordRatio: number | undefined;
   let englishLeakTokens: string[] | undefined;
 
-  if (typeof transcriptText === "string") {
+  if (typeof effectiveTranscript === "string") {
     const expectedJoined = expectedTurns
       .map((t) => stripLegacyPauseArtifacts(t.cleanSpeechText))
       .join(" ");
     const expectedTokens = tokenizeForQa(expectedJoined);
-    const actualTokens = tokenizeForQa(transcriptText);
+    const actualTokens = tokenizeForQa(effectiveTranscript);
 
     const expectedTokenSet = new Set(expectedTokens);
 
@@ -653,7 +890,6 @@ export function evaluateSubBlockQa(params: {
       } else {
         transcriptWordRatio = Math.round((actualTokens.length / expectedTokens.length) * 100) / 100;
         if (transcriptWordRatio > 1.2) {
-          // Убеждаемся, что избыточные слова действительно превышают ожидаемые частоты сценария
           const expFreq = new Map<string, number>();
           const actFreq = new Map<string, number>();
           for (const w of expectedTokens) expFreq.set(w, (expFreq.get(w) || 0) + 1);
@@ -701,7 +937,7 @@ export function evaluateSubBlockQa(params: {
     reasons,
     blockDurationRatio,
     transcriptWordRatio,
-    transcriptText,
+    transcriptText: effectiveTranscript,
     englishLeakTokens,
     badClipIndices,
     badMethods,
@@ -829,63 +1065,37 @@ async function synthesizeMissingSingleTurnPcm(
   }
 }
 
+interface AlignedTurnClipWithQa {
+  pcm: Buffer;
+  startMs: number;
+  endMs: number;
+  durationSec: number;
+  method: string;
+  spokenText?: string;
+  detectedVoice?: "male" | "female" | "unknown";
+  boundarySnapped?: boolean;
+  boundaryIssue?: string;
+}
+
+/**
+ * Нарезка и порепликовая верификация (START, END, SPOKEN_TEXT, VOICE) в ОДНОМ запросе
+ * к `gemini-4-hydrogen` (JSON responseSchema) на подблок.
+ */
 async function sliceBlockAudioIntoTurns(
   ai: GoogleGenAI,
   blockPcm: Buffer,
   turns: BatchInputTurn[],
-  speakerMap: Map<string, ResolvedBatchSpeaker>
+  speakerMap: Map<string, ResolvedBatchSpeaker>,
+  fakeOptions?: {
+    fakeTurnOverrides?: Array<FakeTurnAlignmentOverride | null | undefined>;
+    fakeWholeTranscriptOverride?: string;
+  }
 ): Promise<{
-  clips: Array<{
-    pcm: Buffer;
-    startMs: number;
-    endMs: number;
-    durationSec: number;
-    method: string;
-  }>;
+  clips: AlignedTurnClipWithQa[];
   transcribeCalls: number;
   recoveryTtsCalls: number;
   heardTranscript?: string;
 }> {
-  if (turns.length === 1) {
-    const clean = applyMicroEdgeFades(trimSilenceEdgesPcm(blockPcm, 25), 6);
-    const durSec = Math.round((clean.length / PCM_BYTES_PER_SEC) * 100) / 100;
-    return {
-      clips: [
-        {
-          pcm: clean,
-          startMs: 0,
-          endMs: Math.max(100, Math.round(durSec * 1000)),
-          durationSec: durSec,
-          method: "single_in_block",
-        },
-      ],
-      transcribeCalls: 0,
-      recoveryTtsCalls: 0,
-    };
-  }
-
-  // 1. Детектор тишины (VAD)
-  const vad = sliceBatchPcmByVad(
-    blockPcm,
-    turns.map((t) => stripLegacyPauseArtifacts(t.cleanSpeechText)),
-    { minSilenceMs: 280 }
-  );
-
-  if (vad.reliable && vad.clips.length === turns.length) {
-    return {
-      clips: vad.clips.map((c) => ({
-        pcm: c.pcm,
-        startMs: c.startMs,
-        endMs: c.endMs,
-        durationSec: c.durationSec,
-        method: c.method,
-      })),
-      transcribeCalls: 0,
-      recoveryTtsCalls: 0,
-    };
-  }
-
-  // 2. Fallback на gemini-3.5-transcribe (0 вызовов TTS!)
   const aligned = await alignBatchAudioViaTranscribe(
     ai,
     blockPcm,
@@ -893,102 +1103,70 @@ async function sliceBlockAudioIntoTurns(
       index: i,
       speaker: t.speakerName,
       text: stripLegacyPauseArtifacts(t.cleanSpeechText),
+      gender: inferSpeakerGender(speakerMap.get(t.speakerId), t),
     })),
-    DUBBING_MODELS_CONFIG.transcribeModel
+    DUBBING_MODELS_CONFIG.audioAlignmentModel,
+    {
+      silenceMinMs: 120,
+      snapToleranceSec: 0.6,
+      fakeTurnOverrides: fakeOptions?.fakeTurnOverrides,
+      fakeWholeTranscriptOverride: fakeOptions?.fakeWholeTranscriptOverride,
+    }
   );
 
-  const transcribeCalls = isFakeDubbingTtsEnabled() ? 0 : 1;
-  let recoveryTtsCalls = 0;
+  const transcribeCalls = aligned.usedApiCall ? 1 : 0;
+  const clips: AlignedTurnClipWithQa[] = [];
+  let cursorMs = 0;
 
-  if (aligned.clips.length === turns.length && aligned.missingIndices.length <= 3) {
-    const clips: Array<{
-      pcm: Buffer;
-      startMs: number;
-      endMs: number;
-      durationSec: number;
-      method: string;
-    }> = [];
-    let cursorMs = 0;
-    for (let i = 0; i < turns.length; i++) {
-      const clip: SlicedTurnClip | null = aligned.clips[i];
-      if (clip) {
-        const sMs = Math.max(cursorMs, clip.startMs);
-        const eMs = Math.max(sMs + 100, clip.endMs);
-        clips.push({
-          pcm: clip.pcm,
-          startMs: sMs,
-          endMs: eMs,
-          durationSec: clip.durationSec,
-          method: clip.method,
-        });
-        cursorMs = eMs;
-      } else {
-        const sp = speakerMap.get(turns[i].speakerId)!;
-        const singleRes = await synthesizeMissingSingleTurnPcm(ai, turns[i], sp);
-        if (!isFakeDubbingTtsEnabled()) recoveryTtsCalls += 1;
-        const durSec = Math.round((singleRes.pcm.length / PCM_BYTES_PER_SEC) * 100) / 100;
-        const sMs = cursorMs;
-        const eMs = sMs + Math.max(100, Math.round(durSec * 1000));
-        clips.push({
-          pcm: singleRes.pcm,
-          startMs: sMs,
-          endMs: eMs,
-          durationSec: durSec,
-          method: "single_recovery",
-        });
-        cursorMs = eMs;
-      }
-    }
-    return { clips, transcribeCalls, recoveryTtsCalls, heardTranscript: aligned.heardTranscript };
-  }
-
-  if (vad.clips.length === turns.length) {
-    return {
-      clips: vad.clips.map((c) => ({
-        pcm: c.pcm,
-        startMs: c.startMs,
-        endMs: c.endMs,
-        durationSec: c.durationSec,
-        method: "vad_dp_soft",
-      })),
-      transcribeCalls,
-      recoveryTtsCalls,
-      heardTranscript: aligned.heardTranscript,
-    };
-  }
-
-  const weights = turns.map((t) => Math.max(4, stripLegacyPauseArtifacts(t.cleanSpeechText).length));
-  const totalW = weights.reduce((a, b) => a + b, 0);
-  const totalSamples = Math.floor(blockPcm.length / 2);
-  const clips: Array<{
-    pcm: Buffer;
-    startMs: number;
-    endMs: number;
-    durationSec: number;
-    method: string;
-  }> = [];
-  let accW = 0;
-  let prevSample = 0;
   for (let i = 0; i < turns.length; i++) {
-    accW += weights[i];
-    const endSample =
-      i === turns.length - 1
-        ? totalSamples
-        : Math.min(totalSamples, Math.round((accW / totalW) * totalSamples));
-    const safeEndSample = Math.max(prevSample + 480, endSample);
-    const rawSlice = blockPcm.subarray(prevSample * 2, Math.min(totalSamples, safeEndSample) * 2);
-    const clean = applyMicroEdgeFades(trimSilenceEdgesPcm(rawSlice, 20), 6);
-    clips.push({
-      pcm: clean,
-      startMs: Math.round((prevSample / 24000) * 1000),
-      endMs: Math.round((Math.min(totalSamples, safeEndSample) / 24000) * 1000),
-      durationSec: Math.round((clean.length / PCM_BYTES_PER_SEC) * 100) / 100,
-      method: "proportional_energy_cut",
-    });
-    prevSample = endSample;
+    const clip: SlicedTurnClip | null = aligned.clips[i] || null;
+    const alignInfo = aligned.turnAlignments[i];
+    if (clip) {
+      const sMs = Math.max(cursorMs, clip.startMs);
+      const eMs = Math.max(sMs + 100, clip.endMs);
+      clips.push({
+        pcm: clip.pcm,
+        startMs: sMs,
+        endMs: eMs,
+        durationSec: clip.durationSec,
+        method: clip.method,
+        spokenText: clip.spokenText,
+        detectedVoice: clip.detectedVoice,
+        boundarySnapped: clip.boundarySnapped,
+        boundaryIssue: clip.boundaryIssue,
+      });
+      cursorMs = eMs;
+    } else {
+      // Отсутствующая / не привязанная к паузе реплика — помечаем как брак (missing_turn),
+      // чтобы QA отклонил подблок и запустил каскад восстановления без лишнего скрытого single_recovery!
+      const fallbackPcm = Buffer.alloc(Math.round(0.35 * PCM_BYTES_PER_SEC), 0);
+      const sMs = cursorMs;
+      const eMs = sMs + 350;
+      const issueDetail =
+        i === 0 && aligned.error
+          ? `${aligned.error}; ${alignInfo?.boundaryIssue || `missing_turn (${i})`}`
+          : alignInfo?.boundaryIssue || `no_silence_boundary_near_cut (turn ${i})`;
+      clips.push({
+        pcm: fallbackPcm,
+        startMs: sMs,
+        endMs: eMs,
+        durationSec: 0.35,
+        method: "missing_turn",
+        spokenText: alignInfo?.spokenText ?? "",
+        detectedVoice: alignInfo?.voice ?? "unknown",
+        boundarySnapped: false,
+        boundaryIssue: issueDetail,
+      });
+      cursorMs = eMs;
+    }
   }
 
-  return { clips, transcribeCalls, recoveryTtsCalls };
+  return {
+    clips,
+    transcribeCalls,
+    recoveryTtsCalls: 0,
+    heardTranscript: aligned.heardTranscript,
+  };
 }
 
 // =========================================================================
@@ -1246,7 +1424,10 @@ async function runSingleSubBlockAttempt(
           overrideDurationSec: Math.max(0.25, (syl / 4.8) * mult),
         };
       });
-      blockPcm = generateSyntheticBlockPcm(fakeTurns, 0.45).pcm;
+      blockPcm = generateSyntheticBlockPcm(
+        fakeTurns,
+        injectedFault?.noInterTurnSilence ? 0 : 0.45
+      ).pcm;
       providers.push("fake");
     } else {
       try {
@@ -1320,7 +1501,12 @@ async function runSingleSubBlockAttempt(
       }
     }
 
-    const sliced = await sliceBlockAudioIntoTurns(ai, blockPcm, subTurns, speakerMap);
+    // Ровно ОДИН запрос транскрипции на подблок: одновременно нарезка (по паузам >= 120 мс в ±0.6 с)
+    // и порепликовая верификация (SPOKEN_TEXT + VOICE)
+    const sliced = await sliceBlockAudioIntoTurns(ai, blockPcm, subTurns, speakerMap, {
+      fakeTurnOverrides: injectedFault?.fakeTurnOverrides,
+      fakeWholeTranscriptOverride: injectedFault?.overrideTranscript,
+    });
     transcribeCalls += sliced.transcribeCalls;
     ttsCalls += sliced.recoveryTtsCalls;
 
@@ -1328,39 +1514,21 @@ async function runSingleSubBlockAttempt(
       injectedFault?.forceMethod ? { ...c, method: injectedFault.forceMethod } : c
     );
 
-    // Строго не больше 1 вызова gemini-3.5-transcribe на подблок:
-    // если transcribe-выравнивание уже вернуло распознанный текст, переиспользуем его без 2-го вызова!
-    let transcriptText: string;
-    if (injectedFault?.overrideTranscript !== undefined) {
-      transcriptText = injectedFault.overrideTranscript;
-    } else if (sliced.heardTranscript && sliced.heardTranscript.trim().length > 0) {
-      transcriptText = sliced.heardTranscript;
-    } else {
-      const qaTx = await transcribePlainTextForQa(
-        ai,
-        blockPcm,
-        subTurns.map((t, i) => ({
-          index: i,
-          speaker: t.speakerName,
-          text: stripLegacyPauseArtifacts(t.cleanSpeechText),
-        })),
-        DUBBING_MODELS_CONFIG.transcribeModel
-      );
-      if (qaTx.usedApiCall) transcribeCalls += 1;
-      transcriptText = qaTx.text;
-    }
-
     const qaEval = evaluateSubBlockQa({
       expectedTurns: subTurns,
       slicedClips: clips,
-      transcriptText,
+      transcriptText:
+        injectedFault?.overrideTranscript !== undefined
+          ? injectedFault.overrideTranscript
+          : sliced.heardTranscript,
+      speakerMap,
     });
 
     return { clips, qaEval, ttsCalls, transcribeCalls, providers };
   }
 
   // =========================================================================
-  // MODE B: 1 вызов на каждого спикера в подблоке
+  // MODE B: 1 вызов TTS на каждого спикера в подблоке + 1 общий запрос транскрипции на подблок
   // =========================================================================
   const perSpeakerIndices = new Map<string, number[]>();
   subTurns.forEach((t, localIdx) => {
@@ -1369,36 +1537,22 @@ async function runSingleSubBlockAttempt(
     perSpeakerIndices.set(t.speakerId, list);
   });
 
-  const assembledClips = new Array<{
-    pcm: Buffer;
-    startMs: number;
-    endMs: number;
-    durationSec: number;
-    method: string;
-  }>(subTurns.length);
-
   const qaPcmParts: Buffer[] = [];
   const qaExpectedOrder: BatchInputTurn[] = [];
-  const silenceGap200ms = Buffer.alloc(Math.round(0.2 * PCM_BYTES_PER_SEC), 0);
+  const qaOrigIndices: number[] = [];
+  const silenceGap400ms = Buffer.alloc(Math.round(0.4 * PCM_BYTES_PER_SEC), 0);
 
   for (const [spId, localIndices] of perSpeakerIndices.entries()) {
     const sp = speakerMap.get(spId)!;
     const spTurns = localIndices.map((idx) => subTurns[idx]);
 
-    const parts = spTurns.map((t, j) => {
-      const prevGlobalIdx = localIndices[j] - 1;
-      const prevTurn = prevGlobalIdx >= 0 ? subTurns[prevGlobalIdx] : null;
-      const contextHint = prevTurn
-        ? `Responding naturally to ${prevTurn.speakerName}`
-        : `Opening line of dialogue`;
-      return {
-        text: stripLegacyPauseArtifacts(t.cleanSpeechText),
-        speechMetadata: {
-          ...(sp.isCloned ? {} : { speaker: sp.baseVoice || "Charon" }),
-          style: buildCleanTurnStyleForTts(t, contextHint),
-        },
-      };
-    });
+    const parts = spTurns.map((t) => ({
+      text: stripLegacyPauseArtifacts(t.cleanSpeechText),
+      speechMetadata: {
+        ...(sp.isCloned ? {} : { speaker: sp.baseVoice || "Charon" }),
+        style: buildCleanTurnStyleForTts(t),
+      },
+    }));
 
     if (ttsPayloadObserver) {
       ttsPayloadObserver({
@@ -1426,7 +1580,10 @@ async function runSingleSubBlockAttempt(
           overrideDurationSec: Math.max(0.25, (syl / 4.8) * mult),
         };
       });
-      spBlockPcm = generateSyntheticBlockPcm(fakeTurns, 0.45).pcm;
+      spBlockPcm = generateSyntheticBlockPcm(
+        fakeTurns,
+        injectedFault?.noInterTurnSilence ? 0 : 0.45
+      ).pcm;
       providers.push("fake");
     } else {
       try {
@@ -1504,22 +1661,39 @@ async function runSingleSubBlockAttempt(
       }
     }
 
-    qaPcmParts.push(spBlockPcm, silenceGap200ms);
+    if (qaPcmParts.length > 0) qaPcmParts.push(silenceGap400ms);
+    qaPcmParts.push(spBlockPcm);
     qaExpectedOrder.push(...spTurns);
-
-    const sliced = await sliceBlockAudioIntoTurns(ai, spBlockPcm, spTurns, speakerMap);
-    transcribeCalls += sliced.transcribeCalls;
-    ttsCalls += sliced.recoveryTtsCalls;
-
-    localIndices.forEach((origLocalIdx, k) => {
-      const c = sliced.clips[k];
-      assembledClips[origLocalIdx] = injectedFault?.forceMethod
-        ? { ...c, method: injectedFault.forceMethod }
-        : c;
-    });
+    qaOrigIndices.push(...localIndices);
   }
 
-  // Нормализуем монотонные startMs/endMs в порядке сценария (каждый спикер нарезался из своего PCM)
+  // Один общий запрос выравнивания и QA-транскрипции на весь подблок Mode B
+  const reorderedFakeOverrides = injectedFault?.fakeTurnOverrides
+    ? qaOrigIndices.map((origIdx) => injectedFault.fakeTurnOverrides?.[origIdx])
+    : undefined;
+
+  const combinedAligned = await sliceBlockAudioIntoTurns(
+    ai,
+    Buffer.concat(qaPcmParts),
+    qaExpectedOrder,
+    speakerMap,
+    {
+      fakeTurnOverrides: reorderedFakeOverrides,
+      fakeWholeTranscriptOverride: injectedFault?.overrideTranscript,
+    }
+  );
+  transcribeCalls += combinedAligned.transcribeCalls;
+  ttsCalls += combinedAligned.recoveryTtsCalls;
+
+  const assembledClips = new Array<AlignedTurnClipWithQa>(subTurns.length);
+  qaOrigIndices.forEach((origLocalIdx, k) => {
+    const c = combinedAligned.clips[k];
+    assembledClips[origLocalIdx] = injectedFault?.forceMethod
+      ? { ...c, method: injectedFault.forceMethod }
+      : c;
+  });
+
+  // Нормализуем монотонные startMs/endMs в порядке сценария
   let runningMs = 0;
   const orderedClips = assembledClips.map((c) => {
     const durMs = Math.max(100, Math.round((c.pcm.length / PCM_BYTES_PER_SEC) * 1000));
@@ -1532,30 +1706,14 @@ async function runSingleSubBlockAttempt(
     return out;
   });
 
-  // 1 вызов gemini-3.5-transcribe для QA всего подблока (сырой звук по спикерам в том же порядке)
-  let transcriptText: string;
-  if (injectedFault?.overrideTranscript !== undefined) {
-    transcriptText = injectedFault.overrideTranscript;
-  } else {
-    const qaTx = await transcribePlainTextForQa(
-      ai,
-      Buffer.concat(qaPcmParts),
-      qaExpectedOrder.map((t, i) => ({
-        index: i,
-        speaker: t.speakerName,
-        text: stripLegacyPauseArtifacts(t.cleanSpeechText),
-      })),
-      DUBBING_MODELS_CONFIG.transcribeModel
-    );
-    if (qaTx.usedApiCall) transcribeCalls += 1;
-    transcriptText = qaTx.text;
-  }
-
-  // Оцениваем длительности/методы по orderedClips + транскрипцию по qaExpectedOrder (тот же мультисет слов!)
   const qaEval = evaluateSubBlockQa({
     expectedTurns: subTurns,
     slicedClips: orderedClips,
-    transcriptText,
+    transcriptText:
+      injectedFault?.overrideTranscript !== undefined
+        ? injectedFault.overrideTranscript
+        : combinedAligned.heardTranscript,
+    speakerMap,
   });
 
   return { clips: orderedClips, qaEval, ttsCalls, transcribeCalls, providers };
@@ -1595,14 +1753,24 @@ interface ResolvedSubBlockOutput {
   quotaPauseMessageRu?: string;
 }
 
+interface RetryBudgetTracker {
+  extraTtsUsed: number;
+  extraTtsLimit: number;
+}
+
+function estimateAttemptTtsCost(turns: BatchInputTurn[], mode: "A" | "B"): number {
+  if (mode === "A") return 1;
+  const spCount = new Set(turns.map((t) => t.speakerId)).size;
+  return Math.max(1, spCount);
+}
+
 /**
- * Этап 2 + Этап 3: Синтез одного подблока с кэшем v2, QA и каскадом восстановления:
- * 1. Кэш v2 (если !bypassCache);
+ * Синтез одного подблока с кэшем v3, порепликовым QA и каскадом восстановления
+ * в рамках жёсткого лимита лишних вызовов TTS (<= 25% от числа подблоков):
+ * 1. Кэш v3 (если !bypassCache);
  * 2. Попытка 1 (Mode A или Mode B);
- * 3. При провале QA -> Попытка 2 (перегенерация подблока 1 раз);
- * 4. При провале -> Попытка 3 (разбить подблок пополам и проверить каждую половину);
- * 5. При провале -> Попытка 4 (Mode B: по 1 спикеру на запрос);
- * 6. При провале -> вернуть с qa="failed" и явной причиной qaReason, в кэш НЕ писать!
+ * 3. При провале QA -> если бюджет позволяет: Попытка 2 (повтор), Попытка 3 (деление пополам), Попытка 4 (Mode B);
+ * 4. При исчерпании лимита переделок или провале -> сразу qa="failed" с явной причиной, в кэш НЕ писать!
  */
 async function executeSubBlockWithQaAndEscalation(
   ai: GoogleGenAI,
@@ -1615,6 +1783,7 @@ async function executeSubBlockWithQaAndEscalation(
     startingCompletedBlocks: number;
     blocksCompletedSoFar: number;
     totalProjectBlocks: number;
+    retryBudget: RetryBudgetTracker;
   }
 ): Promise<ResolvedSubBlockOutput> {
   const {
@@ -1626,13 +1795,14 @@ async function executeSubBlockWithQaAndEscalation(
     startingCompletedBlocks,
     blocksCompletedSoFar,
     totalProjectBlocks,
+    retryBudget,
   } = params;
 
   const primaryMode: "A" | "B" = canUseModeA ? "A" : "B";
   const cacheHash = computeSubBlockCacheHash(subTurns, speakerMap, primaryMode);
 
   if (!bypassCache) {
-    const cached = loadCachedBlockPcmsV2(cacheHash, subTurns.length);
+    const cached = loadCachedBlockPcmsV3(cacheHash, subTurns.length);
     if (cached) {
       return {
         pcms: cached.pcms,
@@ -1659,7 +1829,14 @@ async function executeSubBlockWithQaAndEscalation(
     providers.push(...res.providers);
   };
 
-  // --- ПОПЫТКА 1: Основная ---
+  const canSpendExtraTts = (neededCalls: number): boolean => {
+    return retryBudget.extraTtsUsed + neededCalls <= retryBudget.extraTtsLimit;
+  };
+  const consumeExtraTts = (spentCalls: number) => {
+    retryBudget.extraTtsUsed += spentCalls;
+  };
+
+  // --- ПОПЫТКА 1: Основная (не тратит лимит переделок) ---
   attemptCounter += 1;
   const attempt1 = await runSingleSubBlockAttempt(ai, {
     subTurns,
@@ -1691,7 +1868,7 @@ async function executeSubBlockWithQaAndEscalation(
   if (attempt1.qaEval.passed) {
     const pcms = attempt1.clips.map((c) => c.pcm);
     const methods = attempt1.clips.map((c) => c.method);
-    saveCachedBlockPcmsV2(cacheHash, pcms, methods, "ok");
+    saveCachedBlockPcmsV3(cacheHash, pcms, methods, "ok");
     return {
       pcms,
       methods,
@@ -1706,124 +1883,95 @@ async function executeSubBlockWithQaAndEscalation(
 
   const firstFailureSummary = attempt1.qaEval.reasons.join("; ");
   let bestFallbackAttempt = attempt1;
+  let budgetExhaustedNote = "";
 
-  // --- ПОПЫТКА 2: Перегенерировать подблок 1 раз ---
-  retriesUsed += 1;
-  attemptCounter += 1;
-  const attempt2 = await runSingleSubBlockAttempt(ai, {
-    subTurns,
-    speakerMap,
-    uniqueSpeakers,
-    forceMode: primaryMode,
-    attemptNumber: attemptCounter,
-    stage: "retry",
-    startingCompletedBlocks,
-    blocksCompletedSoFar,
-    totalProjectBlocks,
-  });
-  accumulate(attempt2);
-  if (attempt2.quotaPaused) {
-    return {
-      pcms: [],
-      methods: [],
-      qas: [],
-      qaReasons: [],
-      ttsCalls: totalTts,
-      transcribeCalls: totalTranscribe,
-      retriesUsed,
-      providers,
-      quotaPaused: true,
-      quotaPauseMessageRu: attempt2.quotaPauseMessageRu,
-    };
-  }
-
-  if (attempt2.qaEval.passed) {
-    const pcms = attempt2.clips.map((c) => c.pcm);
-    const methods = attempt2.clips.map((c) => c.method);
-    saveCachedBlockPcmsV2(cacheHash, pcms, methods, "retried");
-    return {
-      pcms,
-      methods,
-      qas: subTurns.map(() => "retried"),
-      qaReasons: subTurns.map(() => `Исправлено при повторе (${firstFailureSummary})`),
-      ttsCalls: totalTts,
-      transcribeCalls: totalTranscribe,
-      retriesUsed,
-      providers,
-    };
-  }
-  if (attempt2.qaEval.reasons.length <= bestFallbackAttempt.qaEval.reasons.length) {
-    bestFallbackAttempt = attempt2;
-  }
-
-  // --- ПОПЫТКА 3: Разбить подблок пополам (если >= 2 реплик) ---
-  if (subTurns.length >= 2) {
+  // --- ПОПЫТКА 2: Перегенерировать подблок 1 раз (в рамках 25% лимита) ---
+  const retryCost = estimateAttemptTtsCost(subTurns, primaryMode);
+  if (!canSpendExtraTts(retryCost)) {
+    budgetExhaustedNote = `retry_budget_exhausted (${retryBudget.extraTtsUsed}/${retryBudget.extraTtsLimit})`;
+  } else {
+    consumeExtraTts(retryCost);
     retriesUsed += 1;
+    attemptCounter += 1;
+    const attempt2 = await runSingleSubBlockAttempt(ai, {
+      subTurns,
+      speakerMap,
+      uniqueSpeakers,
+      forceMode: primaryMode,
+      attemptNumber: attemptCounter,
+      stage: "retry",
+      startingCompletedBlocks,
+      blocksCompletedSoFar,
+      totalProjectBlocks,
+    });
+    accumulate(attempt2);
+    if (attempt2.quotaPaused) {
+      return {
+        pcms: [],
+        methods: [],
+        qas: [],
+        qaReasons: [],
+        ttsCalls: totalTts,
+        transcribeCalls: totalTranscribe,
+        retriesUsed,
+        providers,
+        quotaPaused: true,
+        quotaPauseMessageRu: attempt2.quotaPauseMessageRu,
+      };
+    }
+
+    if (attempt2.qaEval.passed) {
+      const pcms = attempt2.clips.map((c) => c.pcm);
+      const methods = attempt2.clips.map((c) => c.method);
+      saveCachedBlockPcmsV3(cacheHash, pcms, methods, "retried");
+      return {
+        pcms,
+        methods,
+        qas: subTurns.map(() => "retried"),
+        qaReasons: subTurns.map(() => `Исправлено при повторе (${firstFailureSummary})`),
+        ttsCalls: totalTts,
+        transcribeCalls: totalTranscribe,
+        retriesUsed,
+        providers,
+      };
+    }
+    if (attempt2.qaEval.reasons.length <= bestFallbackAttempt.qaEval.reasons.length) {
+      bestFallbackAttempt = attempt2;
+    }
+  }
+
+  // --- ПОПЫТКА 3: Разбить подблок пополам (если >= 2 реплик и хватает лимита) ---
+  if (!budgetExhaustedNote && subTurns.length >= 2) {
     const splitIdx = chooseSmartHalfSplitIndex(subTurns);
     const halves = [subTurns.slice(0, splitIdx), subTurns.slice(splitIdx)];
-    const halfPcms: Buffer[] = [];
-    const halfMethods: string[] = [];
-    const halfQas: TurnQaStatus[] = [];
-    const halfReasons: Array<string | undefined> = [];
-    let allHalvesPassed = true;
+    const splitCost = halves.reduce((acc, h) => acc + estimateAttemptTtsCost(h, primaryMode), 0);
 
-    for (const halfTurns of halves) {
-      attemptCounter += 1;
-      const halfAttempt = await runSingleSubBlockAttempt(ai, {
-        subTurns: halfTurns,
-        speakerMap,
-        uniqueSpeakers,
-        forceMode: primaryMode,
-        attemptNumber: attemptCounter,
-        stage: "split_half",
-        startingCompletedBlocks,
-        blocksCompletedSoFar,
-        totalProjectBlocks,
-      });
-      accumulate(halfAttempt);
-      if (halfAttempt.quotaPaused) {
-        return {
-          pcms: [],
-          methods: [],
-          qas: [],
-          qaReasons: [],
-          ttsCalls: totalTts,
-          transcribeCalls: totalTranscribe,
-          retriesUsed,
-          providers,
-          quotaPaused: true,
-          quotaPauseMessageRu: halfAttempt.quotaPauseMessageRu,
-        };
-      }
+    if (!canSpendExtraTts(splitCost)) {
+      budgetExhaustedNote = `retry_budget_exhausted (${retryBudget.extraTtsUsed}/${retryBudget.extraTtsLimit})`;
+    } else {
+      consumeExtraTts(splitCost);
+      retriesUsed += 1;
+      const halfPcms: Buffer[] = [];
+      const halfMethods: string[] = [];
+      const halfQas: TurnQaStatus[] = [];
+      const halfReasons: Array<string | undefined> = [];
+      let allHalvesPassed = true;
 
-      if (halfAttempt.qaEval.passed) {
-        const hp = halfAttempt.clips.map((c) => c.pcm);
-        const hm = halfAttempt.clips.map((c) => c.method);
-        const halfHash = computeSubBlockCacheHash(halfTurns, speakerMap, primaryMode);
-        saveCachedBlockPcmsV2(halfHash, hp, hm, "retried");
-        halfPcms.push(...hp);
-        halfMethods.push(...hm);
-        halfQas.push(...halfTurns.map(() => "retried" as TurnQaStatus));
-        halfReasons.push(
-          ...halfTurns.map(() => `Исправлено делением пополам (${firstFailureSummary})`)
-        );
-      } else {
-        // --- ПОПЫТКА 4 (для провалившейся половины): Mode B (по 1 голосу на запрос) ---
-        retriesUsed += 1;
+      for (const halfTurns of halves) {
         attemptCounter += 1;
-        const modeBAttempt = await runSingleSubBlockAttempt(ai, {
+        const halfAttempt = await runSingleSubBlockAttempt(ai, {
           subTurns: halfTurns,
           speakerMap,
           uniqueSpeakers,
-          forceMode: "B",
+          forceMode: primaryMode,
           attemptNumber: attemptCounter,
-          stage: "mode_b",
+          stage: "split_half",
           startingCompletedBlocks,
           blocksCompletedSoFar,
           totalProjectBlocks,
         });
-        accumulate(modeBAttempt);
-        if (modeBAttempt.quotaPaused) {
+        accumulate(halfAttempt);
+        if (halfAttempt.quotaPaused) {
           return {
             pcms: [],
             methods: [],
@@ -1834,91 +1982,151 @@ async function executeSubBlockWithQaAndEscalation(
             retriesUsed,
             providers,
             quotaPaused: true,
-            quotaPauseMessageRu: modeBAttempt.quotaPauseMessageRu,
+            quotaPauseMessageRu: halfAttempt.quotaPauseMessageRu,
           };
         }
 
-        if (modeBAttempt.qaEval.passed) {
-          const mp = modeBAttempt.clips.map((c) => c.pcm);
-          const mm = modeBAttempt.clips.map((c) => c.method);
-          const halfHashB = computeSubBlockCacheHash(halfTurns, speakerMap, "B");
-          saveCachedBlockPcmsV2(halfHashB, mp, mm, "retried");
-          halfPcms.push(...mp);
-          halfMethods.push(...mm);
+        if (halfAttempt.qaEval.passed) {
+          const hp = halfAttempt.clips.map((c) => c.pcm);
+          const hm = halfAttempt.clips.map((c) => c.method);
+          halfPcms.push(...hp);
+          halfMethods.push(...hm);
           halfQas.push(...halfTurns.map(() => "retried" as TurnQaStatus));
           halfReasons.push(
-            ...halfTurns.map(() => `Исправлено в режиме 1 голос/запрос (${firstFailureSummary})`)
+            ...halfTurns.map(() => `Исправлено делением пополам (${firstFailureSummary})`)
           );
         } else {
-          allHalvesPassed = false;
-          const chosen =
-            modeBAttempt.qaEval.reasons.length <= halfAttempt.qaEval.reasons.length
-              ? modeBAttempt
-              : halfAttempt;
-          const failReason = chosen.qaEval.reasons.join("; ") || firstFailureSummary;
-          halfPcms.push(...chosen.clips.map((c) => c.pcm));
-          halfMethods.push(...chosen.clips.map((c) => c.method));
-          halfQas.push(...halfTurns.map(() => "failed" as TurnQaStatus));
-          halfReasons.push(...halfTurns.map(() => failReason));
+          // --- ПОПЫТКА 4 (для провалившейся половины): Mode B (если хватает лимита) ---
+          const modeBCost = estimateAttemptTtsCost(halfTurns, "B");
+          if (!canSpendExtraTts(modeBCost)) {
+            allHalvesPassed = false;
+            const failReason = `${halfAttempt.qaEval.reasons.join("; ") || firstFailureSummary}; retry_budget_exhausted (${retryBudget.extraTtsUsed}/${retryBudget.extraTtsLimit})`;
+            halfPcms.push(...halfAttempt.clips.map((c) => c.pcm));
+            halfMethods.push(...halfAttempt.clips.map((c) => c.method));
+            halfQas.push(...halfTurns.map(() => "failed" as TurnQaStatus));
+            halfReasons.push(...halfTurns.map(() => failReason));
+            continue;
+          }
+
+          consumeExtraTts(modeBCost);
+          retriesUsed += 1;
+          attemptCounter += 1;
+          const modeBAttempt = await runSingleSubBlockAttempt(ai, {
+            subTurns: halfTurns,
+            speakerMap,
+            uniqueSpeakers,
+            forceMode: "B",
+            attemptNumber: attemptCounter,
+            stage: "mode_b",
+            startingCompletedBlocks,
+            blocksCompletedSoFar,
+            totalProjectBlocks,
+          });
+          accumulate(modeBAttempt);
+          if (modeBAttempt.quotaPaused) {
+            return {
+              pcms: [],
+              methods: [],
+              qas: [],
+              qaReasons: [],
+              ttsCalls: totalTts,
+              transcribeCalls: totalTranscribe,
+              retriesUsed,
+              providers,
+              quotaPaused: true,
+              quotaPauseMessageRu: modeBAttempt.quotaPauseMessageRu,
+            };
+          }
+
+          if (modeBAttempt.qaEval.passed) {
+            const mp = modeBAttempt.clips.map((c) => c.pcm);
+            const mm = modeBAttempt.clips.map((c) => c.method);
+            halfPcms.push(...mp);
+            halfMethods.push(...mm);
+            halfQas.push(...halfTurns.map(() => "retried" as TurnQaStatus));
+            halfReasons.push(
+              ...halfTurns.map(() => `Исправлено в режиме 1 голос/запрос (${firstFailureSummary})`)
+            );
+          } else {
+            allHalvesPassed = false;
+            const chosen =
+              modeBAttempt.qaEval.reasons.length <= halfAttempt.qaEval.reasons.length
+                ? modeBAttempt
+                : halfAttempt;
+            const failReason = chosen.qaEval.reasons.join("; ") || firstFailureSummary;
+            halfPcms.push(...chosen.clips.map((c) => c.pcm));
+            halfMethods.push(...chosen.clips.map((c) => c.method));
+            halfQas.push(...halfTurns.map(() => "failed" as TurnQaStatus));
+            halfReasons.push(...halfTurns.map(() => failReason));
+          }
         }
       }
-    }
 
-    if (allHalvesPassed) {
-      // Весь подблок прошёл QA после деления / Mode B — можно кэшировать чистый результат подблока
-      saveCachedBlockPcmsV2(cacheHash, halfPcms, halfMethods, "retried");
-    }
+      if (allHalvesPassed) {
+        // Кэшируем ТОЛЬКО целый подблок, если обе половины прошли QA!
+        saveCachedBlockPcmsV3(cacheHash, halfPcms, halfMethods, "retried");
+      }
 
-    return {
-      pcms: halfPcms,
-      methods: halfMethods,
-      qas: halfQas,
-      qaReasons: halfReasons,
-      ttsCalls: totalTts,
-      transcribeCalls: totalTranscribe,
-      retriesUsed,
-      providers,
-    };
-  }
-
-  // Одиночная реплика в подблоке: пробуем Mode B как последний шаг
-  if (primaryMode === "A") {
-    retriesUsed += 1;
-    attemptCounter += 1;
-    const modeBAttempt = await runSingleSubBlockAttempt(ai, {
-      subTurns,
-      speakerMap,
-      uniqueSpeakers,
-      forceMode: "B",
-      attemptNumber: attemptCounter,
-      stage: "mode_b",
-      startingCompletedBlocks,
-      blocksCompletedSoFar,
-      totalProjectBlocks,
-    });
-    accumulate(modeBAttempt);
-    if (modeBAttempt.qaEval.passed) {
-      const mp = modeBAttempt.clips.map((c) => c.pcm);
-      const mm = modeBAttempt.clips.map((c) => c.method);
-      saveCachedBlockPcmsV2(cacheHash, mp, mm, "retried");
       return {
-        pcms: mp,
-        methods: mm,
-        qas: subTurns.map(() => "retried"),
-        qaReasons: subTurns.map(() => `Исправлено в режиме 1 голос/запрос (${firstFailureSummary})`),
+        pcms: halfPcms,
+        methods: halfMethods,
+        qas: halfQas,
+        qaReasons: halfReasons,
         ttsCalls: totalTts,
         transcribeCalls: totalTranscribe,
         retriesUsed,
         providers,
       };
     }
-    if (modeBAttempt.qaEval.reasons.length <= bestFallbackAttempt.qaEval.reasons.length) {
-      bestFallbackAttempt = modeBAttempt;
+  }
+
+  // Одиночная реплика в подблоке: пробуем Mode B как последний шаг (если хватает лимита)
+  if (!budgetExhaustedNote && primaryMode === "A") {
+    const modeBCost = estimateAttemptTtsCost(subTurns, "B");
+    if (canSpendExtraTts(modeBCost)) {
+      consumeExtraTts(modeBCost);
+      retriesUsed += 1;
+      attemptCounter += 1;
+      const modeBAttempt = await runSingleSubBlockAttempt(ai, {
+        subTurns,
+        speakerMap,
+        uniqueSpeakers,
+        forceMode: "B",
+        attemptNumber: attemptCounter,
+        stage: "mode_b",
+        startingCompletedBlocks,
+        blocksCompletedSoFar,
+        totalProjectBlocks,
+      });
+      accumulate(modeBAttempt);
+      if (modeBAttempt.qaEval.passed) {
+        const mp = modeBAttempt.clips.map((c) => c.pcm);
+        const mm = modeBAttempt.clips.map((c) => c.method);
+        saveCachedBlockPcmsV3(cacheHash, mp, mm, "retried");
+        return {
+          pcms: mp,
+          methods: mm,
+          qas: subTurns.map(() => "retried"),
+          qaReasons: subTurns.map(() => `Исправлено в режиме 1 голос/запрос (${firstFailureSummary})`),
+          ttsCalls: totalTts,
+          transcribeCalls: totalTranscribe,
+          retriesUsed,
+          providers,
+        };
+      }
+      if (modeBAttempt.qaEval.reasons.length <= bestFallbackAttempt.qaEval.reasons.length) {
+        bestFallbackAttempt = modeBAttempt;
+      }
+    } else {
+      budgetExhaustedNote = `retry_budget_exhausted (${retryBudget.extraTtsUsed}/${retryBudget.extraTtsLimit})`;
     }
   }
 
-  // Провал всех шагов: НИКОГДА не молчим и НИКОГДА не кэшируем!
-  const finalFailReason = bestFallbackAttempt.qaEval.reasons.join("; ") || firstFailureSummary;
+  // Провал всех шагов или исчерпание лимита переделок: НИКОГДА не кэшируем!
+  const baseFailReason = bestFallbackAttempt.qaEval.reasons.join("; ") || firstFailureSummary;
+  const finalFailReason = budgetExhaustedNote
+    ? `${baseFailReason}; ${budgetExhaustedNote}`
+    : baseFailReason;
   return {
     pcms: bestFallbackAttempt.clips.map((c) => c.pcm),
     methods: bestFallbackAttempt.clips.map((c) => c.method),
@@ -1943,6 +2151,8 @@ export async function synthesizeDialogueInMacroBlocks(
     strictTimeWindow: boolean;
     startingCompletedBlocks?: number;
     totalProjectBlocks?: number;
+    totalProjectSubBlocks?: number;
+    maxExtraTtsCalls?: number;
     bypassCache?: boolean;
   }
 ): Promise<BatchDialogueExecutionResult> {
@@ -1951,26 +2161,92 @@ export async function synthesizeDialogueInMacroBlocks(
   const usesClonedVoice = uniqueSpeakers.some((s) => s.isCloned);
   const canUseModeA = !usesClonedVoice && uniqueSpeakers.length <= 2 && uniqueSpeakers.length >= 1;
 
-  // Этап 1: Нарезаем внутри блоков сцен на подблоки <= 8 реплик И <= 40 с суммарной длины окон
-  const plannedSubBlocks = planDialogueSubBlocks(turns, {
-    maxTurns: 8,
-    maxWindowSec: 40,
-    macroBlockOptions: {
-      targetSize: 22,
-      minSize: 12,
-      maxSize: 25,
-      minPauseSec: 0.5,
-      maxInputTokens: 5800,
-    },
-  });
+  // Если клиент уже разбил ПОЛНЫЙ сценарий через planDialogueSubBlocks и передал plannedSubBlockIndex,
+  // сохраняем точные границы подблоков полного сценария (иначе планируем здесь же).
+  const hasExplicitSubBlockPlan =
+    turns.length > 0 &&
+    turns.every(
+      (t) => typeof t.plannedSubBlockIndex === "number" && Number.isFinite(t.plannedSubBlockIndex)
+    );
+
+  const plannedSubBlocks: Array<{
+    globalSubBlockIndex: number;
+    startTimecode: string;
+    endTimecode: string;
+    turns: BatchInputTurn[];
+  }> = [];
+
+  if (hasExplicitSubBlockPlan) {
+    const formatTc = (sec?: number): string => {
+      if (typeof sec !== "number" || !Number.isFinite(sec) || sec < 0) return "00:00";
+      const total = Math.round(sec);
+      const mins = Math.floor(total / 60);
+      const secs = total % 60;
+      return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+    };
+    let currentIdx: number | null = null;
+    let currentTurns: BatchInputTurn[] = [];
+    const flushExplicit = () => {
+      if (currentTurns.length === 0 || currentIdx === null) return;
+      plannedSubBlocks.push({
+        globalSubBlockIndex: currentIdx,
+        startTimecode: formatTc(currentTurns[0]?.startSec),
+        endTimecode: formatTc(currentTurns[currentTurns.length - 1]?.endSec ?? currentTurns[currentTurns.length - 1]?.startSec),
+        turns: currentTurns,
+      });
+      currentTurns = [];
+    };
+    for (const t of turns) {
+      const idx = Number(t.plannedSubBlockIndex);
+      if (currentIdx !== null && idx !== currentIdx) {
+        flushExplicit();
+      }
+      currentIdx = idx;
+      currentTurns.push(t);
+    }
+    flushExplicit();
+  } else {
+    const autoPlanned = planDialogueSubBlocks(turns, {
+      maxTurns: 8,
+      maxWindowSec: 40,
+      macroBlockOptions: {
+        targetSize: 22,
+        minSize: 12,
+        maxSize: 25,
+        minPauseSec: 0.5,
+        maxInputTokens: 5800,
+      },
+    });
+    const startingBase = params.startingCompletedBlocks || 0;
+    for (let i = 0; i < autoPlanned.length; i++) {
+      plannedSubBlocks.push({
+        globalSubBlockIndex: startingBase + i,
+        startTimecode: autoPlanned[i].startTimecode,
+        endTimecode: autoPlanned[i].endTimecode,
+        turns: autoPlanned[i].turns,
+      });
+    }
+  }
 
   const totalProjectBlocks = Math.max(
     plannedSubBlocks.length,
-    params.totalProjectBlocks || plannedSubBlocks.length
+    params.totalProjectSubBlocks || params.totalProjectBlocks || plannedSubBlocks.length
   );
   const startingCompleted = params.startingCompletedBlocks || 0;
 
+  // Лимит переделок: лишних вызовов TTS строго не больше 25% от числа подблоков
+  const extraTtsLimit =
+    typeof params.maxExtraTtsCalls === "number" && Number.isFinite(params.maxExtraTtsCalls)
+      ? Math.max(0, Math.floor(params.maxExtraTtsCalls))
+      : Math.floor(totalProjectBlocks * 0.25);
+
+  const retryBudget: RetryBudgetTracker = {
+    extraTtsUsed: 0,
+    extraTtsLimit,
+  };
+
   const finalResults: BatchSynthesizedTurnResult[] = [];
+  const failedSubBlocks: FailedSubBlockSummary[] = [];
   let totalTtsCalls = 0;
   let totalTranscribeCalls = 0;
   let totalRetriesUsed = 0;
@@ -1982,7 +2258,8 @@ export async function synthesizeDialogueInMacroBlocks(
   let globalTurnCounter = 0;
 
   for (let sbIdx = 0; sbIdx < plannedSubBlocks.length; sbIdx++) {
-    const subTurns = plannedSubBlocks[sbIdx].turns;
+    const plannedSb = plannedSubBlocks[sbIdx];
+    const subTurns = plannedSb.turns;
 
     const subRes = await executeSubBlockWithQaAndEscalation(ai, {
       subTurns,
@@ -1993,6 +2270,7 @@ export async function synthesizeDialogueInMacroBlocks(
       startingCompletedBlocks: startingCompleted,
       blocksCompletedSoFar: subBlocksCompleted,
       totalProjectBlocks,
+      retryBudget,
     });
 
     totalTtsCalls += subRes.ttsCalls;
@@ -2004,6 +2282,19 @@ export async function synthesizeDialogueInMacroBlocks(
       quotaPaused = true;
       quotaPauseMessageRu = subRes.quotaPauseMessageRu;
       break;
+    }
+
+    if (subRes.qas.some((q) => q === "failed")) {
+      const uniqReasons = Array.from(
+        new Set(subRes.qaReasons.filter((r): r is string => Boolean(r && r.trim())))
+      );
+      failedSubBlocks.push({
+        subBlockIndex: plannedSb.globalSubBlockIndex,
+        startTimecode: plannedSb.startTimecode,
+        endTimecode: plannedSb.endTimecode,
+        turnIds: subTurns.map((t) => t.id),
+        reasons: uniqReasons.length > 0 ? uniqReasons : ["qa_failed"],
+      });
     }
 
     for (let i = 0; i < subTurns.length; i++) {
@@ -2048,7 +2339,7 @@ export async function synthesizeDialogueInMacroBlocks(
         qa: subRes.qas[i] || "ok",
         qaReason: subRes.qaReasons[i],
         needsShorten: fitted.needsShorten,
-        subBlockIndex: sbIdx,
+        subBlockIndex: plannedSb.globalSubBlockIndex,
       });
     }
 
@@ -2087,6 +2378,8 @@ export async function synthesizeDialogueInMacroBlocks(
     turns: finalResults,
     ttsCallsUsed: totalTtsCalls,
     transcribeCallsUsed: totalTranscribeCalls,
+    extraTtsCallsUsed: retryBudget.extraTtsUsed,
+    extraTtsBudget: retryBudget.extraTtsLimit,
     provider: providerSummary,
     modeUsed:
       providerSummary === "cache"
@@ -2101,6 +2394,7 @@ export async function synthesizeDialogueInMacroBlocks(
     subBlocksTotal: plannedSubBlocks.length,
     subBlocksCompleted,
     retriesUsed: totalRetriesUsed,
+    failedSubBlocks,
     quotaPaused,
     quotaPauseMessageRu,
     stats: {

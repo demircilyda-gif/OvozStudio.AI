@@ -72,12 +72,18 @@ import {
 import { planDialogueMacroBlocks, planDialogueSubBlocks } from '../utils/dialogueMacroBlocks';
 import { stitchDialogueTurnsClient, decodeBase64ToBytes } from '../utils/clientMasterStitcher';
 import {
-  computeTurnAudioHash,
-  buildTurnAudioCacheKey,
-  saveDialogueTurnAudioBatch,
-  getDialogueTurnAudioByKeys,
-  type CachedDialogueTurnAudio,
+  saveDialogueSubBlockBatch,
+  getDialogueSubBlocksByKeys,
+  clearProjectSubBlocksFromDb,
+  clearProjectTurnAudioFromDb,
 } from '../utils/db';
+import {
+  DUBBING_CACHE_VERSION,
+  computeSubBlockClientHash,
+  buildSubBlockCacheKey,
+  planSubBlockCacheExecution,
+  type CachedDialogueSubBlock,
+} from '../utils/dubbingSubBlockCache';
 import { useAuth } from '../context/AuthContext';
 import { YUGAY_BURKHANOV_TURNS, YUGAY_BURKHANOV_METADATA } from '../data/yugayBurkhanovPreset';
 
@@ -485,6 +491,16 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   const [showReplaceTableModal, setShowReplaceTableModal] = useState<boolean>(false);
   const [showVoiceWarningModal, setShowVoiceWarningModal] = useState<boolean>(false);
   const [pendingSynthResumeFlag, setPendingSynthResumeFlag] = useState<boolean>(false);
+  const [pendingSynthNoCacheFlag, setPendingSynthNoCacheFlag] = useState<boolean>(false);
+  const [failedSubBlocks, setFailedSubBlocks] = useState<
+    Array<{
+      subBlockIndex: number;
+      startTimecode: string;
+      endTimecode: string;
+      turnIds: string[];
+      reasons: string[];
+    }>
+  >([]);
 
   // Subtitles / YouTube Import State
   const [youtubeImportUrl, setYoutubeImportUrl] = useState<string>('');
@@ -641,32 +657,21 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
   const plannedSubBlocks = useMemo(() => {
     if (turns.length === 0) return [];
-    const subBlocks: Array<{
-      globalSubBlockIndex: number;
-      macroBlockIndex: number;
-      startTurnIndex: number;
-      endTurnIndex: number;
-      startTimecode: string;
-      endTimecode: string;
-      turns: DialogueTurn[];
-    }> = [];
-    let globalIdx = 0;
-    for (const mb of plannedMacroBlocks) {
-      const subs = planDialogueSubBlocks(mb.turns, { maxTurns: 8, maxWindowSec: 40 });
-      for (const sb of subs) {
-        subBlocks.push({
-          globalSubBlockIndex: globalIdx++,
-          macroBlockIndex: mb.blockIndex,
-          startTurnIndex: mb.startTurnIndex + sb.startTurnIndex,
-          endTurnIndex: mb.startTurnIndex + sb.endTurnIndex,
-          startTimecode: sb.startTimecode,
-          endTimecode: sb.endTimecode,
-          turns: sb.turns,
-        });
-      }
-    }
-    return subBlocks;
-  }, [turns, plannedMacroBlocks]);
+    const subs = planDialogueSubBlocks(turns, {
+      maxTurns: 8,
+      maxWindowSec: 40,
+      macroBlockOptions: { maxSize: 25, minPauseSec: 0.5 },
+    });
+    return subs.map((sb) => ({
+      globalSubBlockIndex: sb.subBlockIndex,
+      macroBlockIndex: sb.macroBlockIndex,
+      startTurnIndex: sb.startTurnIndex,
+      endTurnIndex: sb.endTurnIndex,
+      startTimecode: sb.startTimecode,
+      endTimecode: sb.endTimecode,
+      turns: sb.turns,
+    }));
+  }, [turns]);
 
   const dubbingCallsForecast = useMemo(() => {
     if (!turns.length) {
@@ -703,8 +708,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     }
     if (baseTtsCalls === 0) baseTtsCalls = subBlocks;
     const baseTranscribeCalls = subBlocks;
-    const retryBufferCalls = Math.ceil(baseTtsCalls * 0.2);
-    const transcribeCalls = baseTranscribeCalls + Math.ceil(baseTranscribeCalls * 0.2);
+    const retryBufferCalls = Math.floor(subBlocks * 0.25);
+    const transcribeCalls = baseTranscribeCalls + retryBufferCalls;
     const estimatedCalls = baseTtsCalls + retryBufferCalls;
     return {
       blocks,
@@ -888,12 +893,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     [user?.uid, projectCacheId]
   );
 
-  // Build deterministic cache key: project + turnId + hash(text, voice, style)
-  const getTurnCacheDescriptor = (turn: DialogueTurn, overrideText?: string) => {
-    let voiceKey = '';
-    let roleKey = '';
+  // Voice & style key builders for whole-sub-block v3 cache (includes BOTH speakers' voices + texts + styles)
+  const getSpeakerVoiceKeyForCache = (turn: DialogueTurn): string => {
     if (turn.speakerId === 'HOST_1') {
-      voiceKey = [
+      return [
         speaker1Profile?.voiceId || speaker1Profile?.id || speaker1VoiceId,
         speaker1Profile?.baseVoice || '',
         speaker1Gender,
@@ -901,9 +904,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         speaker1Profile?.timbre || '',
         speaker1Profile?.isReplicatedVoice ? 'clone' : 'builtin',
       ].join('|');
-      roleKey = speaker1Role || '';
-    } else if (turn.speakerId === 'HOST_2') {
-      voiceKey = [
+    }
+    if (turn.speakerId === 'HOST_2') {
+      return [
         speaker2Profile?.voiceId || speaker2Profile?.id || speaker2VoiceId,
         speaker2Profile?.baseVoice || '',
         speaker2Gender,
@@ -911,120 +914,188 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         speaker2Timbre || speaker2Profile?.timbre || '',
         speaker2Profile?.isReplicatedVoice ? 'clone' : 'builtin',
       ].join('|');
-      roleKey = speaker2Role || '';
-    } else {
-      const extra = extraSpeakers.find(
-        (s) => s.speakerId === turn.speakerId || s.name === turn.speakerName
-      );
-      voiceKey = [
-        extra?.voiceId || turn.voiceId || turn.speakerId || '',
-        extra?.baseVoice || turn.baseVoice || '',
-        extra?.gender || turn.speakerGender || '',
-      ].join('|');
-      roleKey = extra?.description || '';
     }
+    const extra = extraSpeakers.find(
+      (s) => s.speakerId === turn.speakerId || s.name === turn.speakerName
+    );
+    return [
+      extra?.voiceId || turn.voiceId || turn.speakerId || '',
+      extra?.baseVoice || turn.baseVoice || '',
+      extra?.gender || turn.speakerGender || '',
+    ].join('|');
+  };
 
-    const styleKey = [
+  const getTurnStyleKeyForCache = (turn: DialogueTurn): string => {
+    const roleKey =
+      turn.speakerId === 'HOST_1'
+        ? speaker1Role || ''
+        : turn.speakerId === 'HOST_2'
+        ? speaker2Role || ''
+        : extraSpeakers.find((s) => s.speakerId === turn.speakerId || s.name === turn.speakerName)
+            ?.description || '';
+    return [
       turn.speechStyle || '',
       turn.intonationRu || '',
       turn.emotion || '',
       turn.pace || '',
       roleKey,
     ].join('|');
-
-    const textForHash = (overrideText ?? turn.text ?? '').trim();
-    const contentHash = computeTurnAudioHash({
-      text: textForHash,
-      voiceKey,
-      styleKey,
-    });
-    const cacheKey = buildTurnAudioCacheKey(projectCacheKey, turn.id, contentHash);
-    return { cacheKey, contentHash, voiceKey, styleKey };
   };
 
-  const persistTurnsAudioToIndexedDb = async (
-    items: DialogueTurn[],
-    sourceTurnsById?: Map<string, DialogueTurn>
+  // Persist ONLY complete v3 sub-blocks where EVERY turn has audioBase64 and qa = 'ok' | 'retried'
+  const persistCompleteSubBlocksToIndexedDb = async (
+    fullScriptTurns: DialogueTurn[],
+    synthesizedById: Map<string, DialogueTurn>
   ) => {
-    const entries: CachedDialogueTurnAudio[] = [];
+    const allSubs = planDialogueSubBlocks(fullScriptTurns, {
+      maxTurns: 8,
+      maxWindowSec: 40,
+      macroBlockOptions: { maxSize: 25, minPauseSec: 0.5 },
+    });
+    const entries: CachedDialogueSubBlock[] = [];
     const now = Date.now();
-    for (const item of items) {
-      if (!item?.id || !item.audioBase64) continue;
-      const primary = getTurnCacheDescriptor(item);
+
+    for (const sb of allSubs) {
+      const resolvedTurns: DialogueTurn[] = [];
+      let allReadyAndPassed = true;
+      let subQa: 'ok' | 'retried' = 'ok';
+
+      for (const scriptTurn of sb.turns) {
+        const synth = synthesizedById.get(scriptTurn.id);
+        const qaStatus = synth?.qa ?? 'ok';
+        if (
+          !synth ||
+          !synth.audioBase64 ||
+          synth.audioBase64.length < 16 ||
+          (qaStatus !== 'ok' && qaStatus !== 'retried')
+        ) {
+          allReadyAndPassed = false;
+          break;
+        }
+        if (qaStatus === 'retried') subQa = 'retried';
+        resolvedTurns.push(synth);
+      }
+
+      if (!allReadyAndPassed || resolvedTurns.length !== sb.turns.length) continue;
+
+      const subBlockHash = computeSubBlockClientHash({
+        subBlockTurns: sb.turns,
+        getSpeakerVoiceKey: getSpeakerVoiceKeyForCache,
+        getTurnStyleKey: getTurnStyleKeyForCache,
+      });
+      const cacheKey = buildSubBlockCacheKey(projectCacheKey, subBlockHash);
+
       entries.push({
-        cacheKey: primary.cacheKey,
+        cacheKey,
+        cacheVersion: DUBBING_CACHE_VERSION,
         projectKey: projectCacheKey,
-        turnId: item.id,
-        contentHash: primary.contentHash,
-        audioBase64: item.audioBase64,
-        durationSeconds: item.durationSeconds,
-        originalDurationSec: item.originalDurationSec,
-        dubbedDurationSec: item.dubbedDurationSec,
-        atempoApplied: item.atempoApplied,
-        rephraseAttempts: item.rephraseAttempts,
-        fitStepApplied: item.fitStepApplied,
-        syncStatus: item.syncStatus,
-        qa: item.qa,
-        qaReason: item.qaReason,
-        slicingMethod: item.slicingMethod,
-        shiftedStartBySec: item.shiftedStartBySec,
-        needsShorten: item.needsShorten,
-        subBlockIndex: item.subBlockIndex,
-        startTime: item.startTime,
-        endTime: item.endTime,
+        subBlockIndex: sb.subBlockIndex,
+        subBlockHash,
+        qa: subQa,
+        turnIds: sb.turns.map((t) => t.id),
+        turns: resolvedTurns.map((rt) => ({
+          turnId: rt.id,
+          audioBase64: rt.audioBase64!,
+          durationSeconds: rt.durationSeconds,
+          originalDurationSec: rt.originalDurationSec,
+          dubbedDurationSec: rt.dubbedDurationSec,
+          atempoApplied: rt.atempoApplied,
+          rephraseAttempts: rt.rephraseAttempts,
+          fitStepApplied: rt.fitStepApplied,
+          syncStatus: rt.syncStatus,
+          qa: rt.qa === 'retried' ? 'retried' : 'ok',
+          qaReason: rt.qaReason,
+          slicingMethod: rt.slicingMethod,
+          shiftedStartBySec: rt.shiftedStartBySec,
+          needsShorten: rt.needsShorten,
+          subBlockIndex: sb.subBlockIndex,
+          startTime: rt.startTime,
+          endTime: rt.endTime,
+        })),
         savedAt: now,
       });
-
-      // Also index under pre-rephrase text if server shortened text during fitting
-      const sourceTurn = sourceTurnsById?.get(item.id);
-      if (sourceTurn && sourceTurn.text.trim() !== item.text.trim()) {
-        const secondary = getTurnCacheDescriptor(sourceTurn);
-        if (secondary.cacheKey !== primary.cacheKey) {
-          entries.push({
-            cacheKey: secondary.cacheKey,
-            projectKey: projectCacheKey,
-            turnId: item.id,
-            contentHash: secondary.contentHash,
-            audioBase64: item.audioBase64,
-            durationSeconds: item.durationSeconds,
-            originalDurationSec: item.originalDurationSec,
-            dubbedDurationSec: item.dubbedDurationSec,
-            atempoApplied: item.atempoApplied,
-            rephraseAttempts: item.rephraseAttempts,
-            fitStepApplied: item.fitStepApplied,
-            syncStatus: item.syncStatus,
-            qa: item.qa,
-            qaReason: item.qaReason,
-            slicingMethod: item.slicingMethod,
-            shiftedStartBySec: item.shiftedStartBySec,
-            needsShorten: item.needsShorten,
-            subBlockIndex: item.subBlockIndex,
-            startTime: item.startTime,
-            endTime: item.endTime,
-            savedAt: now,
-          });
-        }
-      }
     }
+
     if (entries.length > 0) {
-      await saveDialogueTurnAudioBatch(entries);
+      await saveDialogueSubBlockBatch(entries);
     }
   };
 
-  // Auto-hydrate ready turn audio from IndexedDB after reload or voice/style/script updates
+  // Helper: hydrate complete v3 sub-blocks from IndexedDB for the FULL script
+  const loadCachedSubBlocksPlanForFullScript = async (
+    fullScriptTurns: DialogueTurn[],
+    ignoreCache = false
+  ) => {
+    const previewSubs = planDialogueSubBlocks(fullScriptTurns, {
+      maxTurns: 8,
+      maxWindowSec: 40,
+      macroBlockOptions: { maxSize: 25, minPauseSec: 0.5 },
+    });
+    const keys = previewSubs.map((sb) => {
+      const hash = computeSubBlockClientHash({
+        subBlockTurns: sb.turns,
+        getSpeakerVoiceKey: getSpeakerVoiceKeyForCache,
+        getTurnStyleKey: getTurnStyleKeyForCache,
+      });
+      return buildSubBlockCacheKey(projectCacheKey, hash);
+    });
+    const cachedMap = ignoreCache
+      ? new Map<string, CachedDialogueSubBlock>()
+      : await getDialogueSubBlocksByKeys(keys);
+
+    return planSubBlockCacheExecution({
+      fullTurns: fullScriptTurns,
+      projectKey: projectCacheKey,
+      getSpeakerVoiceKey: getSpeakerVoiceKeyForCache,
+      getTurnStyleKey: getTurnStyleKeyForCache,
+      cachedSubBlocksByKey: cachedMap,
+      ignoreCache,
+      maxTurnsPerRequest: 25,
+    });
+  };
+
+  // Auto-hydrate ONLY complete v3 cached sub-blocks from IndexedDB after reload or voice/style/script updates
   useEffect(() => {
     if (isHydratingUserRef.current || turns.length === 0) {
       setCachedTurnsInDbCount(0);
       return;
     }
     let cancelled = false;
-    const descriptors = turns.map((t) => ({ turn: t, desc: getTurnCacheDescriptor(t) }));
-    const keys = descriptors.map((d) => d.desc.cacheKey);
 
-    getDialogueTurnAudioByKeys(keys).then((foundMap) => {
+    loadCachedSubBlocksPlanForFullScript(turns, false).then((plan) => {
       if (cancelled) return;
-      setCachedTurnsInDbCount(foundMap.size);
-      if (foundMap.size === 0) return;
+      setCachedTurnsInDbCount(plan.cachedTurnCount);
+
+      const cachedTurnById = new Map<string, DialogueTurn>();
+      for (const item of plan.cachedSubBlocks) {
+        if (!item.cachedEntry) continue;
+        for (let i = 0; i < item.subBlock.turns.length; i++) {
+          const scriptTurn = item.subBlock.turns[i];
+          const rec = item.cachedEntry.turns[i];
+          if (!rec) continue;
+          cachedTurnById.set(scriptTurn.id, {
+            ...scriptTurn,
+            audioBase64: rec.audioBase64,
+            durationSeconds: rec.durationSeconds ?? scriptTurn.durationSeconds,
+            originalDurationSec: rec.originalDurationSec ?? scriptTurn.originalDurationSec,
+            dubbedDurationSec: rec.dubbedDurationSec ?? scriptTurn.dubbedDurationSec,
+            atempoApplied: rec.atempoApplied ?? scriptTurn.atempoApplied,
+            rephraseAttempts: rec.rephraseAttempts ?? scriptTurn.rephraseAttempts,
+            fitStepApplied: rec.fitStepApplied ?? scriptTurn.fitStepApplied,
+            syncStatus: rec.syncStatus ?? scriptTurn.syncStatus,
+            qa: rec.qa ?? scriptTurn.qa,
+            qaReason: rec.qaReason ?? scriptTurn.qaReason,
+            slicingMethod: rec.slicingMethod ?? scriptTurn.slicingMethod,
+            shiftedStartBySec: rec.shiftedStartBySec ?? scriptTurn.shiftedStartBySec,
+            needsShorten: rec.needsShorten ?? scriptTurn.needsShorten,
+            subBlockIndex: item.subBlock.subBlockIndex,
+            startTime: rec.startTime ?? scriptTurn.startTime,
+            endTime: rec.endTime ?? scriptTurn.endTime,
+          });
+        }
+      }
+
+      if (cachedTurnById.size === 0) return;
 
       setSynthesizedTurns((prev) => {
         const prevById = new Map<string, DialogueTurn>();
@@ -1033,32 +1104,14 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         }
         let changed = false;
         const merged: DialogueTurn[] = [];
-        for (const { turn, desc } of descriptors) {
-          const cached = foundMap.get(desc.cacheKey);
+        for (const turn of turns) {
+          const cached = cachedTurnById.get(turn.id);
           const existing = prevById.get(turn.id);
           if (cached) {
             if (!existing || existing.audioBase64 !== cached.audioBase64) {
               changed = true;
             }
-            merged.push({
-              ...turn,
-              audioBase64: cached.audioBase64,
-              durationSeconds: cached.durationSeconds ?? turn.durationSeconds,
-              originalDurationSec: cached.originalDurationSec ?? turn.originalDurationSec,
-              dubbedDurationSec: cached.dubbedDurationSec ?? turn.dubbedDurationSec,
-              atempoApplied: cached.atempoApplied ?? turn.atempoApplied,
-              rephraseAttempts: cached.rephraseAttempts ?? turn.rephraseAttempts,
-              fitStepApplied: cached.fitStepApplied ?? turn.fitStepApplied,
-              syncStatus: cached.syncStatus ?? turn.syncStatus,
-              qa: cached.qa ?? turn.qa,
-              qaReason: cached.qaReason ?? turn.qaReason,
-              slicingMethod: cached.slicingMethod ?? turn.slicingMethod,
-              shiftedStartBySec: cached.shiftedStartBySec ?? turn.shiftedStartBySec,
-              needsShorten: cached.needsShorten ?? turn.needsShorten,
-              subBlockIndex: cached.subBlockIndex ?? turn.subBlockIndex,
-              startTime: cached.startTime ?? turn.startTime,
-              endTime: cached.endTime ?? turn.endTime,
-            });
+            merged.push(cached);
           } else if (existing) {
             merged.push(existing);
           }
@@ -1116,48 +1169,60 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     return `HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ''}: ${fallback}`;
   };
 
-  // Re-stitch master WAV locally from IndexedDB / memory cache without any TTS requests
+  // Re-stitch master WAV locally from whole-sub-block v3 IndexedDB cache without any TTS requests
   const handleRestitchFromCache = async () => {
     if (turns.length === 0) return;
     setIsRestitchingFromCache(true);
     try {
-      const descriptors = turns.map((t) => ({ turn: t, desc: getTurnCacheDescriptor(t) }));
-      const foundMap = await getDialogueTurnAudioByKeys(descriptors.map((d) => d.desc.cacheKey));
+      const plan = await loadCachedSubBlocksPlanForFullScript(turns, false);
+      const cachedById = new Map<string, DialogueTurn>();
+      for (const item of plan.cachedSubBlocks) {
+        if (!item.cachedEntry) continue;
+        for (let i = 0; i < item.subBlock.turns.length; i++) {
+          const scriptTurn = item.subBlock.turns[i];
+          const rec = item.cachedEntry.turns[i];
+          if (!rec) continue;
+          cachedById.set(scriptTurn.id, {
+            ...scriptTurn,
+            audioBase64: rec.audioBase64,
+            durationSeconds: rec.durationSeconds ?? scriptTurn.durationSeconds,
+            originalDurationSec: rec.originalDurationSec ?? scriptTurn.originalDurationSec,
+            dubbedDurationSec: rec.dubbedDurationSec ?? scriptTurn.dubbedDurationSec,
+            atempoApplied: rec.atempoApplied ?? scriptTurn.atempoApplied,
+            rephraseAttempts: rec.rephraseAttempts ?? scriptTurn.rephraseAttempts,
+            fitStepApplied: rec.fitStepApplied ?? scriptTurn.fitStepApplied,
+            syncStatus: rec.syncStatus ?? scriptTurn.syncStatus,
+            qa: rec.qa ?? scriptTurn.qa,
+            qaReason: rec.qaReason ?? scriptTurn.qaReason,
+            slicingMethod: rec.slicingMethod ?? scriptTurn.slicingMethod,
+            shiftedStartBySec: rec.shiftedStartBySec ?? scriptTurn.shiftedStartBySec,
+            needsShorten: rec.needsShorten ?? scriptTurn.needsShorten,
+            subBlockIndex: item.subBlock.subBlockIndex,
+            startTime: rec.startTime ?? scriptTurn.startTime,
+            endTime: rec.endTime ?? scriptTurn.endTime,
+          });
+        }
+      }
+
       const inMemoryById = new Map<string, DialogueTurn>();
       for (const st of synthesizedTurns) {
         if (st.id && st.audioBase64) inMemoryById.set(st.id, st);
       }
 
       const readyTurns: DialogueTurn[] = [];
-      for (const { turn, desc } of descriptors) {
-        const cached = foundMap.get(desc.cacheKey);
+      for (const turn of turns) {
+        const cached = cachedById.get(turn.id);
         if (cached) {
-          readyTurns.push({
-            ...turn,
-            audioBase64: cached.audioBase64,
-            durationSeconds: cached.durationSeconds ?? turn.durationSeconds,
-            originalDurationSec: cached.originalDurationSec ?? turn.originalDurationSec,
-            dubbedDurationSec: cached.dubbedDurationSec ?? turn.dubbedDurationSec,
-            atempoApplied: cached.atempoApplied ?? turn.atempoApplied,
-            rephraseAttempts: cached.rephraseAttempts ?? turn.rephraseAttempts,
-            fitStepApplied: cached.fitStepApplied ?? turn.fitStepApplied,
-            syncStatus: cached.syncStatus ?? turn.syncStatus,
-            qa: cached.qa ?? turn.qa,
-            qaReason: cached.qaReason ?? turn.qaReason,
-            slicingMethod: cached.slicingMethod ?? turn.slicingMethod,
-            shiftedStartBySec: cached.shiftedStartBySec ?? turn.shiftedStartBySec,
-            needsShorten: cached.needsShorten ?? turn.needsShorten,
-            subBlockIndex: cached.subBlockIndex ?? turn.subBlockIndex,
-            startTime: cached.startTime ?? turn.startTime,
-            endTime: cached.endTime ?? turn.endTime,
-          });
+          readyTurns.push(cached);
         } else if (inMemoryById.has(turn.id)) {
           readyTurns.push({ ...turn, ...inMemoryById.get(turn.id)! });
         }
       }
 
       if (readyTurns.length === 0) {
-        setDialogueNotice('В кэше IndexedDB нет готовых реплик для текущих голосов и текста.');
+        setDialogueNotice(
+          `В кэше IndexedDB (${DUBBING_CACHE_VERSION}) нет готовых подблоков для текущих голосов и текста.`
+        );
         return;
       }
 
@@ -1202,12 +1267,12 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       if (stitchData.srtSubtitles) setSrtSubtitles(stitchData.srtSubtitles);
       setIsPlaying(false);
       setActiveTurnIndex(-1);
-      setCachedTurnsInDbCount(foundMap.size);
+      setCachedTurnsInDbCount(plan.cachedTurnCount);
 
       const missingCount = Math.max(0, turns.length - readyTurns.length);
       setDialogueNotice(
         missingCount === 0
-          ? `✅ Мастер-трек собран заново локально из кэша (${readyTurns.length}/${turns.length} реплик · 0 запросов к TTS).`
+          ? `✅ Мастер-трек собран заново локально из кэша подблоков (${plan.cachedSubBlocks.length}/${plan.allSubBlocks.length} подбл. · ${readyTurns.length}/${turns.length} реплик · 0 запросов к TTS).`
           : `✅ Мастер-трек собран из кэша (${readyTurns.length}/${turns.length} реплик · 0 запросов к TTS; без кэша: ${missingCount}).`
       );
     } catch (err: any) {
@@ -2332,8 +2397,14 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           })
         );
 
-        // Persist updated single turn audio + diagnostics to IndexedDB cache
-        await persistTurnsAudioToIndexedDb([updatedMatched], new Map([[turn.id, turn]]));
+        // Update the parent whole sub-block in v3 IndexedDB if all turns of that sub-block are complete & ok/retried
+        const nextTurnsForCache = turns.map((t) =>
+          t.id === turn.id ? { ...t, text: updatedMatched.text || t.text } : t
+        );
+        const mergedByIdForCache = new Map<string, DialogueTurn>(
+          finalMergedTurns.filter((st) => Boolean(st?.id && st.audioBase64)).map((st) => [st.id, st])
+        );
+        await persistCompleteSubBlocksToIndexedDb(nextTurnsForCache, mergedByIdForCache);
 
         // Play the newly synthesized turn immediately
         if (updatedMatched.audioBase64) {
@@ -2435,6 +2506,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           ...t,
           gapAfterSec,
           nextTurnStartSec: nextStartSec,
+          plannedSubBlockIndex: targetSub.globalSubBlockIndex,
         };
       });
 
@@ -2445,6 +2517,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           turns: subTurnsEnriched,
           skipMasterStitch: true,
           bypassCache: true,
+          totalProjectSubBlocks: Math.max(1, plannedSubBlocks.length),
+          maxExtraTtsCalls: Math.max(1, Math.floor(Math.max(1, plannedSubBlocks.length) * 0.25)),
           host1Voice: host1VoicePayload,
           host2Voice: host2VoicePayload,
           speakers: extraSpeakers,
@@ -2471,12 +2545,6 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         ])
       );
 
-      // Persist refreshed turns to IndexedDB
-      await persistTurnsAudioToIndexedDb(
-        Array.from(refreshedById.values()),
-        new Map(subTurnsEnriched.map((t) => [t.id, t]))
-      );
-
       // Merge into current synthesized turns
       const existingById = new Map<string, DialogueTurn>();
       for (const st of synthesizedTurns) {
@@ -2485,6 +2553,29 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       for (const [id, rt] of refreshedById.entries()) {
         existingById.set(id, rt);
       }
+
+      // Persist ONLY complete sub-blocks whose turns all passed QA (ok | retried) to v3 IndexedDB
+      await persistCompleteSubBlocksToIndexedDb(turns, existingById);
+
+      // Update failedSubBlocks list
+      const subFailed = refreshedTurns.some((rt) => rt.qa === 'failed');
+      setFailedSubBlocks((prev) => {
+        const filtered = prev.filter((item) => item.subBlockIndex !== targetSub.globalSubBlockIndex);
+        if (!subFailed) return filtered;
+        const serverFailed = Array.isArray(data.failedSubBlocks) ? data.failedSubBlocks[0] : null;
+        return [
+          ...filtered,
+          serverFailed || {
+            subBlockIndex: targetSub.globalSubBlockIndex,
+            startTimecode: targetSub.startTimecode,
+            endTimecode: targetSub.endTimecode,
+            turnIds: targetSub.turns.map((t) => t.id),
+            reasons: Array.from(
+              new Set(refreshedTurns.map((rt) => rt.qaReason).filter((r): r is string => Boolean(r)))
+            ),
+          },
+        ].sort((a, b) => a.subBlockIndex - b.subBlockIndex);
+      });
 
       const orderedMerged = turns
         .map((t) => existingById.get(t.id) || t)
@@ -2534,7 +2625,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       );
 
       setDialogueNotice(
-        `✅ Подблок #${targetSub.globalSubBlockIndex + 1} (${targetSub.startTimecode}–${targetSub.endTimecode}, ${refreshedTurns.length} репл.) перегенерирован без кэша (${data.ttsCallsUsed ?? 1} выз. TTS) и мастер-дорожка пересобрана локально.`
+        subFailed
+          ? `⚠️ Подблок #${targetSub.globalSubBlockIndex + 1} (${targetSub.startTimecode}–${targetSub.endTimecode}) перегенерирован, но не прошёл QA и не сохранён в кэш.`
+          : `✅ Подблок #${targetSub.globalSubBlockIndex + 1} (${targetSub.startTimecode}–${targetSub.endTimecode}, ${refreshedTurns.length} репл.) перегенерирован без кэша (${data.ttsCallsUsed ?? 1} выз. TTS) и мастер-дорожка пересобрана локально.`
       );
     } catch (e: any) {
       setDialogueNotice(`Ошибка перегенерации подблока: ${e.message}`);
@@ -3035,8 +3128,12 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     setBatchProgress(null);
   };
 
-  // Synthesize Full Dialogue (macro-blocks 20-25 turns, strict timecode sync, 429 pause/resume)
-  const handleSynthesizeDialogue = async (resumeOnlyRemaining = false, bypassVoiceConfirm = false) => {
+  // Synthesize Full Dialogue (WHOLE sub-blocks only, v3 cache, 25% retry budget, strict timecode sync)
+  const handleSynthesizeDialogue = async (
+    resumeOnlyRemaining = false,
+    bypassVoiceConfirm = false,
+    forceFreshNoCache = false
+  ) => {
     if (
       !requireAuth(
         () => {},
@@ -3053,6 +3150,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
     if (!bypassVoiceConfirm && synthesisVoiceWarnings.length > 0) {
       setPendingSynthResumeFlag(resumeOnlyRemaining);
+      setPendingSynthNoCacheFlag(forceFreshNoCache);
       setShowVoiceWarningModal(true);
       return;
     }
@@ -3060,7 +3158,19 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     setIsSynthesizing(true);
     setQuotaPausedInfo(null);
     setMuxedVideoDownloadUrl(null);
+    setFailedSubBlocks([]);
     abortControllerRef.current = new AbortController();
+
+    // If user clicked «Озвучить заново (без кэша)»: wipe project IndexedDB cache & ignore server cache
+    if (forceFreshNoCache) {
+      try {
+        await clearProjectSubBlocksFromDb(projectCacheKey);
+        await clearProjectTurnAudioFromDb(projectCacheKey);
+      } catch {}
+      setCachedTurnsInDbCount(0);
+      setSynthesizedTurns([]);
+      setMasterAudioBase64(null);
+    }
 
     const effectiveVideoDurationSec = Math.max(
       Number(totalVideoDurationSec) || 0,
@@ -3116,7 +3226,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         : {}),
     };
 
-    // Enrich turns with gapAfterSec & nextTurnStartSec across the full timeline before batching
+    // Enrich turns with gapAfterSec & nextTurnStartSec across the FULL timeline before planning sub-blocks
     const enrichedTurns = turns.map((t, idx) => {
       const nextStartSec =
         idx + 1 < turns.length && typeof turns[idx + 1]?.startSec === 'number'
@@ -3135,56 +3245,47 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       };
     });
 
-    // Hydrate already synthesized turns from IndexedDB (project + turnId + hash(text, voice, style))
-    // and in-memory state when resuming, so unchanged turns never re-spend TTS quota
-    const existingById = new Map<string, DialogueTurn>();
-    const sourceTurnsById = new Map<string, DialogueTurn>(enrichedTurns.map((t) => [t.id, t]));
-    const cacheDescriptors = enrichedTurns.map((t) => ({
-      turn: t,
-      desc: getTurnCacheDescriptor(t),
-    }));
-    const dbCachedMap = await getDialogueTurnAudioByKeys(
-      cacheDescriptors.map((d) => d.desc.cacheKey)
+    // ALWAYS plan sub-blocks on the FULL script; resolve whole-sub-block v3 cache hits ONLY.
+    // Forbidden: never cherry-pick turns from inside a sub-block or merge turns from different places!
+    const executionPlan = await loadCachedSubBlocksPlanForFullScript(
+      enrichedTurns,
+      forceFreshNoCache
     );
-    for (const { turn, desc } of cacheDescriptors) {
-      const cached = dbCachedMap.get(desc.cacheKey);
-      if (cached) {
-        existingById.set(turn.id, {
-          ...turn,
-          audioBase64: cached.audioBase64,
-          durationSeconds: cached.durationSeconds ?? turn.durationSeconds,
-          originalDurationSec: cached.originalDurationSec ?? turn.originalDurationSec,
-          dubbedDurationSec: cached.dubbedDurationSec ?? turn.dubbedDurationSec,
-          atempoApplied: cached.atempoApplied ?? turn.atempoApplied,
-          rephraseAttempts: cached.rephraseAttempts ?? turn.rephraseAttempts,
-          fitStepApplied: cached.fitStepApplied ?? turn.fitStepApplied,
-          syncStatus: cached.syncStatus ?? turn.syncStatus,
-          qa: cached.qa ?? turn.qa,
-          qaReason: cached.qaReason ?? turn.qaReason,
-          slicingMethod: cached.slicingMethod ?? turn.slicingMethod,
-          shiftedStartBySec: cached.shiftedStartBySec ?? turn.shiftedStartBySec,
-          needsShorten: cached.needsShorten ?? turn.needsShorten,
-          subBlockIndex: cached.subBlockIndex ?? turn.subBlockIndex,
-          startTime: cached.startTime ?? turn.startTime,
-          endTime: cached.endTime ?? turn.endTime,
+
+    const resolvedById = new Map<string, DialogueTurn>();
+    for (const item of executionPlan.cachedSubBlocks) {
+      if (!item.cachedEntry) continue;
+      for (let i = 0; i < item.subBlock.turns.length; i++) {
+        const scriptTurn = item.subBlock.turns[i];
+        const rec = item.cachedEntry.turns[i];
+        if (!rec) continue;
+        resolvedById.set(scriptTurn.id, {
+          ...scriptTurn,
+          audioBase64: rec.audioBase64,
+          durationSeconds: rec.durationSeconds ?? scriptTurn.durationSeconds,
+          originalDurationSec: rec.originalDurationSec ?? scriptTurn.originalDurationSec,
+          dubbedDurationSec: rec.dubbedDurationSec ?? scriptTurn.dubbedDurationSec,
+          atempoApplied: rec.atempoApplied ?? scriptTurn.atempoApplied,
+          rephraseAttempts: rec.rephraseAttempts ?? scriptTurn.rephraseAttempts,
+          fitStepApplied: rec.fitStepApplied ?? scriptTurn.fitStepApplied,
+          syncStatus: rec.syncStatus ?? scriptTurn.syncStatus,
+          qa: rec.qa ?? scriptTurn.qa,
+          qaReason: rec.qaReason ?? scriptTurn.qaReason,
+          slicingMethod: rec.slicingMethod ?? scriptTurn.slicingMethod,
+          shiftedStartBySec: rec.shiftedStartBySec ?? scriptTurn.shiftedStartBySec,
+          needsShorten: rec.needsShorten ?? scriptTurn.needsShorten,
+          subBlockIndex: item.subBlock.subBlockIndex,
+          startTime: rec.startTime ?? scriptTurn.startTime,
+          endTime: rec.endTime ?? scriptTurn.endTime,
         });
       }
     }
-    if (resumeOnlyRemaining && synthesizedTurns.length > 0) {
-      for (const st of synthesizedTurns) {
-        if (st.id && st.audioBase64 && !existingById.has(st.id)) {
-          existingById.set(st.id, st);
-        }
-      }
-    }
 
-    const turnsToSynthesize = enrichedTurns.filter((t) => !existingById.has(t.id));
-
-    // If every turn already exists in IndexedDB cache, stitch locally with 0 TTS requests
-    if (turnsToSynthesize.length === 0 && existingById.size > 0) {
+    // If every complete sub-block already exists in v3 IndexedDB cache, stitch locally with 0 TTS requests
+    if (!forceFreshNoCache && executionPlan.requestBatches.length === 0 && resolvedById.size === enrichedTurns.length) {
       try {
         const cachedOrdered = enrichedTurns
-          .map((t) => existingById.get(t.id))
+          .map((t) => resolvedById.get(t.id))
           .filter(Boolean) as DialogueTurn[];
         setBatchProgress({
           currentBatch: 1,
@@ -3192,7 +3293,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           completedTurns: cachedOrdered.length,
           totalTurns: enrichedTurns.length,
           percent: 98,
-          statusText: `Все ${cachedOrdered.length} реплик найдены в кэше IndexedDB. Локальная сборка...`,
+          statusText: `Все ${executionPlan.allSubBlocks.length} подблоков найдены в кэше (${DUBBING_CACHE_VERSION}). Локальная сборка...`,
         });
         await new Promise((r) => setTimeout(r, 0));
         const stitchData = stitchDialogueTurnsClient({
@@ -3227,7 +3328,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         setActiveTurnIndex(-1);
         setCachedTurnsInDbCount(cachedOrdered.length);
         setDialogueNotice(
-          `✅ Озвучка собрана из кэша IndexedDB: 0 вызовов TTS (${cachedOrdered.length}/${enrichedTurns.length} реплик).`
+          `✅ Озвучка собрана из кэша подблоков (${DUBBING_CACHE_VERSION}): 0 вызовов TTS (${executionPlan.allSubBlocks.length} подбл. · ${cachedOrdered.length}/${enrichedTurns.length} реплик).`
         );
       } catch (e: any) {
         setDialogueNotice(`Ошибка локальной сборки из кэша: ${e.message}`);
@@ -3249,125 +3350,20 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       }
     };
 
-    const plannedAllBlocks = planDialogueMacroBlocks(enrichedTurns, { maxSize: 25, minPauseSec: 0.5 });
-    const plannedExecutionBlocks = planDialogueMacroBlocks(turnsToSynthesize, { maxSize: 25, minPauseSec: 0.5 });
+    const totalProjectSubBlocks = Math.max(1, executionPlan.allSubBlocks.length);
+    const totalExtraTtsBudget = Math.floor(totalProjectSubBlocks * 0.25);
+    let remainingExtraTtsBudget = totalExtraTtsBudget;
+    let totalExtraTtsUsed = 0;
 
-    // Single request when everything fits cleanly into 1 macro-block (<= 25 turns, no partial cache merge needed)
-    if (!resumeOnlyRemaining && existingById.size === 0 && plannedExecutionBlocks.length <= 1) {
-      try {
-        const res = await authFetch('/api/podcast/synthesize-dialogue', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: abortControllerRef.current.signal,
-          body: JSON.stringify({
-            turns: turnsToSynthesize,
-            host1Voice: host1VoicePayload,
-            host2Voice: host2VoicePayload,
-            speakers: extraSpeakers,
-            masterAudioMode: effectiveMode,
-            totalVideoDurationSec: effectiveVideoDurationSec,
-          }),
-        });
-
-        if (!res.ok) {
-          let errMessage = 'Ошибка при синтезе диалога';
-          try {
-            const err = await res.json();
-            if (err.code === 'API_KEY_EXPIRED' || err.isApiKeyExpired || (err.error && err.error.includes('API key expired'))) {
-              window.dispatchEvent(new CustomEvent('open-api-key-modal'));
-            }
-            errMessage = err.message_ru || err.message || err.error || errMessage;
-          } catch {}
-          throw new Error(errMessage);
-        }
-
-        const data = await res.json();
-        updateQuotaFromPayload(data);
-
-        const resultTurns: DialogueTurn[] = data.turns || [];
-        await persistTurnsAudioToIndexedDb(resultTurns, sourceTurnsById);
-        if (resultTurns.length > 0) {
-          setCachedTurnsInDbCount(resultTurns.filter((rt) => Boolean(rt.audioBase64)).length);
-        }
-
-        if (data.quotaPaused) {
-          setSynthesizedTurns(resultTurns);
-          setQuotaPausedInfo({
-            messageRu:
-              data.quotaPauseMessageRu ||
-              `Дневной лимит исчерпан. Готово ${data.blocksCompleted || 0} из ${data.blocksTotal || 1} блоков, продолжим после 13:00 по Ташкенту`,
-            blocksCompleted: data.blocksCompleted || 0,
-            blocksTotal: data.blocksTotal || 1,
-            remainingTurnsCount: Math.max(0, enrichedTurns.length - resultTurns.length),
-          });
-          setDialogueNotice(
-            data.quotaPauseMessageRu ||
-              'Дневной лимит исчерпан. Готовые блоки сохранены, можно продолжить после 13:00 по Ташкенту.'
-          );
-          return;
-        }
-
-        setMasterAudioBase64(data.masterAudioBase64);
-        setTotalDuration(data.totalDurationSeconds || 0);
-        setSynthesizedTurns(resultTurns);
-        if (resultTurns.length > 0) {
-          setTurns((prev) =>
-            prev.map((pt, i) => {
-              const matched = resultTurns.find((rt) => rt.id === pt.id) || resultTurns[i];
-              return matched
-                ? {
-                    ...pt,
-                    text: matched.text || pt.text,
-                    fitStepApplied: matched.fitStepApplied,
-                    originalDurationSec: matched.originalDurationSec,
-                    dubbedDurationSec: matched.dubbedDurationSec,
-                    atempoApplied: matched.atempoApplied,
-                    rephraseAttempts: matched.rephraseAttempts,
-                    syncStatus: matched.syncStatus,
-                    qa: matched.qa,
-                    qaReason: matched.qaReason,
-                    slicingMethod: matched.slicingMethod,
-                    shiftedStartBySec: matched.shiftedStartBySec,
-                    needsShorten: matched.needsShorten,
-                    subBlockIndex: matched.subBlockIndex,
-                  }
-                : pt;
-            })
-          );
-        }
-        if (data.srtSubtitles) setSrtSubtitles(data.srtSubtitles);
-        setIsPlaying(false);
-        setActiveTurnIndex(-1);
-
-        if (typeof data.ttsCallsUsed === 'number') {
-          const st = data.stats || { ok: 0, adjusted: 0, overflow: 0 };
-          setDialogueNotice(
-            `Озвучка готова: ${data.ttsCallsUsed} вызовов TTS (${data.provider || 'google'}) · ok: ${st.ok}, ускорено: ${st.adjusted}, overflow: ${st.overflow}`
-          );
-        }
-
-        if (typeof data.creditsRemaining === 'number') {
-          syncCredits(data.creditsRemaining);
-        } else {
-          await useCredit(1);
-        }
-        await logGeneration('podcast', topic || '2 Ovozli Dublyaj', 1);
-      } catch (e: any) {
-        if (e.name !== 'AbortError') {
-          setDialogueNotice(`Ошибка: ${e.message}`);
-        }
-      } finally {
-        setIsSynthesizing(false);
-        setBatchProgress(null);
-      }
-      return;
-    }
-
-    // Scene-aware & pause-aware macro-block slicing (shared utility, max 25 turns/block, avoids <0.5s cuts)
-    const totalBatches = Math.max(1, plannedExecutionBlocks.length);
-    const totalProjectBlocks = Math.max(1, plannedAllBlocks.length);
-    const initialCompletedBlocks = Math.max(0, totalProjectBlocks - totalBatches);
-    const newlySynthesizedById = new Map<string, any>(existingById);
+    const totalBatches = Math.max(1, executionPlan.requestBatches.length);
+    const newlySynthesizedById = new Map<string, DialogueTurn>(resolvedById);
+    const collectedFailedSubBlocks: Array<{
+      subBlockIndex: number;
+      startTimecode: string;
+      endTimecode: string;
+      turnIds: string[];
+      reasons: string[];
+    }> = [];
     let totalTtsCallsUsed = 0;
     const providersUsed = new Set<string>();
     let pausedByQuota = false;
@@ -3378,15 +3374,25 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       completedTurns: newlySynthesizedById.size,
       totalTurns: enrichedTurns.length,
       percent: Math.round((newlySynthesizedById.size / Math.max(1, enrichedTurns.length)) * 100),
-      statusText: `Запуск пакетной озвучки (блок 1/${totalBatches})...`,
+      statusText: forceFreshNoCache
+        ? `Полная озвучка заново без кэша (${totalProjectSubBlocks} подбл., пакет 1/${totalBatches})...`
+        : `Озвучка ${executionPlan.uncachedSubBlocks.length} из ${totalProjectSubBlocks} подблоков (пакет 1/${totalBatches})...`,
     });
 
     try {
-      for (let b = 0; b < totalBatches; b++) {
+      let completedSubBlocksSoFar = executionPlan.cachedSubBlocks.length;
+
+      for (let b = 0; b < executionPlan.requestBatches.length; b++) {
         if (abortControllerRef.current?.signal.aborted) break;
 
-        const block = plannedExecutionBlocks[b];
-        const batchTurns = block.turns;
+        const batch = executionPlan.requestBatches[b];
+        // Stamp full-script plannedSubBlockIndex onto every turn so server preserves exact boundaries
+        const batchTurns = batch.subBlocks.flatMap((sbItem) =>
+          sbItem.subBlock.turns.map((t) => ({
+            ...t,
+            plannedSubBlockIndex: sbItem.subBlock.subBlockIndex,
+          }))
+        );
 
         setBatchProgress({
           currentBatch: b + 1,
@@ -3394,7 +3400,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           completedTurns: newlySynthesizedById.size,
           totalTurns: enrichedTurns.length,
           percent: Math.round((newlySynthesizedById.size / Math.max(1, enrichedTurns.length)) * 100),
-          statusText: `Озвучка блока ${b + 1}/${totalBatches} (${block.startTimecode}–${block.endTimecode}, ${batchTurns.length} репл.)...`,
+          statusText: `Озвучка пакета ${b + 1}/${totalBatches} (${batch.startTimecode}–${batch.endTimecode}, ${batch.subBlocks.length} подбл. / ${batchTurns.length} репл.)...`,
         });
 
         let batchData: any = null;
@@ -3409,8 +3415,11 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
               body: JSON.stringify({
                 turns: batchTurns,
                 skipMasterStitch: true,
-                startingCompletedBlocks: initialCompletedBlocks + b,
-                totalProjectBlocks,
+                bypassCache: forceFreshNoCache,
+                startingCompletedBlocks: completedSubBlocksSoFar,
+                totalProjectBlocks: totalProjectSubBlocks,
+                totalProjectSubBlocks,
+                maxExtraTtsCalls: remainingExtraTtsBudget,
                 host1Voice: host1VoicePayload,
                 host2Voice: host2VoicePayload,
                 speakers: extraSpeakers,
@@ -3421,6 +3430,13 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
             if (!res.ok) {
               const err = await res.json().catch(() => ({}));
+              if (
+                err.code === 'API_KEY_EXPIRED' ||
+                err.isApiKeyExpired ||
+                (err.error && String(err.error).includes('API key expired'))
+              ) {
+                window.dispatchEvent(new CustomEvent('open-api-key-modal'));
+              }
               throw new Error(err.message_ru || err.message || err.error || `HTTP ${res.status}`);
             }
 
@@ -3434,43 +3450,58 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         }
 
         if (!batchData) {
-          throw new Error(`Ошибка в блоке ${b + 1}: ${lastErr?.message || 'сбой сети'}`);
+          throw new Error(`Ошибка в пакете ${b + 1}: ${lastErr?.message || 'сбой сети'}`);
         }
 
         updateQuotaFromPayload(batchData);
         if (typeof batchData.ttsCallsUsed === 'number') {
           totalTtsCallsUsed += batchData.ttsCallsUsed;
         }
+        if (typeof batchData.extraTtsCallsUsed === 'number') {
+          totalExtraTtsUsed += batchData.extraTtsCallsUsed;
+          remainingExtraTtsBudget = Math.max(0, totalExtraTtsBudget - totalExtraTtsUsed);
+        }
         if (batchData.provider) {
           providersUsed.add(String(batchData.provider));
         }
-
         if (typeof batchData.creditsRemaining === 'number') {
           syncCredits(batchData.creditsRemaining);
         }
+        if (Array.isArray(batchData.failedSubBlocks)) {
+          for (const fsb of batchData.failedSubBlocks) {
+            if (fsb && !collectedFailedSubBlocks.some((x) => x.subBlockIndex === fsb.subBlockIndex)) {
+              collectedFailedSubBlocks.push(fsb);
+            }
+          }
+        }
 
         if (Array.isArray(batchData.turns)) {
-          await persistTurnsAudioToIndexedDb(batchData.turns, sourceTurnsById);
           for (const t of batchData.turns) {
             if (t?.id) newlySynthesizedById.set(t.id, t);
           }
+          // Save ONLY complete sub-blocks whose turns all passed QA (ok | retried) to v3 IndexedDB
+          await persistCompleteSubBlocksToIndexedDb(enrichedTurns, newlySynthesizedById);
+
           const orderedPartial = enrichedTurns
             .map((t) => newlySynthesizedById.get(t.id))
-            .filter(Boolean);
+            .filter(Boolean) as DialogueTurn[];
           setSynthesizedTurns(orderedPartial);
-          setCachedTurnsInDbCount(orderedPartial.filter((t) => Boolean(t.audioBase64)).length);
+          const refreshedPlan = await loadCachedSubBlocksPlanForFullScript(enrichedTurns, false);
+          setCachedTurnsInDbCount(refreshedPlan.cachedTurnCount);
         }
+
+        completedSubBlocksSoFar += batch.subBlocks.length;
 
         if (batchData.quotaPaused) {
           pausedByQuota = true;
           const remainingCount = Math.max(0, enrichedTurns.length - newlySynthesizedById.size);
           const msgRu =
             batchData.quotaPauseMessageRu ||
-            `Дневной лимит исчерпан. Готово ${batchData.blocksCompleted || initialCompletedBlocks + b} из ${totalProjectBlocks} блоков, продолжим после 13:00 по Ташкенту`;
+            `Дневной лимит исчерпан. Готово ${completedSubBlocksSoFar} из ${totalProjectSubBlocks} подблоков, продолжим после 13:00 по Ташкенту`;
           setQuotaPausedInfo({
             messageRu: msgRu,
-            blocksCompleted: batchData.blocksCompleted || initialCompletedBlocks + b,
-            blocksTotal: totalProjectBlocks,
+            blocksCompleted: completedSubBlocksSoFar,
+            blocksTotal: totalProjectSubBlocks,
             remainingTurnsCount: remainingCount,
           });
           setDialogueNotice(msgRu);
@@ -3478,9 +3509,12 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         }
       }
 
+      collectedFailedSubBlocks.sort((a, b) => a.subBlockIndex - b.subBlockIndex);
+      setFailedSubBlocks(collectedFailedSubBlocks);
+
       const accumulatedTurns = enrichedTurns
         .map((t) => newlySynthesizedById.get(t.id))
-        .filter(Boolean);
+        .filter(Boolean) as DialogueTurn[];
 
       if (!pausedByQuota && accumulatedTurns.length > 0) {
         setBatchProgress({
@@ -3492,7 +3526,6 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           statusText: `Сборка всех ${accumulatedTurns.length} реплик строго по таймкодам...`,
         });
 
-        // Yield one frame so the 98% stitching indicator renders before synchronous local WAV assembly
         await new Promise((r) => setTimeout(r, 0));
 
         const stitchData = stitchDialogueTurnsClient({
@@ -3538,8 +3571,14 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         const adjCount = finalTurns.filter((t) => t.syncStatus === 'adjusted').length;
         const ovfCount = finalTurns.filter((t) => t.syncStatus === 'overflow').length;
         const provLabel = Array.from(providersUsed).join('+') || 'google';
+        const failedSummary =
+          collectedFailedSubBlocks.length > 0
+            ? ` · ⚠️ провалено подблоков: ${collectedFailedSubBlocks.length} (${collectedFailedSubBlocks
+                .map((f) => `#${f.subBlockIndex + 1} ${f.startTimecode}–${f.endTimecode}`)
+                .join(', ')})`
+            : '';
         setDialogueNotice(
-          `Озвучка готова: ${totalTtsCallsUsed} вызовов TTS (${provLabel}) · ok: ${okCount}, ускорено: ${adjCount}, overflow: ${ovfCount}`
+          `Озвучка готова: ${totalTtsCallsUsed} вызовов TTS (доп. ретраев ${totalExtraTtsUsed}/${totalExtraTtsBudget}, ${provLabel}) · ok: ${okCount}, ускорено: ${adjCount}, overflow: ${ovfCount}${failedSummary}`
         );
 
         await logGeneration('podcast', topic || '2 Ovozli Dublyaj', 1);
@@ -5256,6 +5295,51 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
               </div>
             )}
 
+            {/* Failed Sub-Blocks Report (shown when QA fails or 25% retry budget is exhausted) */}
+            {!isSynthesizing && failedSubBlocks.length > 0 && (
+              <div className="rounded-2xl border border-red-300 bg-red-50/90 px-4 py-3 text-xs text-red-950 space-y-2">
+                <div className="font-bold flex items-center gap-1.5 text-red-900">
+                  <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                  <span>
+                    Подблоки с ошибкой QA ({failedSubBlocks.length}) — не сохранены в кэш, проверьте или перегенерируйте:
+                  </span>
+                </div>
+                <div className="space-y-1.5">
+                  {failedSubBlocks.map((fsb) => {
+                    const matchedSub = plannedSubBlocks.find(
+                      (sb) => sb.globalSubBlockIndex === fsb.subBlockIndex
+                    );
+                    const isBusy = resynthesizingSubBlockIndex === fsb.subBlockIndex;
+                    return (
+                      <div
+                        key={fsb.subBlockIndex}
+                        className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-white/85 border border-red-200 px-3 py-2"
+                      >
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="font-mono text-[11px] font-bold text-red-800">
+                            Подблок #{fsb.subBlockIndex + 1} · {fsb.startTimecode}–{fsb.endTimecode} ({fsb.turnIds.length} репл.)
+                          </div>
+                          <div className="text-[11px] text-red-700 break-words">
+                            {fsb.reasons.slice(0, 3).join('; ')}
+                          </div>
+                        </div>
+                        {matchedSub && (
+                          <button
+                            type="button"
+                            disabled={isBusy || resynthesizingSubBlockIndex !== null}
+                            onClick={() => handleResynthesizeSubBlock(matchedSub.startTurnIndex)}
+                            className="btn-pill btn-ghost text-[11px] px-3 py-1.5 border border-red-300 text-red-800 hover:bg-red-100 cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                          >
+                            {isBusy ? 'Перегенерация...' : `Перегенерировать подблок #${fsb.subBlockIndex + 1}`}
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Add turn button & Synthesize action + Quota Forecast (Раздел 2.8) */}
             <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-3 flex-wrap">
               <button
@@ -5274,14 +5358,14 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                         ? 'bg-amber-50 border-amber-300 text-amber-900 font-semibold'
                         : 'bg-[#FAF8F4] border-[rgba(22,21,17,0.12)] text-[#0A5A62]'
                     }`}
-                    title={`Подблоков (<=8 реплик / <=40с): ${dubbingCallsForecast.subBlocks}. Базово TTS: ${dubbingCallsForecast.baseTtsCalls} + запас 20% (+${dubbingCallsForecast.retryBufferCalls}) = ~${dubbingCallsForecast.estimatedCalls} выз. TTS; транскрипция: ~${dubbingCallsForecast.transcribeCalls} выз.`}
+                    title={`Подблоков (<=8 реплик / <=40с): ${dubbingCallsForecast.subBlocks}. Базово TTS: ${dubbingCallsForecast.baseTtsCalls} + лимит переделок ≤25% (+${dubbingCallsForecast.retryBufferCalls}) = до ${dubbingCallsForecast.estimatedCalls} выз. TTS; транскрипция: ~${dubbingCallsForecast.transcribeCalls} выз.`}
                   >
                     {ttsQuota ? (
                       dubbingCallsForecast.estimatedCalls > ttsQuota.remaining
-                        ? `⚠ ${dubbingCallsForecast.subBlocks} подбл. · ~${dubbingCallsForecast.baseTtsCalls} TTS (+20% = ${dubbingCallsForecast.estimatedCalls}) + ${dubbingCallsForecast.transcribeCalls} транскр. · квота ${ttsQuota.remaining}/${ttsQuota.limit}`
-                        : `${dubbingCallsForecast.subBlocks} подбл. · ~${dubbingCallsForecast.baseTtsCalls} TTS (+20% = ${dubbingCallsForecast.estimatedCalls}) + ${dubbingCallsForecast.transcribeCalls} транскр. · квота ${ttsQuota.remaining}/${ttsQuota.limit}`
+                        ? `⚠ ${dubbingCallsForecast.subBlocks} подбл. · ~${dubbingCallsForecast.baseTtsCalls} TTS (≤+25% = ${dubbingCallsForecast.estimatedCalls}) + ${dubbingCallsForecast.transcribeCalls} транскр. · квота ${ttsQuota.remaining}/${ttsQuota.limit}`
+                        : `${dubbingCallsForecast.subBlocks} подбл. · ~${dubbingCallsForecast.baseTtsCalls} TTS (≤+25% = ${dubbingCallsForecast.estimatedCalls}) + ${dubbingCallsForecast.transcribeCalls} транскр. · квота ${ttsQuota.remaining}/${ttsQuota.limit}`
                     ) : (
-                      `${dubbingCallsForecast.subBlocks} подбл. · ~${dubbingCallsForecast.baseTtsCalls} TTS (+20% = ${dubbingCallsForecast.estimatedCalls}) + ${dubbingCallsForecast.transcribeCalls} транскр.`
+                      `${dubbingCallsForecast.subBlocks} подбл. · ~${dubbingCallsForecast.baseTtsCalls} TTS (≤+25% = ${dubbingCallsForecast.estimatedCalls}) + ${dubbingCallsForecast.transcribeCalls} транскр.`
                     )}
                   </span>
                 )}
@@ -5305,8 +5389,21 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   </button>
                 )}
 
+                {!isSynthesizing && turns.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => handleSynthesizeDialogue(false, false, true)}
+                    disabled={isSynthesizing || turns.length === 0}
+                    className="btn-pill btn-ghost text-xs py-2.5 px-4 border border-[rgba(196,85,45,0.35)] text-[#9B3B1A] hover:bg-[#C4552D]/10 flex items-center justify-center gap-1.5 w-full sm:w-auto cursor-pointer"
+                    title="Очистить кэш IndexedDB этого проекта, игнорировать серверный кэш и озвучить все подблоки с нуля"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5 text-[#C4552D]" />
+                    <span>Озвучить заново (без кэша)</span>
+                  </button>
+                )}
+
                 <button
-                  onClick={() => handleSynthesizeDialogue(false)}
+                  onClick={() => handleSynthesizeDialogue(false, false, false)}
                   disabled={isSynthesizing || turns.length === 0}
                   className="btn-pill btn-solid text-xs sm:text-sm py-2.5 px-6 flex items-center justify-center gap-2 w-full sm:w-auto shadow-sm"
                 >
@@ -5493,13 +5590,13 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                     <span>📝 Скачать Субтитры .SRT</span>
                   </button>
 
-                  {/* 4. Re-stitch master track locally from IndexedDB cache (0 TTS calls) */}
+                  {/* 4. Re-stitch master track locally from whole-sub-block v3 IndexedDB cache (0 TTS calls) */}
                   <button
                     type="button"
                     onClick={handleRestitchFromCache}
                     disabled={isRestitchingFromCache || (cachedTurnsInDbCount === 0 && synthesizedTurns.length === 0)}
                     className="btn-pill btn-ghost w-full py-2 flex items-center justify-center gap-2 text-xs font-semibold border border-[rgba(14,124,134,0.28)] text-[#0A5A62] hover:bg-[rgba(14,124,134,0.06)] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                    title="Пересобрать мастер-WAV локально из кэша IndexedDB без запросов к TTS"
+                    title="Пересобрать мастер-WAV локально из кэша подблоков IndexedDB без запросов к TTS"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 text-[#0E7C86] ${isRestitchingFromCache ? 'animate-spin' : ''}`} />
                     <span>
@@ -5507,6 +5604,18 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                         ? 'Сборка из кэша...'
                         : `Собрать заново (0 TTS · кэш ${cachedTurnsInDbCount || synthesizedTurns.length}/${turns.length})`}
                     </span>
+                  </button>
+
+                  {/* 5. Re-synthesize everything from scratch without IndexedDB or server cache */}
+                  <button
+                    type="button"
+                    onClick={() => handleSynthesizeDialogue(false, false, true)}
+                    disabled={isSynthesizing || turns.length === 0}
+                    className="btn-pill btn-ghost w-full py-2 flex items-center justify-center gap-2 text-xs font-semibold border border-[rgba(196,85,45,0.32)] text-[#9B3B1A] hover:bg-[#C4552D]/10 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Очистить кэш IndexedDB проекта и заново озвучить все подблоки без кэша сервера"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5 text-[#C4552D]" />
+                    <span>Озвучить заново (без кэша)</span>
                   </button>
 
                   {onSaveToCMS && (
@@ -5793,7 +5902,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 type="button"
                 onClick={() => {
                   setShowVoiceWarningModal(false);
-                  handleSynthesizeDialogue(pendingSynthResumeFlag, true);
+                  handleSynthesizeDialogue(pendingSynthResumeFlag, true, pendingSynthNoCacheFlag);
                 }}
                 className="btn-pill btn-solid text-xs px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white border-none cursor-pointer"
               >
