@@ -1,0 +1,317 @@
+{
+  "generatedAt": "2026-11-27T18:03:15.902Z",
+  "model": "gemini-3.8-flash-tts",
+  "analysisModel": "gemini-4-hydrogen",
+  "calls": {
+    "voiceCreateCalls": 6,
+    "ttsCalls": 6,
+    "hydrogenCallsEffective": 6,
+    "hydrogenCallsTotalIncludingLostPass1": 11,
+    "voicesListReadOnlyCalls": 1,
+    "apiRetriesTotal": 0
+  },
+  "references": {
+    "male": {
+      "sb1": {
+        "f0_med_hz": 132.3,
+        "centroid_hz": 491,
+        "tilt_db": -10.38
+      },
+      "sb2_before_0057": {
+        "f0_med_hz": 117.5,
+        "centroid_hz": 701.2,
+        "tilt_db": -9.16
+      }
+    },
+    "female": {
+      "sb1": {
+        "f0_med_hz": 200.9,
+        "centroid_hz": 591.8,
+        "tilt_db": -10.5
+      },
+      "sb2_before_0057": {
+        "f0_med_hz": 193.5,
+        "centroid_hz": 667.9,
+        "tilt_db": -9.48
+      }
+    }
+  },
+  "candidates": [
+    {
+      "code": "M1",
+      "gender": "male",
+      "voice_id": "voice_a8bj2wkarpve",
+      "display_name": "Aziz Lock M1 - Bright Charon",
+      "base_voice": "Charon",
+      "model": "gemini-3.8-flash-tts",
+      "type": "prompted",
+      "prompt": "Keep the core identity of Charon, but give it a brighter spectral balance and less heavy chest resonance. A light, relaxed, friendly Uzbek car-video host speaking naturally to a friend, never like a news announcer.",
+      "expire_time": "2027-11-27T17:36:22.872155191Z",
+      "sample_audio_path": "/audio/voice-lock/M1-sample.wav",
+      "sample_mime_type": "audio/wav",
+      "sample_duration_sec": 10.88,
+      "sample_lufs_after": -18.07,
+      "sample_true_peak_dbfs": -1.08,
+      "uz_test_audio_path": "/audio/voice-lock/M1-uz-test.wav",
+      "uz_test_duration_sec": 19.57,
+      "uz_test_audio_parts_returned": 1,
+      "uz_test_lufs_before": -18.32,
+      "uz_test_lufs_after": -18,
+      "uz_test_true_peak_dbfs": -1.31,
+      "acoustics": {
+        "f0_med_hz": 140.4,
+        "f0_p10_hz": 114.3,
+        "f0_p90_hz": 208.7,
+        "spectral_centroid_hz": 497,
+        "spectral_tilt_db": -11.87,
+        "hnr_proxy": 0.645,
+        "mfcc_dist_to_sb1": 18.31,
+        "mfcc_dist_to_sb2_before_0057": 25.67,
+        "mfcc_dist_to_combined_ref": 20.25
+      },
+      "sample_acoustics": {
+        "f0_med_hz": 172.7,
+        "spectral_centroid_hz": 597.3,
+        "spectral_tilt_db": -9.46
+      },
+      "hydrogen_consistency": {
+        "sameVoiceIdentity": true,
+        "consistencyScore1to10": 7,
+        "shiftsToAnnouncerOnTech": false,
+        "laughOrEmotionNatural": "Смешок в начале части A звучит естественно, эмоции плавно сменяются ровным тоном.",
+        "partBreakdownRu": "Тембр стабилен: A — легкая усмешка, B и C — нейтральная информативная подача без резкого утяжеления.",
+        "verdictRu": "Единый мужской голос с устойчивым тембром и чистым узбекским произношением во всех частях."
+      }
+    },
+    {
+      "code": "M2",
+      "gender": "male",
+      "voice_id": "voice_din40bswsfcy",
+      "display_name": "Aziz Lock M2 - Airy Conversational",
+      "base_voice": "Charon",
+      "model": "gemini-3.8-flash-tts",
+      "type": "prompted",
+      "prompt": "Keep the core identity of Charon. Make the baseline voice airy, close and conversational, naturally smiling, with soft projection and clear Uzbek pronunciation. Avoid formal narrator and announcer delivery.",
+      "expire_time": "2027-11-27T17:36:51.959511053Z",
+      "sample_audio_path": "/audio/voice-lock/M2-sample.wav",
+      "sample_mime_type": "audio/wav",
+      "sample_duration_sec": 10.36,
+      "sample_lufs_after": -18.06,
+      "sample_true_peak_dbfs": -1.13,
+      "uz_test_audio_path": "/audio/voice-lock/M2-uz-test.wav",
+      "uz_test_duration_sec": 22.16,
+      "uz_test_audio_parts_returned": 1,
+      "uz_test_lufs_before": -19.12,
+      "uz_test_lufs_after": -18.07,
+      "uz_test_true_peak_dbfs": -1.05,
+      "acoustics": {
+        "f0_med_hz": 114.6,
+        "f0_p10_hz": 85.1,
+        "f0_p90_hz": 187.5,
+        "spectral_centroid_hz": 483.2,
+        "spectral_tilt_db": -10.53,
+        "hnr_proxy": 0.516,
+        "mfcc_dist_to_sb1": 7.23,
+        "mfcc_dist_to_sb2_before_0057": 15.77,
+        "mfcc_dist_to_combined_ref": 9.21
+      },
+      "sample_acoustics": {
+        "f0_med_hz": 160,
+        "spectral_centroid_hz": 600.1,
+        "spectral_tilt_db": -9.73
+      },
+      "hydrogen_consistency": {
+        "sameVoiceIdentity": true,
+        "consistencyScore1to10": 7,
+        "shiftsToAnnouncerOnTech": false,
+        "laughOrEmotionNatural": "Смех в части A звучит естественно, эмоциональная подача живая и легкая.",
+        "partBreakdownRu": "Единый мужской тембр во всех частях: A — мягкая шутливая интонация, B и C — спокойный информативный тон без перехода в дикторский.",
+        "verdictRu": "Голос уверенно сохраняет единую идентичность и естественный разговорный тембр на протяжении всех трех фрагментов."
+      }
+    },
+    {
+      "code": "M3",
+      "gender": "male",
+      "voice_id": "voice_gmmmtjwifmt8",
+      "display_name": "Aziz Lock M3 - Youthful Reviewer",
+      "base_voice": "Charon",
+      "model": "gemini-3.8-flash-tts",
+      "type": "prompted",
+      "prompt": "Keep Charon recognizable, but make him sound like a friendly, energetic Uzbek car reviewer: bright, casual and youthful, with natural warmth and no heavy authoritative register.",
+      "expire_time": "2027-11-27T17:37:24.208393166Z",
+      "sample_audio_path": "/audio/voice-lock/M3-sample.wav",
+      "sample_mime_type": "audio/wav",
+      "sample_duration_sec": 10.84,
+      "sample_lufs_after": -18,
+      "sample_true_peak_dbfs": -2.54,
+      "uz_test_audio_path": "/audio/voice-lock/M3-uz-test.wav",
+      "uz_test_duration_sec": 21.93,
+      "uz_test_audio_parts_returned": 1,
+      "uz_test_lufs_before": -15.16,
+      "uz_test_lufs_after": -18,
+      "uz_test_true_peak_dbfs": -3.7,
+      "acoustics": {
+        "f0_med_hz": 131.9,
+        "f0_p10_hz": 104.3,
+        "f0_p90_hz": 214.3,
+        "spectral_centroid_hz": 464.3,
+        "spectral_tilt_db": -12.52,
+        "hnr_proxy": 0.614,
+        "mfcc_dist_to_sb1": 11.21,
+        "mfcc_dist_to_sb2_before_0057": 17.34,
+        "mfcc_dist_to_combined_ref": 12.3
+      },
+      "sample_acoustics": {
+        "f0_med_hz": 172.7,
+        "spectral_centroid_hz": 499.7,
+        "spectral_tilt_db": -11.13
+      },
+      "hydrogen_consistency": {
+        "sameVoiceIdentity": true,
+        "consistencyScore1to10": 7,
+        "shiftsToAnnouncerOnTech": false,
+        "laughOrEmotionNatural": "Часть A звучит живо и с лёгкой усмешкой (мужской голос без тега смеха), вполне естественно.",
+        "partBreakdownRu": "В A тембр чуть светлее и выше; в B и C голос становится спокойнее, глубже и ровнее, сохраняя общую основу.",
+        "verdictRu": "Стабильный мужской голос с единой идентичностью и плавным переходом к нейтральной подаче."
+      }
+    },
+    {
+      "code": "F1",
+      "gender": "female",
+      "voice_id": "voice_jobdfz42xizz",
+      "display_name": "Veronika Lock F1 - Light Playful Kore",
+      "base_voice": "Kore",
+      "model": "gemini-3.8-flash-tts",
+      "type": "prompted",
+      "prompt": "Keep the core identity of Kore, but make the baseline voice lighter, brighter and more playful. A lively, curious Uzbek car-video host, never firm or news-like.",
+      "expire_time": "2027-11-27T17:37:56.472050304Z",
+      "sample_audio_path": "/audio/voice-lock/F1-sample.wav",
+      "sample_mime_type": "audio/wav",
+      "sample_duration_sec": 8.2,
+      "sample_lufs_after": -18,
+      "sample_true_peak_dbfs": -4.23,
+      "uz_test_audio_path": "/audio/voice-lock/F1-uz-test.wav",
+      "uz_test_duration_sec": 18.29,
+      "uz_test_audio_parts_returned": 1,
+      "uz_test_lufs_before": -13.66,
+      "uz_test_lufs_after": -18,
+      "uz_test_true_peak_dbfs": -4.76,
+      "acoustics": {
+        "f0_med_hz": 203.4,
+        "f0_p10_hz": 150.9,
+        "f0_p90_hz": 289.2,
+        "spectral_centroid_hz": 627.5,
+        "spectral_tilt_db": -9.94,
+        "hnr_proxy": 0.695,
+        "mfcc_dist_to_sb1": 8.29,
+        "mfcc_dist_to_sb2_before_0057": 10,
+        "mfcc_dist_to_combined_ref": 8.59
+      },
+      "sample_acoustics": {
+        "f0_med_hz": 210.5,
+        "spectral_centroid_hz": 672.1,
+        "spectral_tilt_db": -8.02
+      },
+      "hydrogen_consistency": {
+        "sameVoiceIdentity": true,
+        "consistencyScore1to10": 7,
+        "shiftsToAnnouncerOnTech": false,
+        "laughOrEmotionNatural": "Смех звучит естественно и не проговаривается текстом, эмоции живые.",
+        "partBreakdownRu": "Во всех частях (A, B, C) сохраняется единый женский тембр с плавной сменой настроения.",
+        "verdictRu": "Голос стабильно сохраняет единую индивидуальность во всех репликах без ухода в дикторскую подачу."
+      }
+    },
+    {
+      "code": "F2",
+      "gender": "female",
+      "voice_id": "voice_5okyophj33qp",
+      "display_name": "Veronika Lock F2 - Airy Smiling Kore",
+      "base_voice": "Kore",
+      "model": "gemini-3.8-flash-tts",
+      "type": "prompted",
+      "prompt": "Keep Kore recognizable. Make her voice airy, naturally smiling and conversational, with a light youthful timbre and clear Uzbek pronunciation. Avoid formal presenter delivery.",
+      "expire_time": "2027-11-27T17:38:26.560109297Z",
+      "sample_audio_path": "/audio/voice-lock/F2-sample.wav",
+      "sample_mime_type": "audio/wav",
+      "sample_duration_sec": 8.16,
+      "sample_lufs_after": -18,
+      "sample_true_peak_dbfs": -1.48,
+      "uz_test_audio_path": "/audio/voice-lock/F2-uz-test.wav",
+      "uz_test_duration_sec": 18.32,
+      "uz_test_audio_parts_returned": 1,
+      "uz_test_lufs_before": -17,
+      "uz_test_lufs_after": -18,
+      "uz_test_true_peak_dbfs": -2.16,
+      "acoustics": {
+        "f0_med_hz": 166.7,
+        "f0_p10_hz": 133.3,
+        "f0_p90_hz": 240,
+        "spectral_centroid_hz": 582.3,
+        "spectral_tilt_db": -9.57,
+        "hnr_proxy": 0.655,
+        "mfcc_dist_to_sb1": 8.37,
+        "mfcc_dist_to_sb2_before_0057": 9.88,
+        "mfcc_dist_to_combined_ref": 8.58
+      },
+      "sample_acoustics": {
+        "f0_med_hz": 171.4,
+        "spectral_centroid_hz": 756.8,
+        "spectral_tilt_db": -6.6
+      },
+      "hydrogen_consistency": {
+        "sameVoiceIdentity": true,
+        "consistencyScore1to10": 7,
+        "shiftsToAnnouncerOnTech": false,
+        "laughOrEmotionNatural": "Смех в части A звучит естественно, не проговаривается словом. Эмоциональные оттенки во всех частях переданы живо.",
+        "partBreakdownRu": "В A голос игривый и светлый; в B переходит в спокойный заинтересованный тон; в C слышна лёгкая тревога, тембр и подача остаются едиными.",
+        "verdictRu": "Во всех трёх фрагментах сохраняется единый узнаваемый женский голос с естественным узбекским произношением без ухода в дикторскую подачу."
+      }
+    },
+    {
+      "code": "F3",
+      "gender": "female",
+      "voice_id": "voice_1khn46alyxjk",
+      "display_name": "Veronika Lock F3 - Warm Reviewer Kore",
+      "base_voice": "Kore",
+      "model": "gemini-3.8-flash-tts",
+      "type": "prompted",
+      "prompt": "Keep the core identity of Kore, but make her a warm, lively Uzbek car reviewer with bright reactions, friendly curiosity and soft projection. Never sound like a news announcer.",
+      "expire_time": "2027-11-27T17:38:58.565777820Z",
+      "sample_audio_path": "/audio/voice-lock/F3-sample.wav",
+      "sample_mime_type": "audio/wav",
+      "sample_duration_sec": 17.24,
+      "sample_lufs_after": -18,
+      "sample_true_peak_dbfs": -2.57,
+      "uz_test_audio_path": "/audio/voice-lock/F3-uz-test.wav",
+      "uz_test_duration_sec": 16.48,
+      "uz_test_audio_parts_returned": 1,
+      "uz_test_lufs_before": null,
+      "uz_test_lufs_after": -18,
+      "uz_test_true_peak_dbfs": -3.48,
+      "acoustics": {
+        "f0_med_hz": 210.5,
+        "f0_p10_hz": 157.9,
+        "f0_p90_hz": 292.7,
+        "spectral_centroid_hz": 602.5,
+        "spectral_tilt_db": -8.91,
+        "hnr_proxy": 0.706,
+        "mfcc_dist_to_sb1": 8.93,
+        "mfcc_dist_to_sb2_before_0057": 11.31,
+        "mfcc_dist_to_combined_ref": 9.56
+      },
+      "sample_acoustics": {
+        "f0_med_hz": 216.2,
+        "spectral_centroid_hz": 672.8,
+        "spectral_tilt_db": -7.07
+      },
+      "hydrogen_consistency": {
+        "sameVoiceIdentity": true,
+        "consistencyScore1to10": 7,
+        "shiftsToAnnouncerOnTech": false,
+        "laughOrEmotionNatural": "Смех в части A звучит естественно (легкий смешок), эмоции переданы живо.",
+        "partBreakdownRu": "A — игривая подача со смехом; B — ровный любознательный тон; C — легкая обеспокоенность при сохранении тембра.",
+        "verdictRu": "Единый женский голос сохраняет стабильную идентичность и естественное узбекское произношение во всех трех репликах."
+      }
+    }
+  ]
+}
