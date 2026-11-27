@@ -1002,7 +1002,6 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       baseStyle: getSpeakerBaseStyleForTurn(turn),
       gender,
       intonationRu: turn.intonationRu,
-      emotion: turn.emotion,
       useDeliveryEmotions,
     }).style;
   };

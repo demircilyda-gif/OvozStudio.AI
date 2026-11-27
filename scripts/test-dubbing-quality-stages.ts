@@ -319,13 +319,9 @@ async function runAllStageTests() {
   // Legacy dirty input -> stripped, no pace directives
   const cleanSampleStyle = buildCleanTurnStyleForTts(
     {
-      cleanSpeechText: "Hammaga salom, bugun yangi avtomobilni ko‘ramiz.",
-      startSec: 0,
-      endSec: 3.2,
+      speakerId: "HOST_1",
       intonationRu: "Бодро, радостно",
       speakerGender: "male",
-      style:
-        "Natural male Uzbek speaker (Азиз). Clear warm baritone voice, 100% authentic Uzbek pronunciation. Say the line exactly once, word for word.",
     },
     speakerMap.get("HOST_1"),
     true

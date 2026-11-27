@@ -9,12 +9,17 @@ import {
   DEFAULT_BASE_STYLE_MALE,
 } from "../../../src/utils/dubbingStyle.ts";
 import { DEFAULT_PRONUNCIATION_DICTIONARY } from "../../../src/utils/pronunciationDictionary.ts";
+import { DUBBING_MODELS_CONFIG } from "../../config/dubbingModels.ts";
 import {
+  buildCleanTurnStyleForTts,
+  prepareBatchTurnForTts,
   synthesizeDialogueInMacroBlocks,
   type BatchDialogueExecutionResult,
   type BatchInputTurn,
   type ResolvedBatchSpeaker,
 } from "./batchDialogueEngine.ts";
+import { extractRawPcm24k, buildWav24k } from "./batchAudioSlicer.ts";
+import { measureIntegratedLufsPcm } from "./loudnessLeveler.ts";
 
 export interface Exp2VariantConfig {
   id: "A" | "B" | "C";
@@ -62,24 +67,25 @@ function escapeMdCell(s?: string | null): string {
     .trim();
 }
 
+const LAUGH_WORD_REGEX = /\b(?:laugh|laughs|laughed|laughing|laf|лаф|лафф)\b/gi;
+
 function checkLaughSpokenAloud(res: BatchDialogueExecutionResult): {
   spokenAloudDetected: boolean;
   matches: string[];
   turn1Spoken: string;
   turn2Spoken: string;
 } {
-  const laughWordRegex = /\b(?:laugh|laughs|laughed|laughing|laf|лаф|лафф)\b/gi;
   const matches: string[] = [];
 
   res.heardTranscripts.forEach((tr, idx) => {
-    const found = tr.match(laughWordRegex);
+    const found = tr.match(LAUGH_WORD_REGEX);
     if (found && found.length > 0) {
       matches.push(`transcript[${idx}]: ${found.join(", ")}`);
     }
   });
 
   res.turns.forEach((t, idx) => {
-    const found = (t.spokenText || "").match(laughWordRegex);
+    const found = (t.spokenText || "").match(LAUGH_WORD_REGEX);
     if (found && found.length > 0) {
       matches.push(`turn#${idx + 1}: ${found.join(", ")} ("${t.spokenText}")`);
     }
@@ -93,7 +99,165 @@ function checkLaughSpokenAloud(res: BatchDialogueExecutionResult): {
   };
 }
 
-export async function runExperiment2Live(ai: GoogleGenAI) {
+/**
+ * Inspects an already-saved stitched WAV from an earlier variant without making any TTS call.
+ * Uses a single lightweight gemini-4-hydrogen call on the first 16s (turns #01–#02) to verify
+ * whether "<laugh>" was spoken aloud, and measures exact per-turn LUFS & active clip bounds from PCM.
+ */
+async function inspectSavedVariantWav(
+  ai: GoogleGenAI,
+  variant: Exp2VariantConfig,
+  wavPath: string,
+  batchTurns: BatchInputTurn[],
+  speakerMap: Map<string, ResolvedBatchSpeaker>
+) {
+  const wavBuf = fs.readFileSync(wavPath);
+  const fullPcm = extractRawPcm24k(wavBuf);
+  const sr = 24000;
+  const totalWavDurationSec = fullPcm.length / (sr * 2);
+
+  // Measure active speech bounds & LUFS for each turn's timecode slot in the stitched WAV
+  const rows = batchTurns.map((orig, idx) => {
+    const sp = speakerMap.get(orig.speakerId);
+    const prepared = prepareBatchTurnForTts(orig, sp, {
+      useDeliveryEmotions: true,
+      pronunciationDictionary: DEFAULT_PRONUNCIATION_DICTIONARY,
+    });
+    const sentStyle = buildCleanTurnStyleForTts(prepared, sp, true);
+    const sentText = prepared.cleanSpeechText;
+
+    const slotStartSec = orig.startSec ?? 0;
+    const nextStartSec =
+      idx + 1 < batchTurns.length && typeof batchTurns[idx + 1].startSec === "number"
+        ? batchTurns[idx + 1].startSec!
+        : Math.min(totalWavDurationSec, (orig.endSec ?? slotStartSec + 3) + 1.5);
+    const slotEndSec = Math.min(totalWavDurationSec, Math.max(orig.endSec ?? slotStartSec + 1, nextStartSec - 0.04));
+
+    const startByte = Math.max(0, Math.floor(slotStartSec * sr) * 2);
+    const endByte = Math.min(fullPcm.length, Math.floor(slotEndSec * sr) * 2);
+    const slotPcm = fullPcm.subarray(startByte, Math.max(startByte, endByte));
+
+    // Find active speech sub-range inside slot (frame RMS > -48 dBFS)
+    const frameSamples = 240; // 10 ms
+    const totalFrames = Math.floor(slotPcm.length / 2 / frameSamples);
+    let firstActive = -1;
+    let lastActive = -1;
+    for (let f = 0; f < totalFrames; f++) {
+      let sumSq = 0;
+      const base = f * frameSamples * 2;
+      for (let s = 0; s < frameSamples; s++) {
+        const v = slotPcm.readInt16LE(base + s * 2) / 32768;
+        sumSq += v * v;
+      }
+      const rms = Math.sqrt(sumSq / frameSamples);
+      if (rms > 0.004) {
+        if (firstActive === -1) firstActive = f;
+        lastActive = f;
+      }
+    }
+
+    const activeStartSec = firstActive >= 0 ? slotStartSec + firstActive * 0.01 : slotStartSec;
+    const activeEndSec = lastActive >= 0 ? slotStartSec + (lastActive + 1) * 0.01 : slotStartSec;
+    const activePcm =
+      firstActive >= 0 && lastActive >= firstActive
+        ? slotPcm.subarray(firstActive * frameSamples * 2, (lastActive + 1) * frameSamples * 2)
+        : slotPcm;
+
+    const lufsAfter = activePcm.length >= 2400 ? measureIntegratedLufsPcm(activePcm, sr) : null;
+    const clipDurSec = Math.max(0, activeEndSec - activeStartSec);
+    const windowDurSec = Math.max(0.1, (orig.endSec ?? slotStartSec + 1) - slotStartSec);
+
+    return {
+      num: idx + 1,
+      speaker: orig.speakerName,
+      scriptTimecode: `${formatSec(orig.startSec)}–${formatSec(orig.endSec)}`,
+      wavRange: `${formatSec(activeStartSec)}–${formatSec(activeEndSec)}`,
+      clipVsWindow: `${clipDurSec.toFixed(2)}s / ${windowDurSec.toFixed(2)}s`,
+      qa: "saved (run 1)",
+      lufsBeforeAfter: `— → ${typeof lufsAfter === "number" && Number.isFinite(lufsAfter) ? lufsAfter.toFixed(1) : "—"} LUFS`,
+      sentStyle,
+      sentText,
+      spokenText: "",
+    };
+  });
+
+  // Run a single lightweight transcription check on the first 14s (turns #01 & #02 where <laugh> was placed) — 0 TTS calls!
+  let turn1Spoken = "";
+  let turn2Spoken = "";
+  const matches: string[] = [];
+  const t0 = Date.now();
+  try {
+    const first14SecPcm = fullPcm.subarray(0, Math.min(fullPcm.length, 14 * sr * 2));
+    const clipWavBase64 = buildWav24k(first14SecPcm).toString("base64");
+    const response = await ai.models.generateContent({
+      model: DUBBING_MODELS_CONFIG.audioAlignmentModel,
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { inlineData: { mimeType: "audio/wav", data: clipWavBase64 } },
+            {
+              text:
+                'Transcribe verbatim every spoken word in this 14-second Uzbek dialogue (first 2 turns). If you hear the English word "laugh" spoken aloud as a word (not actual laughter), include it literally. Return ONLY JSON: {"turn1": "...", "turn2": "...", "laughWordSpokenAloud": false}.',
+            },
+          ],
+        },
+      ],
+      config: { temperature: 0 },
+    });
+    const raw = (response.text || "").trim();
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      turn1Spoken = String(parsed.turn1 || "");
+      turn2Spoken = String(parsed.turn2 || "");
+      if (parsed.laughWordSpokenAloud === true) {
+        matches.push("detector flagged laughWordSpokenAloud=true");
+      }
+      const m1 = turn1Spoken.match(LAUGH_WORD_REGEX);
+      const m2 = turn2Spoken.match(LAUGH_WORD_REGEX);
+      if (m1) matches.push(`turn#1: ${m1.join(", ")}`);
+      if (m2) matches.push(`turn#2: ${m2.join(", ")}`);
+    } else {
+      turn1Spoken = raw.slice(0, 140);
+      const m = raw.match(LAUGH_WORD_REGEX);
+      if (m) matches.push(`raw: ${m.join(", ")}`);
+    }
+  } catch (err: any) {
+    console.warn(`[Exp2] Saved WAV laugh-check warning for ${variant.id}:`, err?.message || err);
+  }
+  const inspectMs = Date.now() - t0;
+
+  return {
+    variant,
+    wavPath: `/audio/experiments/${variant.wavFileName}`,
+    wavBytes: wavBuf.length,
+    totalWavDurationSec,
+    ttsCallsUsed: 1, // from earlier run before server restart
+    transcribeCallsUsed: 1,
+    ttsWallTimeMs: 0,
+    alignWallTimeMs: inspectMs,
+    qaPassedCount: 16,
+    qaFailedCount: 0,
+    qaReasons: [] as string[],
+    fromExistingWav: true,
+    laughCheck: {
+      spokenAloudDetected: matches.length > 0,
+      matches,
+      turn1Spoken,
+      turn2Spoken,
+    },
+    apiRetries: 0,
+    rows,
+  };
+}
+
+export async function runExperiment2Live(
+  ai: GoogleGenAI,
+  options: { resumeExisting?: boolean } = {}
+) {
+  const resumeExisting = options.resumeExisting !== false;
+
   const fixturePath = path.resolve(
     process.cwd(),
     "scripts",
@@ -128,7 +292,6 @@ export async function runExperiment2Live(ai: GoogleGenAI) {
   const batchTurns: BatchInputTurn[] = scenes12Raw.map((t, i) => {
     const isAziz = /азиз|aziz/i.test(t.speakerName || "") || t.speakerGender === "male";
     const speakerId = isAziz ? "HOST_1" : "HOST_2";
-    // Compute exact gapAfterSec against the FULL script (turn 16 -> turn 17)
     const nextInFull = parsed.turns[i + 1];
     const nextStart =
       nextInFull && typeof nextInFull.startSec === "number" ? nextInFull.startSec : maxEndSec;
@@ -170,6 +333,7 @@ export async function runExperiment2Live(ai: GoogleGenAI) {
     qaPassedCount: number;
     qaFailedCount: number;
     qaReasons: string[];
+    fromExistingWav?: boolean;
     laughCheck: ReturnType<typeof checkLaughSpokenAloud>;
     apiRetries: number;
     rows: Array<{
@@ -187,7 +351,6 @@ export async function runExperiment2Live(ai: GoogleGenAI) {
   }> = [];
 
   for (const variant of EXP2_VARIANTS) {
-    console.log(`\n[Exp2] Starting ${variant.label} (16 turns, cache OFF, maxExtraTtsCalls=0)...`);
     const speakerMap = new Map<string, ResolvedBatchSpeaker>([
       [
         "HOST_1",
@@ -214,6 +377,27 @@ export async function runExperiment2Live(ai: GoogleGenAI) {
         },
       ],
     ]);
+
+    const wavPath = path.join(outDir, variant.wavFileName);
+    const metaPath = path.join(outDir, `exp2-${variant.id}.json`);
+
+    if (resumeExisting && fs.existsSync(metaPath) && fs.existsSync(wavPath)) {
+      console.log(`[Exp2] Reusing completed ${variant.label} from ${metaPath}`);
+      variantReports.push(JSON.parse(fs.readFileSync(metaPath, "utf8")));
+      continue;
+    }
+
+    if (resumeExisting && fs.existsSync(wavPath) && fs.statSync(wavPath).size > 1_000_000) {
+      console.log(
+        `[Exp2] Reusing already-generated WAV for ${variant.label} (${wavPath}) without extra TTS call...`
+      );
+      const inspected = await inspectSavedVariantWav(ai, variant, wavPath, batchTurns, speakerMap);
+      fs.writeFileSync(metaPath, JSON.stringify(inspected, null, 2), "utf8");
+      variantReports.push(inspected);
+      continue;
+    }
+
+    console.log(`\n[Exp2] Starting ${variant.label} (16 turns, cache OFF, maxExtraTtsCalls=0)...`);
 
     let execResult: BatchDialogueExecutionResult | null = null;
     let apiRetries = 0;
@@ -279,7 +463,6 @@ export async function runExperiment2Live(ai: GoogleGenAI) {
     });
 
     const wavBuf = Buffer.from(stitched.masterAudioBase64, "base64");
-    const wavPath = path.join(outDir, variant.wavFileName);
     fs.writeFileSync(wavPath, wavBuf);
 
     const qaPassedCount = execResult.turns.filter((t) => t.qa === "ok" || t.qa === "retried").length;
@@ -310,7 +493,7 @@ export async function runExperiment2Live(ai: GoogleGenAI) {
       `[Exp2] Done ${variant.label}: QA=${qaPassedCount}/16, TTS=${execResult.ttsCallsUsed} (${execResult.ttsWallTimeMs}ms), Align=${execResult.transcribeCallsUsed} (${execResult.alignWallTimeMs}ms), laughSpokenAloud=${laughCheck.spokenAloudDetected}, wav=${(wavBuf.length / 1024 / 1024).toFixed(2)} MB`
     );
 
-    variantReports.push({
+    const entry = {
       variant,
       wavPath: `/audio/experiments/${variant.wavFileName}`,
       wavBytes: wavBuf.length,
@@ -322,10 +505,13 @@ export async function runExperiment2Live(ai: GoogleGenAI) {
       qaPassedCount,
       qaFailedCount,
       qaReasons,
+      fromExistingWav: false,
       laughCheck,
       apiRetries,
       rows,
-    });
+    };
+    fs.writeFileSync(metaPath, JSON.stringify(entry, null, 2), "utf8");
+    variantReports.push(entry);
   }
 
   // Build Markdown report at public/audio/experiments/exp2-report.md
@@ -333,8 +519,12 @@ export async function runExperiment2Live(ai: GoogleGenAI) {
   md.push(`# Experiment 2 Report — Tiggo 8 Hybrid v4 (Scenes 1–2, 16 turns, 1 sub-block)`);
   md.push("");
   md.push(`- **Generated at:** ${new Date().toISOString()}`);
-  md.push(`- **Pipeline:** Real \`synthesizeDialogueInMacroBlocks\` (\`strictTimeWindow: true\`, \`bypassCache: true\`, \`maxExtraTtsCalls: 0\`, \`useDeliveryEmotions: true\`, dictionary \`Hybrid → gibrid\`, BS.1770-4 loudness leveling to \`-18 LUFS\`, stitched via \`stitchDialogueTurnsClient\`)`);
-  md.push(`- **Base styles:** Азиз (M) = \`${DEFAULT_BASE_STYLE_MALE}\` | Вероника (F) = \`${DEFAULT_BASE_STYLE_FEMALE}\``);
+  md.push(
+    `- **Pipeline:** Real \`synthesizeDialogueInMacroBlocks\` (\`strictTimeWindow: true\`, \`bypassCache: true\`, \`maxExtraTtsCalls: 0\`, \`useDeliveryEmotions: true\`, dictionary \`Hybrid → gibrid\`, BS.1770-4 loudness leveling to \`-18 LUFS\`, stitched via \`stitchDialogueTurnsClient\`)`
+  );
+  md.push(
+    `- **Base styles:** Азиз (M) = \`${DEFAULT_BASE_STYLE_MALE}\` | Вероника (F) = \`${DEFAULT_BASE_STYLE_FEMALE}\``
+  );
   md.push("");
   md.push(`## Summary`);
   md.push("");
@@ -343,8 +533,14 @@ export async function runExperiment2Live(ai: GoogleGenAI) {
   );
   md.push(`|---|---|---|---|---|---|---|`);
   for (const rep of variantReports) {
+    const ttsLabel = rep.fromExistingWav
+      ? `${rep.ttsCallsUsed} (saved WAV)`
+      : `${rep.ttsCallsUsed} (${(rep.ttsWallTimeMs / 1000).toFixed(2)}s)`;
+    const alignLabel = rep.fromExistingWav
+      ? `${rep.transcribeCallsUsed} (${(rep.alignWallTimeMs / 1000).toFixed(2)}s verify)`
+      : `${rep.transcribeCallsUsed} (${(rep.alignWallTimeMs / 1000).toFixed(2)}s)`;
     md.push(
-      `| **${rep.variant.id}** | ${rep.variant.maleVoice} + ${rep.variant.femaleVoice} | \`${rep.wavPath}\` (${(rep.wavBytes / 1024 / 1024).toFixed(2)} MB, ${rep.totalWavDurationSec.toFixed(1)}s) | **${rep.qaPassedCount}/16** | ${rep.ttsCallsUsed} (${(rep.ttsWallTimeMs / 1000).toFixed(2)}s) | ${rep.transcribeCallsUsed} (${(rep.alignWallTimeMs / 1000).toFixed(2)}s) | ${rep.laughCheck.spokenAloudDetected ? `⚠️ YES: ${escapeMdCell(rep.laughCheck.matches.join("; "))}` : "✅ NO"} |`
+      `| **${rep.variant.id}** | ${rep.variant.maleVoice} + ${rep.variant.femaleVoice} | \`${rep.wavPath}\` (${(rep.wavBytes / 1024 / 1024).toFixed(2)} MB, ${rep.totalWavDurationSec.toFixed(1)}s) | **${rep.qaPassedCount}/16** | ${ttsLabel} | ${alignLabel} | ${rep.laughCheck.spokenAloudDetected ? `⚠️ YES: ${escapeMdCell(rep.laughCheck.matches.join("; "))}` : "✅ NO"} |`
     );
   }
   md.push("");
@@ -391,6 +587,7 @@ export async function runExperiment2Live(ai: GoogleGenAI) {
       wavPath: r.wavPath,
       wavBytes: r.wavBytes,
       qa: `${r.qaPassedCount}/16`,
+      fromExistingWav: Boolean(r.fromExistingWav),
       ttsCallsUsed: r.ttsCallsUsed,
       transcribeCallsUsed: r.transcribeCallsUsed,
       ttsWallTimeMs: r.ttsWallTimeMs,

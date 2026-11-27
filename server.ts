@@ -1501,23 +1501,6 @@ const geminiConcurrencyLimitMiddleware = (req: express.Request, res: express.Res
   next();
 };
 
-// TEMPORARY loopback-only route for Experiment 2 (removed immediately after run)
-app.post("/api/internal/run-exp2", async (req, res) => {
-  const remote = req.socket?.remoteAddress || req.ip || "";
-  if (remote !== "127.0.0.1" && remote !== "::1" && remote !== "::ffff:127.0.0.1") {
-    return res.status(403).json({ error: "Loopback only" });
-  }
-  try {
-    const { runExperiment2Live } = await import("./server/services/dubbing/exp2Runner.ts");
-    const ai = getGeminiClient();
-    const result = await runExperiment2Live(ai);
-    return res.json(result);
-  } catch (err: any) {
-    console.error("[/api/internal/run-exp2] Error:", err);
-    return res.status(500).json({ error: err?.message || String(err) });
-  }
-});
-
 // Apply Global IP Rate Limiter
 app.use("/api", globalLimiter);
 
