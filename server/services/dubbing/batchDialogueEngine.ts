@@ -185,6 +185,7 @@ export interface FakeAttemptFault {
   fakeTurnOverrides?: Array<FakeTurnAlignmentOverride | null | undefined>;
   durationMultiplier?: number;
   perTurnDurationMultipliers?: number[];
+  perTurnLeadingNoiseSec?: number[];
   forceMethod?: string;
   omitLastTurnInAudio?: boolean;
   noInterTurnSilence?: boolean;
@@ -1101,10 +1102,7 @@ async function synthesizeMissingSingleTurnPcm(
     const b64 = resp.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     if (!b64) throw new Error("Empty audio from single-turn recovery");
     return {
-      pcm: applyMicroEdgeFades(
-        trimSilenceEdgesPcm(extractRawPcm24k(Buffer.from(b64, "base64")), 25),
-        6
-      ),
+      pcm: trimSilenceEdgesPcm(extractRawPcm24k(Buffer.from(b64, "base64"))),
       provider: "google",
       sentStyle: cleanStyle,
       sentText: cleanText,
@@ -1121,7 +1119,7 @@ async function synthesizeMissingSingleTurnPcm(
         },
       ]);
       return {
-        pcm: applyMicroEdgeFades(trimSilenceEdgesPcm(kieRes.pcm, 25), 6),
+        pcm: trimSilenceEdgesPcm(kieRes.pcm),
         provider: "kie.ai",
         sentStyle: cleanStyle,
         sentText: cleanText,
@@ -1500,6 +1498,7 @@ async function runSingleSubBlockAttempt(
           syllables: syl,
           speakerKey: t.speakerId,
           overrideDurationSec: Math.max(0.25, (syl / 4.8) * mult),
+          leadingNoiseSec: injectedFault?.perTurnLeadingNoiseSec?.[idx] ?? 0,
         };
       });
       blockPcm = generateSyntheticBlockPcm(
@@ -1688,6 +1687,7 @@ async function runSingleSubBlockAttempt(
           syllables: syl,
           speakerKey: t.speakerId,
           overrideDurationSec: Math.max(0.25, (syl / 4.8) * mult),
+          leadingNoiseSec: injectedFault?.perTurnLeadingNoiseSec?.[origLocalIdx] ?? 0,
         };
       });
       spBlockPcm = generateSyntheticBlockPcm(

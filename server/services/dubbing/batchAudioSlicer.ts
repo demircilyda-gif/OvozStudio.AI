@@ -561,8 +561,7 @@ export function sliceBatchPcmByVad(
       const s0 = Math.max(0, bounds[i]);
       const s1 = Math.min(totalSamples, bounds[i + 1]);
       const rawSlice = pcm.subarray(s0 * 2, s1 * 2);
-      const trimmed = trimSilenceEdgesPcm(rawSlice, 5);
-      const clean = applyMicroEdgeFades(trimmed, 5);
+      const clean = trimSilenceEdgesPcm(rawSlice);
       clips.push({
         index: i,
         pcm: clean,
@@ -682,30 +681,144 @@ export function sliceBatchPcmByVad(
   };
 }
 
+export interface TrimSilenceEdgesOptions {
+  /** Длительность RMS-окна в мс (по умолчанию 10 мс). */
+  frameMs?: number;
+  /** Минимальный абсолютный порог речи в dBFS (по умолчанию -45 dBFS). */
+  minThresholdDbfs?: number;
+  /** Смещение порога ниже уровня речи клипа (95-й перцентиль RMS) в dB (по умолчанию 35 dB). */
+  relativeBelowSpeechDb?: number;
+  /** Минимальная длительность непрерывной речи в мс (всплески короче игнорируются; по умолчанию 30 мс). */
+  minSpeechRunMs?: number;
+  /** Запас тишины перед началом речи в мс (по умолчанию 40 мс). */
+  leadMarginMs?: number;
+  /** Запас тишины после конца речи в мс (по умолчанию 80 мс). */
+  tailMarginMs?: number;
+  /** Плавный fade-in в начале клипа в мс (по умолчанию 10 мс). */
+  fadeInMs?: number;
+  /** Плавный fade-out в конце клипа в мс (по умолчанию 8 мс). */
+  fadeOutMs?: number;
+}
+
 /**
- * Мягко подрезает краевую тишину отдельной реплики, оставляя запас marginMs с каждой стороны.
+ * Обрезает краевую тишину отдельной реплики по 10 мс RMS-окнам (до выравнивания громкости):
+ * - речь = окно с RMS выше max(-45 dBFS, 95-й перцентиль RMS клипа - 35 dB);
+ * - всплески короче 30 мс подряд не считаются речью;
+ * - оставляет 40 мс до начала речи и 80 мс после конца;
+ * - применяет fade-in 10 мс (и мягкий fade-out 8 мс в конце запаса);
+ * - не режет тихие начальные согласные (H, X, Q, S) выше порога и смех/вдох внутри/в конце клипа.
  */
-export function trimSilenceEdgesPcm(pcm: Buffer, marginMs: number = 25): Buffer {
+export function trimSilenceEdgesPcm(
+  pcm: Buffer,
+  optionsOrMarginMs?: number | TrimSilenceEdgesOptions
+): Buffer {
   const totalSamples = Math.floor(pcm.length / 2);
-  if (totalSamples < 480) return pcm;
+  if (totalSamples < 480) return Buffer.from(pcm);
 
-  const threshold = 110;
-  let first = 0;
-  let last = totalSamples - 1;
+  const opts: TrimSilenceEdgesOptions =
+    typeof optionsOrMarginMs === "number"
+      ? { leadMarginMs: optionsOrMarginMs, tailMarginMs: Math.max(optionsOrMarginMs, 80) }
+      : optionsOrMarginMs || {};
 
-  while (first < totalSamples && Math.abs(pcm.readInt16LE(first * 2)) < threshold) {
-    first++;
+  const frameMs = opts.frameMs ?? 10;
+  const minThresholdDbfs = opts.minThresholdDbfs ?? -45;
+  const relativeBelowSpeechDb = opts.relativeBelowSpeechDb ?? 35;
+  const minSpeechRunMs = opts.minSpeechRunMs ?? 30;
+  const leadMarginMs = opts.leadMarginMs ?? 40;
+  const tailMarginMs = opts.tailMarginMs ?? 80;
+  const fadeInMs = opts.fadeInMs ?? 10;
+  const fadeOutMs = opts.fadeOutMs ?? 8;
+
+  const windowSamples = Math.max(24, Math.round((PCM_SAMPLE_RATE * frameMs) / 1000));
+  const numWindows = Math.ceil(totalSamples / windowSamples);
+  const minSpeechWindows = Math.max(1, Math.ceil(minSpeechRunMs / frameMs));
+
+  const applyEdgeFades = (buf: Buffer): Buffer => {
+    const out = Buffer.from(buf);
+    const n = Math.floor(out.length / 2);
+    if (n <= 2) return out;
+    const inSamples = Math.min(Math.round((PCM_SAMPLE_RATE * fadeInMs) / 1000), Math.floor(n / 4));
+    for (let i = 0; i < inSamples; i++) {
+      const gain = i / inSamples;
+      out.writeInt16LE(Math.round(out.readInt16LE(i * 2) * gain), i * 2);
+    }
+    const outSamples = Math.min(Math.round((PCM_SAMPLE_RATE * fadeOutMs) / 1000), Math.floor(n / 4));
+    for (let i = 0; i < outSamples; i++) {
+      const gain = i / outSamples;
+      const idx = n - 1 - i;
+      out.writeInt16LE(Math.round(out.readInt16LE(idx * 2) * gain), idx * 2);
+    }
+    return out;
+  };
+
+  if (numWindows < minSpeechWindows) {
+    return applyEdgeFades(pcm);
   }
-  while (last > first && Math.abs(pcm.readInt16LE(last * 2)) < threshold) {
-    last--;
+
+  // 1) Считаем RMS в dBFS для каждого 10 мс окна
+  const rmsDb = new Float32Array(numWindows);
+  for (let w = 0; w < numWindows; w++) {
+    const sStart = w * windowSamples;
+    const sEnd = Math.min(totalSamples, sStart + windowSamples);
+    const count = sEnd - sStart;
+    if (count <= 0) {
+      rmsDb[w] = -120;
+      continue;
+    }
+    let sumSq = 0;
+    for (let s = sStart; s < sEnd; s++) {
+      const v = pcm.readInt16LE(s * 2);
+      sumSq += v * v;
+    }
+    const rmsNorm = Math.sqrt(sumSq / count) / 32768;
+    rmsDb[w] = rmsNorm > 1e-6 ? 20 * Math.log10(rmsNorm) : -120;
   }
 
-  if (first >= last) return pcm;
+  // 2) Уровень речи клипа = 95-й перцентиль RMS окон клипа
+  const sortedDb = Array.from(rmsDb).sort((a, b) => a - b);
+  const p95Idx = Math.min(sortedDb.length - 1, Math.floor(0.95 * (sortedDb.length - 1)));
+  const speechLevelDb = sortedDb[p95Idx];
+  const thresholdDb = Math.max(minThresholdDbfs, speechLevelDb - relativeBelowSpeechDb);
 
-  const marginSamples = Math.round((PCM_SAMPLE_RATE * marginMs) / 1000);
-  const s0 = Math.max(0, first - marginSamples);
-  const s1 = Math.min(totalSamples, last + marginSamples + 1);
-  return Buffer.from(pcm.subarray(s0 * 2, s1 * 2));
+  // 3) Ищем первый и последний непрерывный участок речи длиной >= 30 мс (>= 3 окна по 10 мс)
+  let firstSpeechWindow = -1;
+  let lastSpeechWindowEnd = -1;
+  let runStart = -1;
+
+  const commitRun = (startW: number, endW: number) => {
+    if (endW - startW >= minSpeechWindows) {
+      if (firstSpeechWindow < 0) firstSpeechWindow = startW;
+      lastSpeechWindowEnd = endW;
+    }
+  };
+
+  for (let w = 0; w < numWindows; w++) {
+    if (rmsDb[w] > thresholdDb) {
+      if (runStart < 0) runStart = w;
+    } else if (runStart >= 0) {
+      commitRun(runStart, w);
+      runStart = -1;
+    }
+  }
+  if (runStart >= 0) {
+    commitRun(runStart, numWindows);
+  }
+
+  if (firstSpeechWindow < 0 || lastSpeechWindowEnd <= firstSpeechWindow) {
+    return applyEdgeFades(pcm);
+  }
+
+  // 4) Оставляем 40 мс до начала речи и 80 мс после конца, затем fade-in 10 мс
+  const leadSamples = Math.round((PCM_SAMPLE_RATE * leadMarginMs) / 1000);
+  const tailSamples = Math.round((PCM_SAMPLE_RATE * tailMarginMs) / 1000);
+  const s0 = Math.max(0, firstSpeechWindow * windowSamples - leadSamples);
+  const s1 = Math.min(totalSamples, lastSpeechWindowEnd * windowSamples + tailSamples);
+
+  if (s1 <= s0) {
+    return applyEdgeFades(pcm);
+  }
+
+  return applyEdgeFades(Buffer.from(pcm.subarray(s0 * 2, s1 * 2)));
 }
 
 export interface TranscribeTurnAlignment {
@@ -780,11 +893,64 @@ export function generateSyntheticTurnPcm(
 }
 
 /**
+ * Генерирует реалистичную тишину/шумовой пол TTS (-60..-72 dB) с короткими шумовыми всплесками
+ * (для тестов DUBBING_FAKE_TTS=1 — имитирует реальную паузу Gemini TTS перед репликой).
+ */
+export function generateSyntheticNoisySilencePcm(
+  durationSec: number,
+  options?: {
+    noiseRmsDbfs?: number;
+    spikeCount?: number;
+    spikeSamples?: number;
+    spikeAmplitude?: number;
+    seed?: number;
+  }
+): Buffer {
+  const totalSamples = Math.max(0, Math.round(Math.max(0, durationSec) * PCM_SAMPLE_RATE));
+  if (totalSamples === 0) return Buffer.alloc(0);
+  const buf = Buffer.alloc(totalSamples * 2);
+  const noiseDbfs = options?.noiseRmsDbfs ?? -64;
+  // Для равномерного шума [-A, A] RMS = A / sqrt(3) -> A = RMS * sqrt(3)
+  const noisePeak = Math.min(32767, Math.pow(10, noiseDbfs / 20) * 32768 * Math.sqrt(3));
+  let state = (options?.seed ?? 1337) >>> 0;
+  const nextRand = () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return (state / 0xffffffff) * 2 - 1;
+  };
+
+  for (let i = 0; i < totalSamples; i++) {
+    const v = Math.round(nextRand() * noisePeak);
+    buf.writeInt16LE(Math.max(-32768, Math.min(32767, v)), i * 2);
+  }
+
+  const spikeCount = options?.spikeCount ?? 3;
+  const spikeSamples = options?.spikeSamples ?? 120;
+  const spikeAmp = options?.spikeAmplitude ?? 160;
+  if (spikeCount > 0 && totalSamples > spikeSamples * 2) {
+    for (let k = 0; k < spikeCount; k++) {
+      const center = Math.floor(((k + 1) / (spikeCount + 1)) * totalSamples);
+      const start = Math.max(0, Math.min(totalSamples - spikeSamples, center - Math.floor(spikeSamples / 2)));
+      for (let j = 0; j < spikeSamples; j++) {
+        const env = Math.sin((Math.PI * j) / Math.max(1, spikeSamples - 1));
+        const s = Math.round(Math.sin((2 * Math.PI * 900 * j) / PCM_SAMPLE_RATE) * spikeAmp * env);
+        buf.writeInt16LE(Math.max(-32768, Math.min(32767, s)), (start + j) * 2);
+      }
+    }
+  }
+  return buf;
+}
+
+/**
  * Собирает синтетический блочный PCM из списка реплик с длительностью (syllables / 4.8) с
  * и чистыми паузами 450 мс между репликами, чтобы VAD-нарезка и QA работали 1:1.
  */
 export function generateSyntheticBlockPcm(
-  turns: Array<{ syllables: number; speakerKey?: string; overrideDurationSec?: number }>,
+  turns: Array<{
+    syllables: number;
+    speakerKey?: string;
+    overrideDurationSec?: number;
+    leadingNoiseSec?: number;
+  }>,
   interTurnSilenceSec: number = 0.45
 ): {
   pcm: Buffer;
@@ -804,6 +970,17 @@ export function generateSyntheticBlockPcm(
     if (!freq) {
       freq = freqPalette[speakerFreqMap.size % freqPalette.length];
       speakerFreqMap.set(spKey, freq);
+    }
+    if (typeof t.leadingNoiseSec === "number" && t.leadingNoiseSec > 0) {
+      const noiseBuf = generateSyntheticNoisySilencePcm(t.leadingNoiseSec, {
+        noiseRmsDbfs: -64,
+        spikeCount: 3,
+        spikeSamples: 120,
+        spikeAmplitude: 240,
+        seed: 7001 + i * 97,
+      });
+      parts.push(noiseBuf);
+      cursorSec += noiseBuf.length / PCM_BYTES_PER_SEC;
     }
     const dur =
       typeof t.overrideDurationSec === "number" && t.overrideDurationSec > 0
@@ -939,6 +1116,293 @@ export function parseAlignmentModelOutput(rawText: string): Map<number, ParsedAl
 }
 
 /**
+ * Нарезает PCM-блок по выровненным границам модели `segMap` с привязкой к паузам-кандидатам:
+ * - если реплика заканчивается на <laugh>, смех остаётся целиком в её клипе, а пауза после смеха
+ *   не попадает ни в неё, ни в следующую реплику;
+ * - начало реплики, идущей сразу после <laugh>, берётся по началу её первого слова из выравнивания;
+ * - каждый клип проходит RMS-обрезку краевой тишины trimSilenceEdgesPcm (40 мс до речи, 80 мс после, fade-in 10 мс).
+ */
+export function slicePcmByAlignmentSegments(
+  pcm: Buffer,
+  expectedTurns: AlignExpectedTurnInput[],
+  segMap: Map<number, ParsedAlignmentRow>,
+  options?: {
+    silenceCandidates?: SilenceRun[];
+    silenceMinMs?: number;
+    snapToleranceSec?: number;
+    firstSpeechSec?: number;
+    lastSpeechSec?: number;
+  }
+): {
+  clips: Array<SlicedTurnClip | null>;
+  turnAlignments: TranscribeTurnAlignment[];
+  missingIndices: number[];
+} {
+  const totalSamples = Math.floor(pcm.length / 2);
+  const totalDurationSec = totalSamples / PCM_SAMPLE_RATE;
+  const silenceMinMs = options?.silenceMinMs ?? 120;
+  const snapToleranceSec = options?.snapToleranceSec ?? 0.6;
+  const silenceCandidates =
+    options?.silenceCandidates ??
+    detectSilenceRuns(pcm, {
+      frameMs: 10,
+      minSilenceMs: silenceMinMs,
+    });
+
+  let firstSpeechSec = options?.firstSpeechSec;
+  let lastSpeechSec = options?.lastSpeechSec;
+  if (typeof firstSpeechSec !== "number" || typeof lastSpeechSec !== "number") {
+    const threshold = 160;
+    let first = 0;
+    while (first < totalSamples && Math.abs(pcm.readInt16LE(first * 2)) < threshold) {
+      first += 24;
+    }
+    let last = totalSamples - 1;
+    while (last > first && Math.abs(pcm.readInt16LE(last * 2)) < threshold) {
+      last -= 24;
+    }
+    firstSpeechSec = Math.min(first, totalSamples) / PCM_SAMPLE_RATE;
+    lastSpeechSec = Math.max(first + 240, Math.min(totalSamples, last + 1)) / PCM_SAMPLE_RATE;
+  }
+
+  const turnHasTrailingLaugh = expectedTurns.map((t) =>
+    /<\s*laugh\s*>/i.test(String(t.text || ""))
+  );
+
+  const clips: Array<SlicedTurnClip | null> = [];
+  const turnAlignments: TranscribeTurnAlignment[] = [];
+  const missingIndices: number[] = [];
+  let prevEndSample = 0;
+
+  const preWordProtectSamples = Math.round(0.15 * PCM_SAMPLE_RATE);
+  const postLaughTailPadSamples = Math.round(0.15 * PCM_SAMPLE_RATE);
+
+  for (let i = 0; i < expectedTurns.length; i++) {
+    const seg = segMap.get(i);
+    if (
+      !seg ||
+      !seg.found ||
+      typeof seg.startSec !== "number" ||
+      typeof seg.endSec !== "number" ||
+      seg.endSec <= seg.startSec + 0.1
+    ) {
+      clips.push(null);
+      missingIndices.push(i);
+      turnAlignments.push({
+        index: i,
+        startSec: seg?.startSec ?? 0,
+        endSec: seg?.endSec ?? 0,
+        found: false,
+        voice: seg?.voice ?? "unknown",
+        spokenText: seg?.spokenText ?? "",
+        boundarySnapped: false,
+        boundaryIssue: `turn_not_found_in_transcribe (turn ${i})`,
+      });
+      continue;
+    }
+
+    const safeStartSec = Math.max(0, Math.min(totalDurationSec - 0.1, seg.startSec));
+    const safeEndSec = Math.max(safeStartSec + 0.1, Math.min(totalDurationSec, seg.endSec));
+    const alignedStartSample = Math.round(safeStartSec * PCM_SAMPLE_RATE);
+    const prevHadTrailingLaugh = i > 0 && turnHasTrailingLaugh[i - 1];
+
+    let boundarySnapped = true;
+    let boundaryIssue: string | undefined;
+
+    // 1) Привязка START к ближайшей паузе-кандидату (>= 120 мс) в пределах ±0.6 с
+    let startSample: number;
+    if (i === 0) {
+      if (safeStartSec <= snapToleranceSec || Math.abs(safeStartSec - firstSpeechSec) <= snapToleranceSec) {
+        startSample = 0;
+      } else {
+        const candStart = findNearestSilenceCandidate(silenceCandidates, safeStartSec, snapToleranceSec);
+        if (candStart) {
+          startSample = candStart.midSample;
+        } else {
+          boundarySnapped = false;
+          boundaryIssue = `no_silence_boundary_near_start (turn 0 @ ${safeStartSec.toFixed(2)}s)`;
+          startSample = alignedStartSample;
+        }
+      }
+    } else if (prevHadTrailingLaugh) {
+      // После реплики с <laugh>: начало следующей реплики берём по началу её первого слова из выравнивания,
+      // чтобы пауза между смехом и следующей фразой не попадала ни в один клип.
+      const candStart = findNearestSilenceCandidate(
+        silenceCandidates,
+        safeStartSec,
+        snapToleranceSec,
+        Math.max(-1, prevEndSample - Math.round(PCM_SAMPLE_RATE * 0.05))
+      );
+      if (candStart) {
+        let wordStartSample = alignedStartSample;
+        if (alignedStartSample <= candStart.endSample) {
+          wordStartSample = candStart.endSample;
+        } else if (alignedStartSample - candStart.endSample <= preWordProtectSamples) {
+          // Сохраняем возможный тихий начальный согласный (H/X/Q/S) перед гласным
+          wordStartSample = candStart.endSample;
+        }
+        // Оставляем небольшой допуск (150 мс) до первого слова для trimSilenceEdgesPcm (сохранит тихий H/X/Q/S, но исключит длинную паузу после смеха)
+        startSample = Math.max(
+          prevEndSample,
+          candStart.startSample,
+          wordStartSample - preWordProtectSamples
+        );
+      } else if (Math.abs(prevEndSample / PCM_SAMPLE_RATE - safeStartSec) <= snapToleranceSec) {
+        startSample = Math.max(prevEndSample, alignedStartSample - preWordProtectSamples);
+      } else {
+        boundarySnapped = false;
+        boundaryIssue = `no_silence_boundary_near_start (turn ${i} @ ${safeStartSec.toFixed(2)}s)`;
+        startSample = Math.max(prevEndSample, alignedStartSample);
+      }
+    } else {
+      // Обычная внутренняя граница: привязываем к паузе-кандидату в ±0.6с
+      const candStart = findNearestSilenceCandidate(
+        silenceCandidates,
+        safeStartSec,
+        snapToleranceSec,
+        Math.max(-1, prevEndSample - Math.round(PCM_SAMPLE_RATE * 0.05))
+      );
+      if (candStart) {
+        startSample = Math.max(prevEndSample, candStart.midSample);
+      } else if (Math.abs(prevEndSample / PCM_SAMPLE_RATE - safeStartSec) <= snapToleranceSec) {
+        startSample = prevEndSample;
+      } else {
+        boundarySnapped = false;
+        boundaryIssue = `no_silence_boundary_near_start (turn ${i} @ ${safeStartSec.toFixed(2)}s)`;
+        startSample = Math.max(prevEndSample, alignedStartSample);
+      }
+    }
+
+    // 2) Привязка END к ближайшей паузе-кандидату (>= 120 мс) в пределах ±0.6 с
+    // Если реплика заканчивается на <laugh>, смех остаётся целиком в её клипе,
+    // а пауза между смехом и следующей фразой отбрасывается (режем по началу этой паузы + 150 мс, затем trimSilenceEdgesPcm оставит 80 мс).
+    let endSample: number;
+    const hasLaughAtEnd = turnHasTrailingLaugh[i];
+    if (i === expectedTurns.length - 1) {
+      if (
+        hasLaughAtEnd ||
+        totalDurationSec - safeEndSec <= snapToleranceSec ||
+        Math.abs(safeEndSec - lastSpeechSec) <= snapToleranceSec
+      ) {
+        endSample = totalSamples;
+      } else {
+        const candEnd = findNearestSilenceCandidate(
+          silenceCandidates,
+          safeEndSec,
+          snapToleranceSec,
+          startSample
+        );
+        if (candEnd) {
+          endSample = candEnd.midSample;
+        } else {
+          boundarySnapped = false;
+          boundaryIssue =
+            boundaryIssue || `no_silence_boundary_near_end (turn ${i} @ ${safeEndSec.toFixed(2)}s)`;
+          endSample = Math.min(totalSamples, Math.round(safeEndSec * PCM_SAMPLE_RATE));
+        }
+      }
+    } else {
+      const nextSeg = segMap.get(i + 1);
+      const nextStartSec =
+        hasLaughAtEnd &&
+        nextSeg?.found &&
+        typeof nextSeg.startSec === "number" &&
+        nextSeg.startSec > safeStartSec
+          ? Math.min(totalDurationSec, nextSeg.startSec)
+          : null;
+
+      let candEnd =
+        nextStartSec !== null
+          ? findNearestSilenceCandidate(
+              silenceCandidates,
+              nextStartSec,
+              snapToleranceSec,
+              Math.max(startSample, Math.round((safeEndSec - 0.15) * PCM_SAMPLE_RATE))
+            )
+          : null;
+
+      if (!candEnd) {
+        candEnd = findNearestSilenceCandidate(
+          silenceCandidates,
+          safeEndSec,
+          snapToleranceSec,
+          startSample
+        );
+      }
+
+      if (candEnd) {
+        if (hasLaughAtEnd) {
+          // Смех заканчивается у candEnd.startSample; не захватываем длинную паузу между смехом и следующей фразой
+          const nextStartLimit =
+            nextStartSec !== null ? Math.round(nextStartSec * PCM_SAMPLE_RATE) : candEnd.endSample;
+          endSample = Math.min(
+            candEnd.endSample,
+            nextStartLimit,
+            Math.max(
+              startSample + Math.round(0.12 * PCM_SAMPLE_RATE),
+              candEnd.startSample + postLaughTailPadSamples
+            )
+          );
+        } else {
+          endSample = candEnd.midSample;
+        }
+      } else {
+        boundarySnapped = false;
+        boundaryIssue =
+          boundaryIssue || `no_silence_boundary_near_end (turn ${i} @ ${safeEndSec.toFixed(2)}s)`;
+        endSample = Math.min(
+          totalSamples,
+          Math.round((nextStartSec ?? safeEndSec) * PCM_SAMPLE_RATE)
+        );
+      }
+    }
+
+    if (endSample <= startSample + Math.round(PCM_SAMPLE_RATE * 0.1)) {
+      clips.push(null);
+      missingIndices.push(i);
+      turnAlignments.push({
+        index: i,
+        startSec: safeStartSec,
+        endSec: safeEndSec,
+        found: false,
+        voice: seg.voice,
+        spokenText: seg.spokenText,
+        boundarySnapped: false,
+        boundaryIssue: boundaryIssue || `degenerate_clip_bounds (turn ${i})`,
+      });
+      continue;
+    }
+
+    const clean = trimSilenceEdgesPcm(pcm.subarray(startSample * 2, endSample * 2));
+    clips.push({
+      index: i,
+      pcm: clean,
+      startMs: Math.round((startSample / PCM_SAMPLE_RATE) * 1000),
+      endMs: Math.round((endSample / PCM_SAMPLE_RATE) * 1000),
+      durationSec: Math.round((clean.length / PCM_BYTES_PER_SEC) * 100) / 100,
+      method: "transcribe_aligned",
+      spokenText: seg.spokenText,
+      detectedVoice: seg.voice,
+      boundarySnapped,
+      boundaryIssue,
+    });
+    turnAlignments.push({
+      index: i,
+      startSec: startSample / PCM_SAMPLE_RATE,
+      endSec: endSample / PCM_SAMPLE_RATE,
+      found: true,
+      voice: seg.voice,
+      spokenText: seg.spokenText,
+      boundarySnapped,
+      boundaryIssue,
+    });
+    prevEndSample = endSample;
+  }
+
+  return { clips, turnAlignments, missingIndices };
+}
+
+/**
  * Выравнивание границ реплик И верификация (SPOKEN_TEXT + VOICE male/female) в ОДНОМ запросе
  * к мультимодальной модели `gemini-4-hydrogen` (JSON responseSchema) на подблок.
  *
@@ -1031,7 +1495,7 @@ export async function alignBatchAudioViaTranscribe(
     };
 
     if (expectedTurns.length === 1) {
-      const clean = applyMicroEdgeFades(trimSilenceEdgesPcm(pcm, 20), 6);
+      const clean = trimSilenceEdgesPcm(pcm);
       const durSec = Math.round((clean.length / PCM_BYTES_PER_SEC) * 100) / 100;
       const ov0 = turnOverrides[0];
       const spoken0 = getFakeSpoken(0);
@@ -1217,7 +1681,7 @@ RULES:
 - Return every turn index from 0 to ${expectedTurns.length - 1} once in ascending order.
 - startSec and endSec are decimal seconds within [0.00, ${totalDurationSec.toFixed(2)}], covering the full spoken utterance without cutting any word.
 - Align inter-turn boundaries to the real silence pauses listed above whenever a pause separates two turns.
-- If a turn ends with laughter (marked "(ends with laughter)"), that trailing laughter belongs to THAT turn: include the laughter inside that turn's [startSec, endSec] and place endSec at the silence pause right BEFORE the first word of the NEXT turn (do NOT cut off the laughter).
+- If a turn ends with laughter (marked "(ends with laughter)"), include the laughter inside that turn's [startSec, endSec] ending right after the laughter finishes, and set the NEXT turn's startSec strictly at the start of the NEXT turn's first spoken word (do NOT include the silence pause between laughter and the next phrase in either turn).
 - Timestamps MUST be strictly non-overlapping and ascending: next startSec >= previous endSec.
 - voice MUST be strictly "male" or "female" based on the ACTUAL voice heard in that audio interval (use "unknown" only if silent/unintelligible). Do NOT blindly copy the script gender if the wrong voice spoke that line.
 - spokenText MUST transcribe VERBATIM what was ACTUALLY spoken in Uzbek in that exact interval (do NOT copy from the script if the audio differed; include any repeated words, cut-offs, or English words actually heard).
@@ -1289,188 +1753,18 @@ ${turnListText}`;
       });
     }
 
-    const clips: Array<SlicedTurnClip | null> = [];
-    const turnAlignments: TranscribeTurnAlignment[] = [];
-    const missingIndices: number[] = [];
-    let prevEndSample = 0;
-
-    for (let i = 0; i < expectedTurns.length; i++) {
-      const seg = segMap.get(i);
-      if (
-        !seg ||
-        !seg.found ||
-        typeof seg.startSec !== "number" ||
-        typeof seg.endSec !== "number" ||
-        seg.endSec <= seg.startSec + 0.1
-      ) {
-        clips.push(null);
-        missingIndices.push(i);
-        turnAlignments.push({
-          index: i,
-          startSec: seg?.startSec ?? 0,
-          endSec: seg?.endSec ?? 0,
-          found: false,
-          voice: seg?.voice ?? "unknown",
-          spokenText: seg?.spokenText ?? "",
-          boundarySnapped: false,
-          boundaryIssue: `turn_not_found_in_transcribe (turn ${i})`,
-        });
-        continue;
+    const slicedBySegs = slicePcmByAlignmentSegments(
+      pcm,
+      expectedTurns,
+      segMap,
+      {
+        silenceCandidates,
+        snapToleranceSec,
+        firstSpeechSec,
+        lastSpeechSec,
       }
-
-      const safeStartSec = Math.max(0, Math.min(totalDurationSec - 0.1, seg.startSec));
-      const safeEndSec = Math.max(safeStartSec + 0.1, Math.min(totalDurationSec, seg.endSec));
-
-      let boundarySnapped = true;
-      let boundaryIssue: string | undefined;
-
-      // 1) Привязка START к ближайшей паузе-кандидату (>= 120 мс) в пределах ±0.6 с
-      let startSample: number;
-      if (i === 0) {
-        if (safeStartSec <= snapToleranceSec || Math.abs(safeStartSec - firstSpeechSec) <= snapToleranceSec) {
-          startSample = 0;
-        } else {
-          const candStart = findNearestSilenceCandidate(silenceCandidates, safeStartSec, snapToleranceSec);
-          if (candStart) {
-            startSample = candStart.midSample;
-          } else {
-            boundarySnapped = false;
-            boundaryIssue = `no_silence_boundary_near_start (turn 0 @ ${safeStartSec.toFixed(2)}s)`;
-            startSample = Math.round(safeStartSec * PCM_SAMPLE_RATE);
-          }
-        }
-      } else {
-        // Внутренняя граница: проверяем, попадает ли предыдущая привязанная пауза или ближайшая пауза в ±0.6с
-        const candStart = findNearestSilenceCandidate(
-          silenceCandidates,
-          safeStartSec,
-          snapToleranceSec,
-          Math.max(-1, prevEndSample - Math.round(PCM_SAMPLE_RATE * 0.05))
-        );
-        if (candStart) {
-          startSample = Math.max(prevEndSample, candStart.midSample);
-        } else if (Math.abs(prevEndSample / PCM_SAMPLE_RATE - safeStartSec) <= snapToleranceSec) {
-          // Предыдущая граница уже была привязана к паузе-кандидату в пределах ±0.6 с
-          startSample = prevEndSample;
-        } else {
-          boundarySnapped = false;
-          boundaryIssue = `no_silence_boundary_near_start (turn ${i} @ ${safeStartSec.toFixed(2)}s)`;
-          startSample = Math.max(prevEndSample, Math.round(safeStartSec * PCM_SAMPLE_RATE));
-        }
-      }
-
-      // 2) Привязка END к ближайшей паузе-кандидату (>= 120 мс) в пределах ±0.6 с
-      // Если реплика заканчивается на <laugh>, смех остаётся в её клипе: режем по паузе
-      // непосредственно ПЕРЕД первым словом следующей реплики, чтобы не обрубить смех.
-      let endSample: number;
-      const hasLaughAtEnd = turnHasTrailingLaugh[i];
-      if (i === expectedTurns.length - 1) {
-        if (
-          hasLaughAtEnd ||
-          totalDurationSec - safeEndSec <= snapToleranceSec ||
-          Math.abs(safeEndSec - lastSpeechSec) <= snapToleranceSec
-        ) {
-          endSample = totalSamples;
-        } else {
-          const candEnd = findNearestSilenceCandidate(
-            silenceCandidates,
-            safeEndSec,
-            snapToleranceSec,
-            startSample
-          );
-          if (candEnd) {
-            endSample = candEnd.midSample;
-          } else {
-            boundarySnapped = false;
-            boundaryIssue =
-              boundaryIssue || `no_silence_boundary_near_end (turn ${i} @ ${safeEndSec.toFixed(2)}s)`;
-            endSample = Math.min(totalSamples, Math.round(safeEndSec * PCM_SAMPLE_RATE));
-          }
-        }
-      } else {
-        const nextSeg = segMap.get(i + 1);
-        const nextStartSec =
-          hasLaughAtEnd &&
-          nextSeg?.found &&
-          typeof nextSeg.startSec === "number" &&
-          nextSeg.startSec > safeEndSec
-            ? Math.min(totalDurationSec, nextSeg.startSec)
-            : null;
-
-        let candEnd =
-          nextStartSec !== null
-            ? findNearestSilenceCandidate(
-                silenceCandidates,
-                nextStartSec,
-                snapToleranceSec,
-                Math.max(startSample, Math.round((safeEndSec - 0.15) * PCM_SAMPLE_RATE))
-              )
-            : null;
-
-        if (!candEnd) {
-          candEnd = findNearestSilenceCandidate(
-            silenceCandidates,
-            safeEndSec,
-            snapToleranceSec,
-            startSample
-          );
-        }
-
-        if (candEnd) {
-          endSample = candEnd.midSample;
-        } else {
-          boundarySnapped = false;
-          boundaryIssue =
-            boundaryIssue || `no_silence_boundary_near_end (turn ${i} @ ${safeEndSec.toFixed(2)}s)`;
-          endSample = Math.min(
-            totalSamples,
-            Math.round((nextStartSec ?? safeEndSec) * PCM_SAMPLE_RATE)
-          );
-        }
-      }
-
-      if (endSample <= startSample + Math.round(PCM_SAMPLE_RATE * 0.1)) {
-        clips.push(null);
-        missingIndices.push(i);
-        turnAlignments.push({
-          index: i,
-          startSec: safeStartSec,
-          endSec: safeEndSec,
-          found: false,
-          voice: seg.voice,
-          spokenText: seg.spokenText,
-          boundarySnapped: false,
-          boundaryIssue: boundaryIssue || `degenerate_clip_bounds (turn ${i})`,
-        });
-        continue;
-      }
-
-      const slice = trimSilenceEdgesPcm(pcm.subarray(startSample * 2, endSample * 2), 20);
-      const clean = applyMicroEdgeFades(slice, 6);
-      clips.push({
-        index: i,
-        pcm: clean,
-        startMs: Math.round((startSample / PCM_SAMPLE_RATE) * 1000),
-        endMs: Math.round((endSample / PCM_SAMPLE_RATE) * 1000),
-        durationSec: Math.round((clean.length / PCM_BYTES_PER_SEC) * 100) / 100,
-        method: "transcribe_aligned",
-        spokenText: seg.spokenText,
-        detectedVoice: seg.voice,
-        boundarySnapped,
-        boundaryIssue,
-      });
-      turnAlignments.push({
-        index: i,
-        startSec: startSample / PCM_SAMPLE_RATE,
-        endSec: endSample / PCM_SAMPLE_RATE,
-        found: true,
-        voice: seg.voice,
-        spokenText: seg.spokenText,
-        boundarySnapped,
-        boundaryIssue,
-      });
-      prevEndSample = endSample;
-    }
+    );
+    const { clips, turnAlignments, missingIndices } = slicedBySegs;
 
     const heardTranscript = turnAlignments
       .map((a) => a.spokenText)

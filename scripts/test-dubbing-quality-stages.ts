@@ -49,16 +49,23 @@ import {
   type ResolvedBatchSpeaker,
 } from "../server/services/dubbing/batchDialogueEngine.ts";
 import {
+  PCM_SAMPLE_RATE,
+  PCM_BYTES_PER_SEC,
   buildWav24k,
   generateSyntheticTurnPcm,
+  generateSyntheticNoisySilencePcm,
+  trimSilenceEdgesPcm,
+  slicePcmByAlignmentSegments,
   parseAlignmentModelOutput,
   type SlicedTurnClip,
+  type ParsedAlignmentRow,
 } from "../server/services/dubbing/batchAudioSlicer.ts";
 import {
   levelSubBlockClipsLoudness,
   measureIntegratedLufsPcm,
   measurePeakDbfsPcm,
 } from "../server/services/dubbing/loudnessLeveler.ts";
+import { resolveFfmpegPath } from "../server/utils/ffmpegBinary.ts";
 import { DUBBING_MODELS_CONFIG } from "../server/config/dubbingModels.ts";
 import type { DialogueTurn } from "../src/types/podcast.ts";
 
@@ -585,7 +592,9 @@ async function runAllStageTests() {
   try {
     fs.writeFileSync(tmpWav, buildWav24k(leveled[0].pcm));
     const { spawnSync } = await import("node:child_process");
-    const sp = spawnSync("ffmpeg", ["-nostats", "-i", tmpWav, "-af", "ebur128", "-f", "null", "-"], {
+    const ffmpegBin = resolveFfmpegPath();
+    assert.ok(ffmpegBin, "resolveFfmpegPath() must return a working ffmpeg binary (ffmpeg-static / system)");
+    const sp = spawnSync(ffmpegBin, ["-nostats", "-i", tmpWav, "-af", "ebur128", "-f", "null", "-"], {
       encoding: "utf8",
     });
     assert.equal(sp.status, 0, `ffmpeg ebur128 failed (code ${sp.status}): ${sp.stderr}`);
@@ -1247,9 +1256,316 @@ async function runAllStageTests() {
   );
   console.log("✅ TEST 6 PASSED: audioAlignmentModel=gemini-4-hydrogen & JSON/pipe parser verified.");
 
+  // =========================================================================
+  // 7. RMS trimSilenceEdgesPcm, QUIET "H", TRAILING <laugh> & TIGGO 8 SCENES 1-2 TIMING
+  // =========================================================================
+  console.log("=== Test 7: Clip Edge Trimming (10ms RMS, Quiet H, <laugh> Boundary, Tiggo 8 0.3-1.8s Silence) ===");
+
+  const makeToneAtRmsDbfs = (durationSec: number, rmsDbfs: number, freqHz = 380): Buffer => {
+    const n = Math.round(durationSec * PCM_SAMPLE_RATE);
+    // Sine wave RMS = peak / sqrt(2) => peak = RMS * sqrt(2)
+    const peakAmp = Math.min(32767, Math.pow(10, rmsDbfs / 20) * 32768 * Math.SQRT2);
+    const buf = Buffer.alloc(n * 2);
+    const omega = (2 * Math.PI * freqHz) / PCM_SAMPLE_RATE;
+    for (let i = 0; i < n; i++) {
+      buf.writeInt16LE(Math.round(Math.sin(omega * i) * peakAmp), i * 2);
+    }
+    return buf;
+  };
+
+  const findFirstSpeechMsInPcm = (pcm: Buffer, thresholdDbfs = -45, minRunMs = 30): number => {
+    const winSamples = Math.round((PCM_SAMPLE_RATE * 10) / 1000);
+    const totalSamples = Math.floor(pcm.length / 2);
+    const numWin = Math.floor(totalSamples / winSamples);
+    const need = Math.ceil(minRunMs / 10);
+    let run = 0;
+    for (let w = 0; w < numWin; w++) {
+      let sumSq = 0;
+      const base = w * winSamples;
+      for (let s = 0; s < winSamples; s++) {
+        const v = pcm.readInt16LE((base + s) * 2);
+        sumSq += v * v;
+      }
+      const rmsNorm = Math.sqrt(sumSq / winSamples) / 32768;
+      const db = rmsNorm > 1e-6 ? 20 * Math.log10(rmsNorm) : -120;
+      if (db > thresholdDbfs) {
+        run++;
+        if (run >= need) return (w - need + 1) * 10;
+      } else {
+        run = 0;
+      }
+    }
+    return -1;
+  };
+
+  // 7a. Clip with 1.73s of -59..-73 dB noise + 3 spikes of 120 samples before speech -> <= 50ms left before speech
+  {
+    // Build 1.73s noise sweeping between -59 and -73 dB with 3 bursts of 120 samples (both ~120 amp and loud -20 dB burst < 30ms!)
+    const noise173 = Buffer.concat([
+      generateSyntheticNoisySilencePcm(0.58, { noiseRmsDbfs: -60, spikeCount: 1, spikeSamples: 120, spikeAmplitude: 140, seed: 11 }),
+      generateSyntheticNoisySilencePcm(0.58, { noiseRmsDbfs: -72, spikeCount: 1, spikeSamples: 120, spikeAmplitude: 280, seed: 22 }),
+      generateSyntheticNoisySilencePcm(0.57, { noiseRmsDbfs: -64, spikeCount: 1, spikeSamples: 120, spikeAmplitude: 3200, seed: 33 }), // loud 5ms (<30ms) burst!
+    ]);
+    const speechBody = makeToneAtRmsDbfs(1.37, -16, 360);
+    const tailNoise = generateSyntheticNoisySilencePcm(0.6, { noiseRmsDbfs: -66, spikeCount: 1, spikeSamples: 120, spikeAmplitude: 200, seed: 44 });
+    const rawClip = Buffer.concat([noise173, speechBody, tailNoise]);
+
+    const trimmed = trimSilenceEdgesPcm(rawClip);
+    const leadBeforeSpeechMs = findFirstSpeechMsInPcm(trimmed, -45, 30);
+    assert.ok(
+      leadBeforeSpeechMs >= 30 && leadBeforeSpeechMs <= 50,
+      `Expected <= 50 ms (~40 ms) before speech after trimming 1.73s noise + 3x120-sample spikes, got ${leadBeforeSpeechMs} ms`
+    );
+    const trimmedDurSec = trimmed.length / PCM_BYTES_PER_SEC;
+    // Expected: ~0.04s lead + 1.37s speech + 0.08s tail = ~1.49s (tolerance ±0.03s)
+    assert.ok(
+      trimmedDurSec >= 1.44 && trimmedDurSec <= 1.54,
+      `Trimmed duration expected ~1.49s (40ms lead + 1.37s speech + 80ms tail), got ${trimmedDurSec.toFixed(3)}s`
+    );
+    // Verify 10ms fade-in ramps smoothly from 0 at sample 0
+    assert.equal(trimmed.readInt16LE(0), 0, "10ms fade-in must start cleanly at 0");
+    console.log(`  ✓ 7a: 1.73s noise (-59..-73 dB) + 3x120-sample spikes -> lead=${leadBeforeSpeechMs}ms (<=50ms), dur=${trimmedDurSec.toFixed(2)}s`);
+  }
+
+  // 7b. Clip starting with quiet Uzbek "H" (-40 dBFS, 80 ms) -> "H" MUST NOT be cut!
+  {
+    const leadSilence = generateSyntheticNoisySilencePcm(0.6, { noiseRmsDbfs: -66, spikeCount: 2, spikeSamples: 120, spikeAmplitude: 160, seed: 55 });
+    const quietH = makeToneAtRmsDbfs(0.08, -40, 2600); // 80ms quiet fricative H at -40 dBFS
+    const mainWord = makeToneAtRmsDbfs(1.1, -15, 340); // normal speech at -15 dBFS
+    const tailSilence = generateSyntheticNoisySilencePcm(0.4, { noiseRmsDbfs: -68, spikeCount: 0, seed: 66 });
+
+    const withLead = Buffer.concat([leadSilence, quietH, mainWord, tailSilence]);
+    const trimmedWithLead = trimSilenceEdgesPcm(withLead);
+    // Speech starts with quietH (80ms) + mainWord (1100ms) = 1180ms; with 40ms lead + 80ms tail = 1300ms
+    const durWithLeadMs = Math.round((trimmedWithLead.length / PCM_BYTES_PER_SEC) * 1000);
+    assert.ok(
+      durWithLeadMs >= 1270 && durWithLeadMs <= 1330,
+      `Quiet 80ms H (-40 dB) was cut! Expected ~1300ms (40ms lead + 80ms H + 1100ms word + 80ms tail), got ${durWithLeadMs}ms`
+    );
+    // Verify the 80ms "H" region (at offset ~40..120ms inside trimmed clip) still has RMS around -40 dBFS!
+    const hSlice = trimmedWithLead.subarray(Math.round(0.04 * PCM_SAMPLE_RATE) * 2, Math.round(0.12 * PCM_SAMPLE_RATE) * 2);
+    let hSumSq = 0;
+    const hCount = Math.floor(hSlice.length / 2);
+    for (let i = 0; i < hCount; i++) {
+      const v = hSlice.readInt16LE(i * 2);
+      hSumSq += v * v;
+    }
+    const hRmsDb = 20 * Math.log10(Math.sqrt(hSumSq / hCount) / 32768);
+    assert.ok(
+      hRmsDb >= -42.5 && hRmsDb <= -37.5,
+      `Quiet H energy should stay ~-40 dBFS, got ${hRmsDb.toFixed(2)} dBFS`
+    );
+
+    // Also when "H" starts right at t=0 without leading silence
+    const directH = Buffer.concat([quietH, mainWord, tailSilence]);
+    const trimmedDirectH = trimSilenceEdgesPcm(directH);
+    const durDirectMs = Math.round((trimmedDirectH.length / PCM_BYTES_PER_SEC) * 1000);
+    assert.ok(
+      durDirectMs >= 1240 && durDirectMs <= 1280,
+      `Direct-start quiet H (-40 dB, 80ms) was cut! Expected ~1260ms, got ${durDirectMs}ms`
+    );
+    console.log(`  ✓ 7b: Quiet Uzbek 'H' (-40 dB, 80ms) preserved intact (RMS=${hRmsDb.toFixed(1)} dBFS, dur=${durWithLeadMs}ms)`);
+  }
+
+  // 7c. Clip with <laugh> at end + 1.5s pause before Turn #1 -> laugh kept in Turn #0, Turn #1 starts at first word, pause in NEITHER clip!
+  {
+    const turn0Words = makeToneAtRmsDbfs(1.5, -16, 330);
+    const microBreathBeforeLaugh = generateSyntheticNoisySilencePcm(0.14, { noiseRmsDbfs: -66, spikeCount: 0, seed: 70 });
+    const laughBurst1 = makeToneAtRmsDbfs(0.18, -26, 520);
+    const laughGap = generateSyntheticNoisySilencePcm(0.08, { noiseRmsDbfs: -64, spikeCount: 0, seed: 71 });
+    const laughBurst2 = makeToneAtRmsDbfs(0.22, -28, 480);
+    // Total Turn 0 speech + laugh = 1.50 + 0.14 + 0.18 + 0.08 + 0.22 = 2.12s
+    const pauseBetweenLaughAndNext = generateSyntheticNoisySilencePcm(1.5, {
+      noiseRmsDbfs: -63,
+      spikeCount: 3,
+      spikeSamples: 120,
+      spikeAmplitude: 240,
+      seed: 72,
+    });
+    // Turn 1 starts at 2.12 + 1.50 = 3.62s (with quiet H + word)
+    const turn1QuietH = makeToneAtRmsDbfs(0.08, -40, 2600);
+    const turn1Body = makeToneAtRmsDbfs(1.3, -15, 350);
+    const tailPad = generateSyntheticNoisySilencePcm(0.25, { noiseRmsDbfs: -68, spikeCount: 0, seed: 73 });
+
+    const blockPcm = Buffer.concat([
+      turn0Words,
+      microBreathBeforeLaugh,
+      laughBurst1,
+      laughGap,
+      laughBurst2,
+      pauseBetweenLaughAndNext,
+      turn1QuietH,
+      turn1Body,
+      tailPad,
+    ]);
+
+    // Check direct trimSilenceEdgesPcm on Turn 0 with trailing laugh + trailing pause
+    const soloLaughClip = Buffer.concat([
+      turn0Words,
+      microBreathBeforeLaugh,
+      laughBurst1,
+      laughGap,
+      laughBurst2,
+      pauseBetweenLaughAndNext,
+    ]);
+    const trimmedSoloLaugh = trimSilenceEdgesPcm(soloLaughClip);
+    const soloLaughDurSec = trimmedSoloLaugh.length / PCM_BYTES_PER_SEC;
+    // Expected: 2.12s (words + laugh) + 0.08s tail = ~2.20s (NOT truncated to 1.58s before laugh, NOT 3.62s with pause!)
+    assert.ok(
+      soloLaughDurSec >= 2.15 && soloLaughDurSec <= 2.26,
+      `Trailing laugh must remain intact while 1.5s post-laugh pause is trimmed: expected ~2.20s, got ${soloLaughDurSec.toFixed(3)}s`
+    );
+
+    // Check full slicePcmByAlignmentSegments across the <laugh> -> next turn boundary
+    const segMap = new Map<number, ParsedAlignmentRow>([
+      [0, { startSec: 0.0, endSec: 2.12, found: true, voice: "male", spokenText: "Qani, yana bir marta!" }],
+      [1, { startSec: 3.62, endSec: 5.0, found: true, voice: "male", spokenText: "Hammaga salom, men Azizman." }],
+    ]);
+    const slicedLaugh = slicePcmByAlignmentSegments(
+      blockPcm,
+      [
+        { index: 0, speaker: "Азиз", text: "Qani, yana bir marta! <laugh>", gender: "male" },
+        { index: 1, speaker: "Азиз", text: "Hammaga salom, men Azizman.", gender: "male" },
+      ],
+      segMap
+    );
+    assert.equal(slicedLaugh.missingIndices.length, 0);
+    const clip0 = slicedLaugh.clips[0]!;
+    const clip1 = slicedLaugh.clips[1]!;
+    assert.ok(clip0 && clip1, "Both clips must be sliced cleanly");
+    assert.equal(clip0.boundarySnapped, true);
+    assert.equal(clip1.boundarySnapped, true);
+
+    // Turn 0 kept the full laughter (2.12s + 0.08s tail = ~2.20s), without the 1.5s pause
+    const c0Dur = clip0.pcm.length / PCM_BYTES_PER_SEC;
+    assert.ok(
+      c0Dur >= 2.14 && c0Dur <= 2.28,
+      `Turn 0 with <laugh> must keep laugh (~2.20s) and exclude 1.5s pause, got ${c0Dur.toFixed(3)}s`
+    );
+
+    // Turn 1 starts at its first word (including quiet H!), with <= 50ms lead silence and WITHOUT the 1.5s pause!
+    const c1LeadMs = findFirstSpeechMsInPcm(clip1.pcm, -45, 30);
+    const c1Dur = clip1.pcm.length / PCM_BYTES_PER_SEC;
+    assert.ok(
+      c1LeadMs >= 20 && c1LeadMs <= 50,
+      `Turn 1 after <laugh> must have <= 50ms lead silence before first word, got ${c1LeadMs}ms`
+    );
+    // Expected Turn 1: 0.04s lead + 0.08s H + 1.30s body + 0.08s tail = ~1.50s
+    assert.ok(
+      c1Dur >= 1.44 && c1Dur <= 1.56,
+      `Turn 1 after <laugh> expected ~1.50s (preserving quiet H, excluding 1.5s pause), got ${c1Dur.toFixed(3)}s`
+    );
+    // Verify the 1.5s pause between 2.12s and 3.62s fell into NEITHER clip:
+    // clip0.endMs <= 2300ms and clip1.startMs >= 3400ms
+    assert.ok(
+      clip0.endMs <= 2350 && clip1.startMs >= 3400,
+      `1.5s pause between laugh (2.12s) and next word (3.62s) leaked into a clip! clip0.endMs=${clip0.endMs}, clip1.startMs=${clip1.startMs}`
+    );
+    console.log(
+      `  ✓ 7c: <laugh> boundary clean: clip0=${c0Dur.toFixed(2)}s (endMs=${clip0.endMs}), clip1=${c1Dur.toFixed(2)}s (startMs=${clip1.startMs}, lead=${c1LeadMs}ms)`
+    );
+  }
+
+  // 7d. Fake Tiggo 8 Scenes 1-2 sub-block with 0.3-1.8s noisy silence injected before clips -> every turn starts <= 0.1s after timecode!
+  {
+    clearBlockCache();
+    // Inject realistic 0.3..1.8s leading silence (matching A #03=1.73s, A #08=0.50s, B #06=0.35s, etc.)
+    const injectedLeadingNoise = [
+      0.45, // #01
+      0.35, // #02
+      1.73, // #03 (exact Variant A Aziz delay!)
+      0.40, // #04
+      0.55, // #05
+      0.35, // #06
+      0.60, // #07
+      0.50, // #08
+      0.30, // #09
+      0.45, // #10
+      0.85, // #11
+      0.42, // #12
+      0.52, // #13
+      1.20, // #14
+      0.38, // #15
+      1.80, // #16 (max 1.8s)
+    ];
+    assert.equal(injectedLeadingNoise.length, scenes12Turns.length);
+
+    setFakeDubbingFaultInjectorForTesting(() => ({
+      // Scale synthetic speech so every turn's speech itself fits inside its timecode window
+      // (so any delay > 0.1s would strictly come from untrimmed leading silence!)
+      durationMultiplier: 0.72,
+      perTurnLeadingNoiseSec: injectedLeadingNoise,
+    }));
+    const noisySubRes = await synthesizeDialogueInMacroBlocks(trapAi, {
+      turns: scenes12Turns,
+      speakerMap,
+      strictTimeWindow: true,
+      bypassCache: true,
+      useDeliveryEmotions: true,
+      pronunciationDictionary: DEFAULT_PRONUNCIATION_DICTIONARY,
+    });
+    setFakeDubbingFaultInjectorForTesting(null);
+
+    assert.equal(noisySubRes.failedSubBlocks.length, 0, `Noisy Tiggo 8 Scenes 1-2 must pass QA: ${JSON.stringify(noisySubRes.failedSubBlocks)}`);
+    assert.equal(noisySubRes.turns.length, 16);
+
+    const stitchedNoisy = stitchDialogueTurnsClient({
+      turns: noisySubRes.turns.map((r, i) => ({
+        ...scenes12Turns[i].rawTurn,
+        id: r.id,
+        speakerId: r.speakerId,
+        speakerName: r.speakerName,
+        text: r.text,
+        sceneTitle: scenes12Turns[i].sceneTitle,
+        startSec: scenes12Turns[i].startSec,
+        endSec: scenes12Turns[i].endSec,
+        audioBase64: r.wavBase64,
+        dubbedDurationSec: r.dubbedDurationSec,
+        originalDurationSec: r.originalDurationSec,
+        atempoApplied: r.atempoApplied,
+        syncStatus: r.syncStatus,
+        qa: r.qa,
+        qaReason: r.qaReason,
+        slicingMethod: r.slicingMethod,
+        needsShorten: r.needsShorten,
+        subBlockIndex: r.subBlockIndex,
+      })),
+      masterAudioMode: "time_aligned",
+      totalVideoDurationSec: 94,
+    });
+
+    const masterWavBuf = Buffer.from(stitchedNoisy.masterWavBytes);
+    const masterPcm = masterWavBuf.subarray(44);
+    let maxDelaySec = 0;
+
+    for (let i = 0; i < scenes12Turns.length; i++) {
+      const schedStartSec = scenes12Turns[i].startSec ?? 0;
+      const nextSchedStartSec =
+        i + 1 < scenes12Turns.length ? (scenes12Turns[i + 1].startSec ?? 94) : 94;
+      const slotStartSample = Math.round(schedStartSec * PCM_SAMPLE_RATE);
+      const slotEndSample = Math.min(
+        Math.floor(masterPcm.length / 2),
+        Math.round(nextSchedStartSec * PCM_SAMPLE_RATE)
+      );
+      const slotPcm = masterPcm.subarray(slotStartSample * 2, slotEndSample * 2);
+      const onsetOffsetMs = findFirstSpeechMsInPcm(slotPcm, -45, 30);
+      assert.ok(onsetOffsetMs >= 0, `Turn #${i + 1} speech not found in its slot [${schedStartSec}..${nextSchedStartSec}s]`);
+      const delaySec = onsetOffsetMs / 1000;
+      if (delaySec > maxDelaySec) maxDelaySec = delaySec;
+      assert.ok(
+        delaySec <= 0.1,
+        `Turn #${i + 1} (injected ${injectedLeadingNoise[i]}s leading noise) started +${delaySec.toFixed(3)}s after timecode ${schedStartSec}s (limit <= 0.100s)!`
+      );
+    }
+    console.log(
+      `  ✓ 7d: Tiggo 8 Scenes 1-2 (16 turns with 0.30–1.80s leading noisy silence) -> ALL 16 turns start <= 0.10s after timecode (max delay = +${maxDelaySec.toFixed(3)}s)`
+    );
+  }
+  console.log("✅ TEST 7 PASSED: RMS trimSilenceEdgesPcm, quiet H, trailing <laugh> boundary, and Tiggo 8 0.3-1.8s silence tests all passed.");
+
   assert.equal(realApiCallsDetected, 0, "MUST have 0 real Gemini API calls across entire test suite!");
   clearBlockCache();
-  console.log("🎉 ALL v3 DUBBING QUALITY, CACHE, ALIGNMENT & 3-SCRIPT TESTS PASSED (0 REAL API CALLS)!");
+  console.log("🎉 ALL v3 DUBBING QUALITY, CACHE, ALIGNMENT, TRIMMING & 3-SCRIPT TESTS PASSED (0 REAL API CALLS)!");
 }
 
 runAllStageTests().catch((err) => {
