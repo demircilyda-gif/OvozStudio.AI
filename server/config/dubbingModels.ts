@@ -87,6 +87,14 @@ export const DUBBING_MODELS_CONFIG = {
   ttsDailyQuotaLimit: Number(process.env.GEMINI_TTS_DAILY_LIMIT || 100),
 
   /**
+   * Лимиты подблока озвучки (можно переопределять через env):
+   * - DUBBING_SUBBLOCK_MAX_TURNS (по умолчанию 8 реплик)
+   * - DUBBING_SUBBLOCK_MAX_SEC (по умолчанию 40 секунд суммарных окон)
+   */
+  subBlockMaxTurns: Number(process.env.DUBBING_SUBBLOCK_MAX_TURNS || 8),
+  subBlockMaxSec: Number(process.env.DUBBING_SUBBLOCK_MAX_SEC || 40),
+
+  /**
    * Единое предельное ускорение ffmpeg atempo (до 1.10x) при укладке в таймкоды (раздел 2.6).
    */
   maxAtempoSpeedRatio: Number(process.env.DUBBING_MAX_ATEMPO || 1.1),

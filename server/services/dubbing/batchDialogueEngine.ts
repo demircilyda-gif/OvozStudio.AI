@@ -353,8 +353,8 @@ export function splitTurnsIntoDubbingSubBlocks(
   options: SubBlockSplitOptions = {}
 ): BatchInputTurn[][] {
   return planDialogueSubBlocks(turns, {
-    maxTurns: options.maxTurns ?? 8,
-    maxWindowSec: options.maxWindowSec ?? 40,
+    maxTurns: options.maxTurns ?? DUBBING_MODELS_CONFIG.subBlockMaxTurns,
+    maxWindowSec: options.maxWindowSec ?? DUBBING_MODELS_CONFIG.subBlockMaxSec,
     macroBlockOptions: options.macroBlockOptions ?? {
       targetSize: 22,
       minSize: 12,
@@ -402,7 +402,10 @@ export function estimateDubbingTtsCalls(
   }
   const subBlocksCount =
     Array.isArray(turns) && turns.length > 0
-      ? planDialogueSubBlocks(turns).length
+      ? planDialogueSubBlocks(turns, {
+          maxTurns: DUBBING_MODELS_CONFIG.subBlockMaxTurns,
+          maxWindowSec: DUBBING_MODELS_CONFIG.subBlockMaxSec,
+        }).length
       : Math.max(1, Math.ceil(turnCount / 7));
   const isModeA = !usesClonedVoice && uniqueSpeakersCount <= 2;
   const baseTtsCalls = isModeA
@@ -2207,8 +2210,8 @@ export async function synthesizeDialogueInMacroBlocks(
     flushExplicit();
   } else {
     const autoPlanned = planDialogueSubBlocks(turns, {
-      maxTurns: 8,
-      maxWindowSec: 40,
+      maxTurns: DUBBING_MODELS_CONFIG.subBlockMaxTurns,
+      maxWindowSec: DUBBING_MODELS_CONFIG.subBlockMaxSec,
       macroBlockOptions: {
         targetSize: 22,
         minSize: 12,
