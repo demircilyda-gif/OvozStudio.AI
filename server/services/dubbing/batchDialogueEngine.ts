@@ -220,6 +220,10 @@ export function setTtsPayloadObserverForTesting(
   ttsPayloadObserver = fn;
 }
 
+function isDubbingKieFallbackEnabled(): boolean {
+  return process.env.DUBBING_ENABLE_KIE_FALLBACK === "1";
+}
+
 function isQuota429Error(err: any): boolean {
   const status = err?.status || err?.statusCode || err?.code;
   const msg = String(err?.message || err || "").toLowerCase();
@@ -231,6 +235,41 @@ function isQuota429Error(err: any): boolean {
     msg.includes("quota exceeded") ||
     msg.includes("rate limit")
   );
+}
+
+function isDailyQuota429Error(err: any): boolean {
+  if (!isQuota429Error(err)) return false;
+  const msg = String(err?.message || err || "").toLowerCase();
+  return /per[\s_-]?day|rpd|daily|requestsperday|generaterequestsperday/.test(msg);
+}
+
+function formatRealGeminiTtsError(err: any, model: string): Error {
+  const rawMessage = String(err?.message || err || "Unknown Gemini TTS error").trim();
+  const status = err?.status || err?.statusCode || err?.code;
+  let parsedCode: string | number | undefined = status;
+  let parsedStatusText = "";
+  let parsedDetails = rawMessage;
+
+  // GoogleGenAI SDK часто оборачивает JSON ответа прямо в err.message
+  const jsonStart = rawMessage.indexOf("{");
+  if (jsonStart >= 0) {
+    try {
+      const parsed = JSON.parse(rawMessage.slice(jsonStart));
+      const inner = parsed?.error || parsed;
+      if (inner?.code) parsedCode = inner.code;
+      if (inner?.status) parsedStatusText = String(inner.status);
+      if (inner?.message) parsedDetails = String(inner.message).trim();
+    } catch {
+      // оставляем rawMessage как есть
+    }
+  }
+
+  const codePart = [parsedCode, parsedStatusText].filter(Boolean).join(" ");
+  const prefix = codePart ? `Gemini TTS (${model}) [${codePart}]` : `Gemini TTS (${model})`;
+  const formatted = new Error(`${prefix}: ${parsedDetails}`);
+  (formatted as any).status = parsedCode;
+  (formatted as any).originalError = err;
+  return formatted;
 }
 
 // =========================================================================
@@ -1108,24 +1147,28 @@ async function synthesizeMissingSingleTurnPcm(
       sentText: cleanText,
     };
   } catch (err: any) {
-    if (isQuota429Error(err) && !speaker.isCloned) {
-      markGoogleTtsQuotaExhaustedToday();
-      const kieRes = await synthesizeDialogueBlockViaKieAi([
-        {
-          speaker: speaker.speakerName,
-          voice: speaker.baseVoice || "Charon",
-          text: cleanText,
-          style: cleanStyle,
-        },
-      ]);
-      return {
-        pcm: trimSilenceEdgesPcm(kieRes.pcm),
-        provider: "kie.ai",
-        sentStyle: cleanStyle,
-        sentText: cleanText,
-      };
+    if (isQuota429Error(err)) {
+      if (isDailyQuota429Error(err)) {
+        markGoogleTtsQuotaExhaustedToday();
+      }
+      if (isDubbingKieFallbackEnabled() && !speaker.isCloned) {
+        const kieRes = await synthesizeDialogueBlockViaKieAi([
+          {
+            speaker: speaker.speakerName,
+            voice: speaker.baseVoice || "Charon",
+            text: cleanText,
+            style: cleanStyle,
+          },
+        ]);
+        return {
+          pcm: trimSilenceEdgesPcm(kieRes.pcm),
+          provider: "kie.ai",
+          sentStyle: cleanStyle,
+          sentText: cleanText,
+        };
+      }
     }
-    throw err;
+    throw formatRealGeminiTtsError(err, DUBBING_MODELS_CONFIG.ttsDubbingModel);
   }
 }
 
@@ -1548,32 +1591,38 @@ async function runSingleSubBlockAttempt(
         );
       } catch (err: any) {
         if (isQuota429Error(err)) {
-          markGoogleTtsQuotaExhaustedToday();
-          const kieTurns: KieDialogueTurnInput[] = subTurns.map((t, idx) => {
-            const isFirst = t.speakerId === sp1.speakerId;
-            return {
-              speaker: isFirst ? tag1 : tag2,
-              voice: isFirst ? sp1.baseVoice || "Charon" : sp2.baseVoice || "Kore",
-              text: resolvedSentTexts[idx],
-              style: resolvedSentStyles[idx],
-            };
-          });
-          if (ttsPayloadObserver) {
-            ttsPayloadObserver({
-              channel: "kie_mode_a",
-              parts: kieTurns.map((k) => ({
-                text: k.text,
-                style: k.style || "",
-                speaker: k.speaker,
-              })),
-            });
+          if (isDailyQuota429Error(err)) {
+            markGoogleTtsQuotaExhaustedToday();
           }
-          const kieRes = await synthesizeDialogueBlockViaKieAi(kieTurns);
-          ttsCalls += 1;
-          providers.push("kie.ai");
-          blockPcm = kieRes.pcm;
+          if (isDubbingKieFallbackEnabled()) {
+            const kieTurns: KieDialogueTurnInput[] = subTurns.map((t, idx) => {
+              const isFirst = t.speakerId === sp1.speakerId;
+              return {
+                speaker: isFirst ? tag1 : tag2,
+                voice: isFirst ? sp1.baseVoice || "Charon" : sp2.baseVoice || "Kore",
+                text: resolvedSentTexts[idx],
+                style: resolvedSentStyles[idx],
+              };
+            });
+            if (ttsPayloadObserver) {
+              ttsPayloadObserver({
+                channel: "kie_mode_a",
+                parts: kieTurns.map((k) => ({
+                  text: k.text,
+                  style: k.style || "",
+                  speaker: k.speaker,
+                })),
+              });
+            }
+            const kieRes = await synthesizeDialogueBlockViaKieAi(kieTurns);
+            ttsCalls += 1;
+            providers.push("kie.ai");
+            blockPcm = kieRes.pcm;
+          } else {
+            throw formatRealGeminiTtsError(err, DUBBING_MODELS_CONFIG.ttsDubbingModel);
+          }
         } else {
-          throw err;
+          throw formatRealGeminiTtsError(err, DUBBING_MODELS_CONFIG.ttsDubbingModel);
         }
       }
     }
@@ -1726,8 +1775,11 @@ async function runSingleSubBlockAttempt(
         );
       } catch (err: any) {
         if (isQuota429Error(err)) {
-          markGoogleTtsQuotaExhaustedToday();
-          if (sp.isCloned) {
+          const isDaily = isDailyQuota429Error(err);
+          if (isDaily) {
+            markGoogleTtsQuotaExhaustedToday();
+          }
+          if (sp.isCloned && isDaily) {
             const doneTotal = startingCompletedBlocks + blocksCompletedSoFar;
             return {
               clips: [],
@@ -1748,28 +1800,32 @@ async function runSingleSubBlockAttempt(
               quotaPauseMessageRu: `Дневной лимит исчерпан. Готово ${doneTotal} из ${totalProjectBlocks} подблоков, продолжим после 13:00 по Ташкенту`,
             };
           }
-          const kieTurns: KieDialogueTurnInput[] = localIndices.map((origIdx) => ({
-            speaker: sp.speakerName,
-            voice: sp.baseVoice || "Charon",
-            text: resolvedSentTexts[origIdx],
-            style: resolvedSentStyles[origIdx],
-          }));
-          if (ttsPayloadObserver) {
-            ttsPayloadObserver({
-              channel: "kie_mode_b",
-              parts: kieTurns.map((k) => ({
-                text: k.text,
-                style: k.style || "",
-                speaker: k.speaker,
-              })),
-            });
+          if (isDubbingKieFallbackEnabled() && !sp.isCloned) {
+            const kieTurns: KieDialogueTurnInput[] = localIndices.map((origIdx) => ({
+              speaker: sp.speakerName,
+              voice: sp.baseVoice || "Charon",
+              text: resolvedSentTexts[origIdx],
+              style: resolvedSentStyles[origIdx],
+            }));
+            if (ttsPayloadObserver) {
+              ttsPayloadObserver({
+                channel: "kie_mode_b",
+                parts: kieTurns.map((k) => ({
+                  text: k.text,
+                  style: k.style || "",
+                  speaker: k.speaker,
+                })),
+              });
+            }
+            const kieRes = await synthesizeDialogueBlockViaKieAi(kieTurns);
+            ttsCalls += 1;
+            providers.push("kie.ai");
+            spBlockPcm = kieRes.pcm;
+          } else {
+            throw formatRealGeminiTtsError(err, DUBBING_MODELS_CONFIG.ttsDubbingModel);
           }
-          const kieRes = await synthesizeDialogueBlockViaKieAi(kieTurns);
-          ttsCalls += 1;
-          providers.push("kie.ai");
-          spBlockPcm = kieRes.pcm;
         } else {
-          throw err;
+          throw formatRealGeminiTtsError(err, DUBBING_MODELS_CONFIG.ttsDubbingModel);
         }
       }
     }
