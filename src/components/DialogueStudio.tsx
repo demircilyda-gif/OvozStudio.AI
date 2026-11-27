@@ -79,11 +79,25 @@ import {
 } from '../utils/db';
 import {
   DUBBING_CACHE_VERSION,
+  DEFAULT_DUBBING_TTS_MODEL,
   computeSubBlockClientHash,
   buildSubBlockCacheKey,
   planSubBlockCacheExecution,
   type CachedDialogueSubBlock,
 } from '../utils/dubbingSubBlockCache';
+import { SUB_BLOCK_MAX_TURNS, SUB_BLOCK_MAX_SEC } from '../utils/dubbingLimits';
+import {
+  DEFAULT_BASE_STYLE_FEMALE,
+  DEFAULT_BASE_STYLE_MALE,
+  getDefaultBaseStyleForGender,
+  buildTurnTtsStyle,
+  prepareTurnTextForTts,
+} from '../utils/dubbingStyle';
+import {
+  DEFAULT_PRONUNCIATION_DICTIONARY,
+  normalizePronunciationDictionary,
+  type PronunciationDictionaryEntry,
+} from '../utils/pronunciationDictionary';
 import { useAuth } from '../context/AuthContext';
 import { YUGAY_BURKHANOV_TURNS, YUGAY_BURKHANOV_METADATA } from '../data/yugayBurkhanovPreset';
 
@@ -363,8 +377,12 @@ interface SavedDialogueHistoryItem {
   }>;
   speaker1Name: string;
   speaker1VoiceId: string;
+  speaker1BaseStyle?: string;
   speaker2Name: string;
   speaker2VoiceId: string;
+  speaker2BaseStyle?: string;
+  useDeliveryEmotions?: boolean;
+  pronunciationDictionary?: PronunciationDictionaryEntry[];
   masterAudioMode: 'continuous' | 'time_aligned';
   totalVideoDurationSec: number;
   estimatedCostUsd: number;
@@ -401,6 +419,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   const [speaker1Name, setSpeaker1Name] = useState<string>('Спикер 1 (Ж)');
   const [speaker1Gender, setSpeaker1Gender] = useState<'female' | 'male'>('female');
   const [speaker1Role, setSpeaker1Role] = useState<string>('Ведущая · Эмоциональный голос');
+  const [speaker1BaseStyle, setSpeaker1BaseStyle] = useState<string>(DEFAULT_BASE_STYLE_FEMALE);
   const [speaker1Tempo, setSpeaker1Tempo] = useState<string>('1.0x');
 
   // Speaker 2 (Default: Cloned Male Voice or male expert voice)
@@ -411,8 +430,15 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   const [speaker2Name, setSpeaker2Name] = useState<string>('Спикер 2 (М)');
   const [speaker2Role, setSpeaker2Role] = useState<string>('Эксперт · Собеседник');
   const [speaker2Gender, setSpeaker2Gender] = useState<'female' | 'male'>('male');
+  const [speaker2BaseStyle, setSpeaker2BaseStyle] = useState<string>(DEFAULT_BASE_STYLE_MALE);
   const [speaker2Tempo, setSpeaker2Tempo] = useState<string>('1.0x');
   const [speaker2Timbre, setSpeaker2Timbre] = useState<string>('Salobatli & Ishbilarmon');
+
+  // Project-level dubbing style & pronunciation settings
+  const [useDeliveryEmotions, setUseDeliveryEmotions] = useState<boolean>(true);
+  const [pronunciationDictionary, setPronunciationDictionary] = useState<
+    PronunciationDictionaryEntry[]
+  >(() => DEFAULT_PRONUNCIATION_DICTIONARY.map((entry) => ({ ...entry })));
 
   // Extra speakers (HOST_3, HOST_4...) when storyboard has >2 speakers
   const [extraSpeakers, setExtraSpeakers] = useState<
@@ -422,6 +448,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       gender: 'female' | 'male';
       voiceId: string;
       baseVoice: string;
+      baseStyle?: string;
       description?: string;
     }>
   >([]);
@@ -658,8 +685,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   const plannedSubBlocks = useMemo(() => {
     if (turns.length === 0) return [];
     const subs = planDialogueSubBlocks(turns, {
-      maxTurns: 8,
-      maxWindowSec: 40,
+      maxTurns: SUB_BLOCK_MAX_TURNS,
+      maxWindowSec: SUB_BLOCK_MAX_SEC,
       macroBlockOptions: { maxSize: 25, minPauseSec: 0.5 },
     });
     return subs.map((sb) => ({
@@ -813,8 +840,22 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         setTotalVideoDurationSec(Number(loadedDraft.totalVideoDurationSec) || 0);
         if (loadedDraft.speaker1Name) setSpeaker1Name(loadedDraft.speaker1Name);
         if (loadedDraft.speaker1VoiceId) setSpeaker1VoiceId(loadedDraft.speaker1VoiceId);
+        if (typeof loadedDraft.speaker1BaseStyle === 'string') {
+          setSpeaker1BaseStyle(loadedDraft.speaker1BaseStyle);
+        }
         if (loadedDraft.speaker2Name) setSpeaker2Name(loadedDraft.speaker2Name);
         if (loadedDraft.speaker2VoiceId) setSpeaker2VoiceId(loadedDraft.speaker2VoiceId);
+        if (typeof loadedDraft.speaker2BaseStyle === 'string') {
+          setSpeaker2BaseStyle(loadedDraft.speaker2BaseStyle);
+        }
+        if (typeof loadedDraft.useDeliveryEmotions === 'boolean') {
+          setUseDeliveryEmotions(loadedDraft.useDeliveryEmotions);
+        }
+        if (Array.isArray(loadedDraft.pronunciationDictionary)) {
+          setPronunciationDictionary(
+            normalizePronunciationDictionary(loadedDraft.pronunciationDictionary)
+          );
+        }
         setProjectCacheId(
           typeof loadedDraft.projectCacheId === 'string' && loadedDraft.projectCacheId.trim()
             ? loadedDraft.projectCacheId
@@ -831,7 +872,11 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         setEstimatedCostUsd(0);
         setTotalVideoDurationSec(0);
         setSpeaker1Name('Спикер 1 (Ж)');
+        setSpeaker1BaseStyle(DEFAULT_BASE_STYLE_FEMALE);
         setSpeaker2Name('Спикер 2 (М)');
+        setSpeaker2BaseStyle(DEFAULT_BASE_STYLE_MALE);
+        setUseDeliveryEmotions(true);
+        setPronunciationDictionary(DEFAULT_PRONUNCIATION_DICTIONARY.map((e) => ({ ...e })));
         setProjectCacheId(`draft_${user.uid}`);
         setMasterAudioMode('time_aligned');
       }
@@ -861,8 +906,12 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         totalVideoDurationSec,
         speaker1Name,
         speaker1VoiceId,
+        speaker1BaseStyle,
         speaker2Name,
         speaker2VoiceId,
+        speaker2BaseStyle,
+        useDeliveryEmotions,
+        pronunciationDictionary,
         masterAudioMode,
         updatedAt: new Date().toISOString(),
       };
@@ -882,8 +931,12 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     totalVideoDurationSec,
     speaker1Name,
     speaker1VoiceId,
+    speaker1BaseStyle,
     speaker2Name,
     speaker2VoiceId,
+    speaker2BaseStyle,
+    useDeliveryEmotions,
+    pronunciationDictionary,
     masterAudioMode,
   ]);
 
@@ -925,21 +978,62 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     ].join('|');
   };
 
+  const getSpeakerBaseStyleForTurn = (turn: DialogueTurn): string => {
+    if (turn.speakerId === 'HOST_1') return speaker1BaseStyle;
+    if (turn.speakerId === 'HOST_2') return speaker2BaseStyle;
+    const extra = extraSpeakers.find(
+      (s) => s.speakerId === turn.speakerId || s.name === turn.speakerName
+    );
+    return (
+      extra?.baseStyle ??
+      getDefaultBaseStyleForGender(extra?.gender || turn.speakerGender)
+    );
+  };
+
   const getTurnStyleKeyForCache = (turn: DialogueTurn): string => {
-    const roleKey =
+    const gender =
       turn.speakerId === 'HOST_1'
-        ? speaker1Role || ''
+        ? speaker1Gender
         : turn.speakerId === 'HOST_2'
-        ? speaker2Role || ''
+        ? speaker2Gender
         : extraSpeakers.find((s) => s.speakerId === turn.speakerId || s.name === turn.speakerName)
-            ?.description || '';
-    return [
-      turn.speechStyle || '',
-      turn.intonationRu || '',
-      turn.emotion || '',
-      turn.pace || '',
-      roleKey,
-    ].join('|');
+            ?.gender || turn.speakerGender;
+    return buildTurnTtsStyle({
+      baseStyle: getSpeakerBaseStyleForTurn(turn),
+      gender,
+      intonationRu: turn.intonationRu,
+      emotion: turn.emotion,
+      useDeliveryEmotions,
+    }).style;
+  };
+
+  const makeTurnTtsTextResolver = (allScriptTurns: DialogueTurn[]) => {
+    const indexById = new Map<string, number>();
+    allScriptTurns.forEach((t, idx) => indexById.set(t.id, idx));
+    return (turn: DialogueTurn): string => {
+      const idx = indexById.get(turn.id) ?? -1;
+      const startSec = typeof turn.startSec === 'number' ? turn.startSec : 0;
+      const endSec =
+        typeof turn.endSec === 'number'
+          ? turn.endSec
+          : startSec + (typeof turn.durationSec === 'number' ? turn.durationSec : 0);
+      const windowSec = Math.max(0.4, endSec - startSec);
+      const nextTurn = idx >= 0 && idx + 1 < allScriptTurns.length ? allScriptTurns[idx + 1] : null;
+      const gapAfterSec =
+        typeof turn.gapAfterSec === 'number' && turn.gapAfterSec >= 0
+          ? turn.gapAfterSec
+          : nextTurn && typeof nextTurn.startSec === 'number'
+          ? Math.max(0, nextTurn.startSec - endSec)
+          : 0;
+      return prepareTurnTextForTts({
+        rawText: turn.text || '',
+        intonationRu: turn.intonationRu,
+        useDeliveryEmotions,
+        pronunciationDictionary,
+        windowSec,
+        gapAfterSec,
+      }).ttsText;
+    };
   };
 
   // Persist ONLY complete v3 sub-blocks where EVERY turn has audioBase64 and qa = 'ok' | 'retried'
@@ -948,10 +1042,11 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     synthesizedById: Map<string, DialogueTurn>
   ) => {
     const allSubs = planDialogueSubBlocks(fullScriptTurns, {
-      maxTurns: 8,
-      maxWindowSec: 40,
+      maxTurns: SUB_BLOCK_MAX_TURNS,
+      maxWindowSec: SUB_BLOCK_MAX_SEC,
       macroBlockOptions: { maxSize: 25, minPauseSec: 0.5 },
     });
+    const getTurnTtsTextForCache = makeTurnTtsTextResolver(fullScriptTurns);
     const entries: CachedDialogueSubBlock[] = [];
     const now = Date.now();
 
@@ -982,6 +1077,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         subBlockTurns: sb.turns,
         getSpeakerVoiceKey: getSpeakerVoiceKeyForCache,
         getTurnStyleKey: getTurnStyleKeyForCache,
+        getTurnTtsText: getTurnTtsTextForCache,
+        ttsModel: DEFAULT_DUBBING_TTS_MODEL,
       });
       const cacheKey = buildSubBlockCacheKey(projectCacheKey, subBlockHash);
 
@@ -1008,6 +1105,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           slicingMethod: rt.slicingMethod,
           shiftedStartBySec: rt.shiftedStartBySec,
           needsShorten: rt.needsShorten,
+          generationMode: rt.generationMode,
+          lufsBefore: rt.lufsBefore,
+          lufsAfter: rt.lufsAfter,
           subBlockIndex: sb.subBlockIndex,
           startTime: rt.startTime,
           endTime: rt.endTime,
@@ -1027,15 +1127,18 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     ignoreCache = false
   ) => {
     const previewSubs = planDialogueSubBlocks(fullScriptTurns, {
-      maxTurns: 8,
-      maxWindowSec: 40,
+      maxTurns: SUB_BLOCK_MAX_TURNS,
+      maxWindowSec: SUB_BLOCK_MAX_SEC,
       macroBlockOptions: { maxSize: 25, minPauseSec: 0.5 },
     });
+    const getTurnTtsTextForCache = makeTurnTtsTextResolver(fullScriptTurns);
     const keys = previewSubs.map((sb) => {
       const hash = computeSubBlockClientHash({
         subBlockTurns: sb.turns,
         getSpeakerVoiceKey: getSpeakerVoiceKeyForCache,
         getTurnStyleKey: getTurnStyleKeyForCache,
+        getTurnTtsText: getTurnTtsTextForCache,
+        ttsModel: DEFAULT_DUBBING_TTS_MODEL,
       });
       return buildSubBlockCacheKey(projectCacheKey, hash);
     });
@@ -1048,9 +1151,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       projectKey: projectCacheKey,
       getSpeakerVoiceKey: getSpeakerVoiceKeyForCache,
       getTurnStyleKey: getTurnStyleKeyForCache,
+      getTurnTtsText: getTurnTtsTextForCache,
+      ttsModel: DEFAULT_DUBBING_TTS_MODEL,
       cachedSubBlocksByKey: cachedMap,
       ignoreCache,
-      maxTurnsPerRequest: 25,
     });
   };
 
@@ -1088,6 +1192,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
             slicingMethod: rec.slicingMethod ?? scriptTurn.slicingMethod,
             shiftedStartBySec: rec.shiftedStartBySec ?? scriptTurn.shiftedStartBySec,
             needsShorten: rec.needsShorten ?? scriptTurn.needsShorten,
+            generationMode: rec.generationMode ?? scriptTurn.generationMode,
+            lufsBefore: rec.lufsBefore ?? scriptTurn.lufsBefore,
+            lufsAfter: rec.lufsAfter ?? scriptTurn.lufsAfter,
             subBlockIndex: item.subBlock.subBlockIndex,
             startTime: rec.startTime ?? scriptTurn.startTime,
             endTime: rec.endTime ?? scriptTurn.endTime,
@@ -1136,6 +1243,10 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     speaker2Profile?.isReplicatedVoice,
     speaker1Gender,
     speaker2Gender,
+    speaker1BaseStyle,
+    speaker2BaseStyle,
+    useDeliveryEmotions,
+    pronunciationDictionary,
     speaker1Tempo,
     speaker2Tempo,
     speaker1Profile?.timbre,
@@ -1312,8 +1423,12 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       noSpeechIntervals: params.noSpeechIntervals ?? noSpeechIntervals,
       speaker1Name,
       speaker1VoiceId,
+      speaker1BaseStyle,
       speaker2Name,
       speaker2VoiceId,
+      speaker2BaseStyle,
+      useDeliveryEmotions,
+      pronunciationDictionary,
       masterAudioMode,
       totalVideoDurationSec: params.totalVideoDurationSec ?? totalVideoDurationSec,
       estimatedCostUsd: params.estimatedCostUsd ?? estimatedCostUsd,
@@ -1343,8 +1458,16 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     setTopic(item.title || '');
     setSpeaker1Name(item.speaker1Name || 'Спикер 1 (Ж)');
     if (item.speaker1VoiceId) setSpeaker1VoiceId(item.speaker1VoiceId);
+    if (typeof item.speaker1BaseStyle === 'string') setSpeaker1BaseStyle(item.speaker1BaseStyle);
     setSpeaker2Name(item.speaker2Name || 'Спикер 2 (М)');
     if (item.speaker2VoiceId) setSpeaker2VoiceId(item.speaker2VoiceId);
+    if (typeof item.speaker2BaseStyle === 'string') setSpeaker2BaseStyle(item.speaker2BaseStyle);
+    if (typeof item.useDeliveryEmotions === 'boolean') {
+      setUseDeliveryEmotions(item.useDeliveryEmotions);
+    }
+    if (Array.isArray(item.pronunciationDictionary)) {
+      setPronunciationDictionary(normalizePronunciationDictionary(item.pronunciationDictionary));
+    }
     setMasterAudioMode('time_aligned');
     setTotalVideoDurationSec(Number(item.totalVideoDurationSec) || 0);
     setEstimatedCostUsd(Number(item.estimatedCostUsd) || 0);
@@ -1463,7 +1586,19 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         );
         return;
       }
-      setSpeaker1Gender(isFemale ? 'female' : 'male');
+      const nextGender1: 'female' | 'male' = isFemale ? 'female' : 'male';
+      setSpeaker1Gender(nextGender1);
+      setSpeaker1BaseStyle((prev) => {
+        const trimmed = prev.trim();
+        if (
+          !trimmed ||
+          trimmed === DEFAULT_BASE_STYLE_FEMALE ||
+          trimmed === DEFAULT_BASE_STYLE_MALE
+        ) {
+          return getDefaultBaseStyleForGender(nextGender1);
+        }
+        return prev;
+      });
       const rawName = chosen.name || chosen.id;
       const nameMatch = rawName.match(/^([^(]+)/);
       const newName = (nameMatch?.[1] || rawName).trim();
@@ -1499,7 +1634,19 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       return;
     }
 
-    setSpeaker2Gender(isFemale ? 'female' : 'male');
+    const nextGender2: 'female' | 'male' = isFemale ? 'female' : 'male';
+    setSpeaker2Gender(nextGender2);
+    setSpeaker2BaseStyle((prev) => {
+      const trimmed = prev.trim();
+      if (
+        !trimmed ||
+        trimmed === DEFAULT_BASE_STYLE_FEMALE ||
+        trimmed === DEFAULT_BASE_STYLE_MALE
+      ) {
+        return getDefaultBaseStyleForGender(nextGender2);
+      }
+      return prev;
+    });
     const rawName = chosen.name || chosen.id;
     const nameMatch = rawName.match(/^([^(]+)(?:\((.*?)\))?/);
     const extractedName = (nameMatch?.[1] || rawName).trim();
@@ -1684,6 +1831,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     if (sp1) {
       setSpeaker1Name(sp1.name);
       setSpeaker1Gender(sp1.gender);
+      setSpeaker1BaseStyle(sp1.baseStyle || getDefaultBaseStyleForGender(sp1.gender));
       if (pickedVoice1) {
         setSpeaker1VoiceId(pickedVoice1.id);
       }
@@ -1691,10 +1839,17 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     if (sp2) {
       setSpeaker2Name(sp2.name);
       setSpeaker2Gender(sp2.gender);
+      setSpeaker2BaseStyle(sp2.baseStyle || getDefaultBaseStyleForGender(sp2.gender));
       setSpeaker2GenderFilter('all');
       if (pickedVoice2) {
         setSpeaker2VoiceId(pickedVoice2.id);
       }
+    }
+    if (typeof result.useDeliveryEmotions === 'boolean') {
+      setUseDeliveryEmotions(result.useDeliveryEmotions);
+    }
+    if (Array.isArray(result.pronunciationDictionary)) {
+      setPronunciationDictionary(normalizePronunciationDictionary(result.pronunciationDictionary));
     }
 
     const turnsWithBuiltInVoices = result.turns.map((t) => {
@@ -1751,13 +1906,26 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     }
 
     const speakersMeta: ParsedSpeakerInfo[] = [
-      { speakerId: 'HOST_1', name: speaker1Name, gender: speaker1Gender },
-      { speakerId: 'HOST_2', name: speaker2Name, gender: speaker2Gender },
+      {
+        speakerId: 'HOST_1',
+        name: speaker1Name,
+        gender: speaker1Gender,
+        baseStyle: speaker1BaseStyle,
+      },
+      {
+        speakerId: 'HOST_2',
+        name: speaker2Name,
+        gender: speaker2Gender,
+        baseStyle: speaker2BaseStyle,
+      },
     ];
 
     const content =
       format === 'json'
-        ? exportTurnsToJson(turns, speakersMeta, noSpeechIntervals)
+        ? exportTurnsToJson(turns, speakersMeta, noSpeechIntervals, {
+            useDeliveryEmotions,
+            pronunciationDictionary,
+          })
         : exportTurnsToCsv(turns, speakersMeta);
 
     const mime =
@@ -2304,6 +2472,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         speakerName: speaker1Name,
         baseVoice: speaker1Profile?.baseVoice || (speaker1Gender === 'male' ? 'Charon' : 'Kore'),
         gender: speaker1Gender,
+        baseStyle: speaker1BaseStyle,
         tempo: speaker1Tempo,
       };
       const host2VoicePayload = {
@@ -2312,6 +2481,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         speakerName: speaker2Name,
         baseVoice: speaker2Profile?.baseVoice || (speaker2Gender === 'female' ? 'Kore' : 'Charon'),
         gender: speaker2Gender,
+        baseStyle: speaker2BaseStyle,
         tempo: speaker2Tempo,
         timbre: speaker2Timbre || speaker2Profile?.timbre,
       };
@@ -2327,18 +2497,36 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           : masterAudioMode;
 
       const currentTurnList = synthesizedTurns.length > 0 ? synthesizedTurns : turns;
+      // Pass immediate neighbors [prevTurn, targetTurn, nextTurn] (without audioBase64) for Mode A context regen
+      const stripAudio = (t?: DialogueTurn | null) => {
+        if (!t) return null;
+        const { audioBase64: _drop, ...rest } = t;
+        return rest;
+      };
+      const targetIdxInScript = turns.findIndex((t) => t.id === turn.id);
+      const prevContextTurn =
+        targetIdxInScript > 0 ? stripAudio(turns[targetIdxInScript - 1]) : null;
+      const nextContextTurn =
+        targetIdxInScript >= 0 && targetIdxInScript + 1 < turns.length
+          ? stripAudio(turns[targetIdxInScript + 1])
+          : null;
+
       // Avoid sending huge base64 arrays back to the server; re-stitch locally in browser!
       const res = await authFetch('/api/podcast/synthesize-single-turn', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          turn,
+          turn: stripAudio(turn),
+          prevTurn: prevContextTurn,
+          nextTurn: nextContextTurn,
           allTurns: [],
           forceRephraseShorter: isShortening,
           forceFastPace: isFastPacing,
           host1Voice: host1VoicePayload,
           host2Voice: host2VoicePayload,
           speakers: extraSpeakers,
+          useDeliveryEmotions,
+          pronunciationDictionary,
           masterAudioMode: effectiveMode,
           totalVideoDurationSec: effectiveVideoDurationSec,
         }),
@@ -2393,6 +2581,11 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
               slicingMethod: matched.slicingMethod ?? t.slicingMethod,
               shiftedStartBySec: matched.shiftedStartBySec ?? t.shiftedStartBySec,
               needsShorten: matched.needsShorten ?? t.needsShorten,
+              generationMode: matched.generationMode ?? t.generationMode,
+              lufsBefore: matched.lufsBefore ?? t.lufsBefore,
+              lufsAfter: matched.lufsAfter ?? t.lufsAfter,
+              sentStyle: matched.sentStyle ?? t.sentStyle,
+              sentText: matched.sentText ?? t.sentText,
             };
           })
         );
@@ -2454,6 +2647,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         speakerName: speaker1Name,
         baseVoice: speaker1Profile?.baseVoice || (speaker1Gender === 'male' ? 'Charon' : 'Kore'),
         gender: speaker1Gender,
+        baseStyle: speaker1BaseStyle,
         tempo: speaker1Tempo,
         timbre: speaker1Profile?.timbre,
         customPersonaPrompt: speaker1Profile?.customPersonaPrompt,
@@ -2474,6 +2668,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         speakerName: speaker2Name,
         baseVoice: speaker2Profile?.baseVoice || (speaker2Gender === 'female' ? 'Kore' : 'Charon'),
         gender: speaker2Gender,
+        baseStyle: speaker2BaseStyle,
         tempo: speaker2Tempo,
         timbre: speaker2Timbre || speaker2Profile?.timbre,
         customPersonaPrompt: speaker2Profile?.customPersonaPrompt,
@@ -2522,6 +2717,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           host1Voice: host1VoicePayload,
           host2Voice: host2VoicePayload,
           speakers: extraSpeakers,
+          useDeliveryEmotions,
+          pronunciationDictionary,
           masterAudioMode: effectiveMode,
           totalVideoDurationSec: effectiveVideoDurationSec,
         }),
@@ -2618,6 +2815,11 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 slicingMethod: matched.slicingMethod ?? pt.slicingMethod,
                 shiftedStartBySec: matched.shiftedStartBySec ?? pt.shiftedStartBySec,
                 needsShorten: matched.needsShorten ?? pt.needsShorten,
+                generationMode: matched.generationMode ?? pt.generationMode,
+                lufsBefore: matched.lufsBefore ?? pt.lufsBefore,
+                lufsAfter: matched.lufsAfter ?? pt.lufsAfter,
+                sentStyle: matched.sentStyle ?? pt.sentStyle,
+                sentText: matched.sentText ?? pt.sentText,
                 subBlockIndex: matched.subBlockIndex ?? pt.subBlockIndex,
               }
             : pt;
@@ -3191,6 +3393,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       speakerName: speaker1Name,
       baseVoice: speaker1Profile?.baseVoice || (speaker1Gender === 'male' ? 'Charon' : 'Kore'),
       gender: speaker1Gender,
+      baseStyle: speaker1BaseStyle,
       tempo: speaker1Tempo,
       timbre: speaker1Profile?.timbre,
       customPersonaPrompt: speaker1Profile?.customPersonaPrompt,
@@ -3211,6 +3414,7 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       speakerName: speaker2Name,
       baseVoice: speaker2Profile?.baseVoice || (speaker2Gender === 'female' ? 'Kore' : 'Charon'),
       gender: speaker2Gender,
+      baseStyle: speaker2BaseStyle,
       tempo: speaker2Tempo,
       timbre: speaker2Timbre || speaker2Profile?.timbre,
       customPersonaPrompt: speaker2Profile?.customPersonaPrompt,
@@ -3274,6 +3478,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           slicingMethod: rec.slicingMethod ?? scriptTurn.slicingMethod,
           shiftedStartBySec: rec.shiftedStartBySec ?? scriptTurn.shiftedStartBySec,
           needsShorten: rec.needsShorten ?? scriptTurn.needsShorten,
+          generationMode: rec.generationMode ?? scriptTurn.generationMode,
+          lufsBefore: rec.lufsBefore ?? scriptTurn.lufsBefore,
+          lufsAfter: rec.lufsAfter ?? scriptTurn.lufsAfter,
           subBlockIndex: item.subBlock.subBlockIndex,
           startTime: rec.startTime ?? scriptTurn.startTime,
           endTime: rec.endTime ?? scriptTurn.endTime,
@@ -3318,6 +3525,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   slicingMethod: matched.slicingMethod ?? pt.slicingMethod,
                   shiftedStartBySec: matched.shiftedStartBySec ?? pt.shiftedStartBySec,
                   needsShorten: matched.needsShorten ?? pt.needsShorten,
+                  generationMode: matched.generationMode ?? pt.generationMode,
+                  lufsBefore: matched.lufsBefore ?? pt.lufsBefore,
+                  lufsAfter: matched.lufsAfter ?? pt.lufsAfter,
                   subBlockIndex: matched.subBlockIndex ?? pt.subBlockIndex,
                 }
               : pt;
@@ -3423,6 +3633,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 host1Voice: host1VoicePayload,
                 host2Voice: host2VoicePayload,
                 speakers: extraSpeakers,
+                useDeliveryEmotions,
+                pronunciationDictionary,
                 masterAudioMode: effectiveMode,
                 totalVideoDurationSec: effectiveVideoDurationSec,
               }),
@@ -3558,6 +3770,11 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                   slicingMethod: matched.slicingMethod,
                   shiftedStartBySec: matched.shiftedStartBySec,
                   needsShorten: matched.needsShorten,
+                  generationMode: matched.generationMode,
+                  lufsBefore: matched.lufsBefore,
+                  lufsAfter: matched.lufsAfter,
+                  sentStyle: matched.sentStyle,
+                  sentText: matched.sentText,
                   subBlockIndex: matched.subBlockIndex,
                 }
               : pt;
@@ -4439,6 +4656,19 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
                 <div>
                   <label className="text-[10px] uppercase font-mono text-[#5D594E] block mb-1">
+                    Базовый стиль (EN):
+                  </label>
+                  <input
+                    type="text"
+                    value={speaker1BaseStyle}
+                    onChange={(e) => setSpeaker1BaseStyle(e.target.value)}
+                    className="w-full bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-1.5 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86]"
+                    placeholder={getDefaultBaseStyleForGender(speaker1Gender)}
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[10px] uppercase font-mono text-[#5D594E] block mb-1">
                     Базовый темп:
                   </label>
                   <div className="grid grid-cols-4 gap-1">
@@ -4576,6 +4806,19 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
                 <div>
                   <label className="text-[10px] uppercase font-mono text-[#5D594E] block mb-1">
+                    Базовый стиль (EN):
+                  </label>
+                  <input
+                    type="text"
+                    value={speaker2BaseStyle}
+                    onChange={(e) => setSpeaker2BaseStyle(e.target.value)}
+                    className="w-full bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-xl px-3 py-1.5 text-xs text-[#161511] focus:outline-none focus:border-[#C4552D]"
+                    placeholder={getDefaultBaseStyleForGender(speaker2Gender)}
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[10px] uppercase font-mono text-[#5D594E] block mb-1">
                     Базовый темп:
                   </label>
                   <div className="grid grid-cols-4 gap-1">
@@ -4602,35 +4845,140 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
             {extraSpeakers.length > 0 && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-[rgba(22,21,17,0.1)]">
                 {extraSpeakers.map((sp, idx) => (
-                  <div key={sp.speakerId} className="p-3 rounded-xl bg-white border border-[rgba(22,21,17,0.14)] flex items-center justify-between gap-2 text-xs">
-                    <div>
-                      <span className="font-mono text-[10px] text-[#0E7C86] uppercase block">{sp.speakerId}</span>
-                      <span className="font-bold text-[#161511]">{sp.name}</span>
+                  <div key={sp.speakerId} className="p-3 rounded-xl bg-white border border-[rgba(22,21,17,0.14)] space-y-2 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <span className="font-mono text-[10px] text-[#0E7C86] uppercase block">{sp.speakerId}</span>
+                        <span className="font-bold text-[#161511]">{sp.name}</span>
+                      </div>
+                      <select
+                        value={sp.voiceId}
+                        onChange={(e) => {
+                          const chosen = voices.find((v) => v.id === e.target.value);
+                          setExtraSpeakers((prev) =>
+                            prev.map((item, i) =>
+                              i === idx
+                                ? { ...item, voiceId: e.target.value, baseVoice: chosen?.baseVoice || item.baseVoice }
+                                : item
+                            )
+                          );
+                        }}
+                        className="bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] rounded-lg px-2.5 py-1 text-xs"
+                      >
+                        {voices.map((v) => (
+                          <option key={v.id} value={v.id}>
+                            {v.name}
+                          </option>
+                        ))}
+                      </select>
                     </div>
-                    <select
-                      value={sp.voiceId}
+                    <input
+                      type="text"
+                      value={sp.baseStyle ?? getDefaultBaseStyleForGender(sp.gender)}
                       onChange={(e) => {
-                        const chosen = voices.find((v) => v.id === e.target.value);
+                        const val = e.target.value;
                         setExtraSpeakers((prev) =>
-                          prev.map((item, i) =>
-                            i === idx
-                              ? { ...item, voiceId: e.target.value, baseVoice: chosen?.baseVoice || item.baseVoice }
-                              : item
-                          )
+                          prev.map((item, i) => (i === idx ? { ...item, baseStyle: val } : item))
                         );
                       }}
-                      className="bg-[#F4F1EA] border border-[rgba(22,21,17,0.14)] rounded-lg px-2.5 py-1 text-xs"
-                    >
-                      {voices.map((v) => (
-                        <option key={v.id} value={v.id}>
-                          {v.name}
-                        </option>
-                      ))}
-                    </select>
+                      className="w-full bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-lg px-2.5 py-1 text-xs text-[#161511]"
+                      placeholder={getDefaultBaseStyleForGender(sp.gender)}
+                    />
                   </div>
                 ))}
               </div>
             )}
+
+            {/* Delivery Emotions Toggle & Pronunciation Dictionary */}
+            <div className="p-4 rounded-2xl bg-white/85 border border-[rgba(22,21,17,0.12)] space-y-3">
+              <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={useDeliveryEmotions}
+                  onChange={(e) => setUseDeliveryEmotions(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 accent-[#0E7C86] rounded cursor-pointer"
+                />
+                <span className="text-xs text-[#161511]">
+                  <span className="font-semibold">Эмоции из колонки «Подача»</span>
+                  <span className="block text-[11px] text-[#5D594E]">
+                    Добавляет до 2 эмоций к базовому стилю и тег &lt;laugh&gt; для «kulib» (когда хватает времени в окне).
+                  </span>
+                </span>
+              </label>
+
+              <div className="pt-2 border-t border-[rgba(22,21,17,0.1)] space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <span className="text-[11px] uppercase font-mono font-semibold text-[#0A5A62] block">
+                      Словарь произношения (Слово → Как произносить)
+                    </span>
+                    <span className="text-[11px] text-[#5D594E]">
+                      Меняет только текст для TTS; субтитры, таблица и экспорт сохраняют исходное написание.
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setPronunciationDictionary((prev) => [...prev, { word: '', pronunciation: '' }])
+                    }
+                    className="text-[11px] px-2.5 py-1 rounded-lg bg-[#0E7C86]/10 hover:bg-[#0E7C86]/20 text-[#0A5A62] font-semibold cursor-pointer inline-flex items-center gap-1 shrink-0"
+                  >
+                    <Plus className="w-3 h-3" />
+                    <span>Добавить</span>
+                  </button>
+                </div>
+
+                {pronunciationDictionary.length === 0 ? (
+                  <p className="text-[11px] text-[#5D594E] italic">
+                    Словарь пуст. Нажмите «Добавить», чтобы задать произношение иностранных слов и терминов.
+                  </p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {pronunciationDictionary.map((entry, rowIdx) => (
+                      <div key={rowIdx} className="grid grid-cols-[1fr_auto_1fr_auto] items-center gap-2">
+                        <input
+                          type="text"
+                          value={entry.word}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setPronunciationDictionary((prev) =>
+                              prev.map((item, i) => (i === rowIdx ? { ...item, word: val } : item))
+                            );
+                          }}
+                          placeholder="Слово (напр. Hybrid)"
+                          className="bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-lg px-2.5 py-1 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86]"
+                        />
+                        <span className="text-xs font-mono text-[#5D594E]">→</span>
+                        <input
+                          type="text"
+                          value={entry.pronunciation}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setPronunciationDictionary((prev) =>
+                              prev.map((item, i) =>
+                                i === rowIdx ? { ...item, pronunciation: val } : item
+                              )
+                            );
+                          }}
+                          placeholder="Как произносить (напр. gibrid)"
+                          className="bg-[#F4F1EA]/50 border border-[rgba(22,21,17,0.14)] rounded-lg px-2.5 py-1 text-xs text-[#161511] focus:outline-none focus:border-[#0E7C86]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setPronunciationDictionary((prev) => prev.filter((_, i) => i !== rowIdx))
+                          }
+                          className="p-1 rounded-lg text-[#5D594E] hover:text-rose-700 hover:bg-rose-50 cursor-pointer"
+                          title="Удалить правило"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
 
           {/* STEP 03: Synchronized Video Player & 1:1 Timecode Turn Table */}
@@ -4890,6 +5238,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           );
                           const effRephrase =
                             synthTurn?.rephraseAttempts ?? turn.rephraseAttempts;
+                          const effGenerationMode =
+                            synthTurn?.generationMode || turn.generationMode;
 
                           return (
                             <>
@@ -4909,6 +5259,15 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                                   }
                                 >
                                   QA: {effQa}
+                                </span>
+                              )}
+
+                              {(effQa === 'failed' || effGenerationMode === 'mode_b') && (
+                                <span
+                                  className="text-[10.5px] font-semibold text-amber-900 bg-amber-50 border border-amber-300 px-2 py-0.5 rounded-lg"
+                                  title="Реплика озвучена в одиночном режиме (Mode B) или не прошла QA"
+                                >
+                                  ⚠ одиночный режим / QA не пройден, голос может отличаться
                                 </span>
                               )}
 

@@ -64,7 +64,7 @@ import {
 } from "./server/services/tts/ttsQuotaTracker.ts";
 import {
   synthesizeDialogueInMacroBlocks,
-  buildTurnPaceDirective,
+  synthesizeSingleTurnInModeAContext,
   buildCleanTurnStyleForTts,
   stripLegacyPauseArtifacts,
   stripLegacyStylePauseDirective,
@@ -75,6 +75,12 @@ import {
   isFakeDubbingTtsEnabled,
   generateSyntheticTurnPcm,
 } from "./server/services/dubbing/batchAudioSlicer.ts";
+import {
+  sanitizeBaseStyle,
+} from "./src/utils/dubbingStyle.ts";
+import {
+  normalizePronunciationDictionary,
+} from "./src/utils/pronunciationDictionary.ts";
 
 const RUNTIME_ENV_KEYS = {
   API_KEY: (process.env.API_KEY || "").trim(),
@@ -1494,6 +1500,23 @@ const geminiConcurrencyLimitMiddleware = (req: express.Request, res: express.Res
   res.on("close", release);
   next();
 };
+
+// TEMPORARY loopback-only route for Experiment 2 (removed immediately after run)
+app.post("/api/internal/run-exp2", async (req, res) => {
+  const remote = req.socket?.remoteAddress || req.ip || "";
+  if (remote !== "127.0.0.1" && remote !== "::1" && remote !== "::ffff:127.0.0.1") {
+    return res.status(403).json({ error: "Loopback only" });
+  }
+  try {
+    const { runExperiment2Live } = await import("./server/services/dubbing/exp2Runner.ts");
+    const ai = getGeminiClient();
+    const result = await runExperiment2Live(ai);
+    return res.json(result);
+  } catch (err: any) {
+    console.error("[/api/internal/run-exp2] Error:", err);
+    return res.status(500).json({ error: err?.message || String(err) });
+  }
+});
 
 // Apply Global IP Rate Limiter
 app.use("/api", globalLimiter);
@@ -5782,16 +5805,12 @@ async function synthesizeTurnWithDurationCascade({
 
     const cleanStyle = buildCleanTurnStyleForTts(
       {
-        cleanSpeechText: activeText,
-        startSec: turn.startSec,
-        endSec: turn.endSec,
-        forceFastPace: Boolean(forceFastPace),
         intonationRu: turn.intonationRu,
-        emotion: turn.emotion,
-        style: combinedTurnStyle || turn.speechStyle || "",
+        speakerGender: turn.speakerGender,
+        speakerId: turn.speakerId || "HOST_1",
       },
       undefined,
-      Boolean(forceFastPace)
+      true
     );
 
     const synthesizeCleanPcm = async (txt: string): Promise<Buffer> => {
@@ -5930,10 +5949,33 @@ app.post(
         host1Voice = {},
         host2Voice = {},
         speakerVoices = {},
+        speakers: rawSpeakersInput,
+        useDeliveryEmotions = true,
+        pronunciationDictionary: rawPronunciationDictionary = [],
         masterAudioMode = "time_aligned",
         totalVideoDurationSec,
         totalTimelineSec,
       } = req.body;
+
+      // Объединяем speakerVoices и массив/объект speakers, чтобы baseStyle и настройки спикеров всегда доходили
+      const mergedSpeakerVoices: Record<string, any> = {
+        ...(speakerVoices && typeof speakerVoices === "object" ? speakerVoices : {}),
+      };
+      if (Array.isArray(rawSpeakersInput)) {
+        for (const sp of rawSpeakersInput) {
+          const spId = sp?.speakerId || sp?.id;
+          if (spId) {
+            mergedSpeakerVoices[spId] = { ...(mergedSpeakerVoices[spId] || {}), ...sp };
+          }
+        }
+      } else if (rawSpeakersInput && typeof rawSpeakersInput === "object") {
+        for (const [k, v] of Object.entries(rawSpeakersInput)) {
+          mergedSpeakerVoices[k] = { ...(mergedSpeakerVoices[k] || {}), ...(v as any) };
+        }
+      }
+
+      const cleanPronunciationDict = normalizePronunciationDictionary(rawPronunciationDictionary);
+      const effectiveUseDeliveryEmotions = useDeliveryEmotions !== false;
 
       const resolvedTotalVideoDurationSec =
         Number(totalVideoDurationSec ?? totalTimelineSec) > 0
@@ -5961,7 +6003,7 @@ app.post(
         }
       }
 
-      // Собираем карту спикеров (встроенные голоса + клонированный голос)
+      // Собираем карту спикеров (встроенные голоса + клонированный голос + базовый стиль спикера)
       const speakerMap = new Map<string, ResolvedBatchSpeaker>();
       const isClonedVoiceId = (id?: string, cfg?: any): boolean => {
         if (cfg && (cfg.voiceSampleAudio || cfg.consentAudio || cfg.voiceConsentSignature)) return true;
@@ -5981,17 +6023,23 @@ app.post(
           turn,
           host1Voice,
           host2Voice,
-          speakerVoices
+          mergedSpeakerVoices
         );
 
         const customEntry =
-          speakerVoices[speakerKey] ||
+          mergedSpeakerVoices[speakerKey] ||
           (speakerKey === "HOST_1" ? host1Voice : speakerKey === "HOST_2" ? host2Voice : null) ||
           {};
+        const hostFallback =
+          speakerKey === "HOST_1" ? host1Voice : speakerKey === "HOST_2" ? host2Voice : null;
 
         const replicatedCfg =
           turn?.replicatedVoiceConfig || customEntry?.replicatedVoiceConfig || undefined;
         const cloned = isClonedVoiceId(resolved.voiceId, replicatedCfg);
+        const speakerBaseStyle = sanitizeBaseStyle(
+          customEntry?.baseStyle ?? hostFallback?.baseStyle,
+          resolved.gender
+        );
 
         if (!speakerMap.has(speakerKey)) {
           speakerMap.set(speakerKey, {
@@ -6002,28 +6050,11 @@ app.post(
             gender: resolved.gender,
             isCloned: cloned,
             replicatedVoiceConfig: replicatedCfg,
-            baseSpeechStyle: "",
+            baseSpeechStyle: speakerBaseStyle,
           });
         }
 
-        const { speechText: cleanedTurnText, extractedStyles: turnExtractedStyles } =
-          cleanScriptForSpeech(turn.text || "");
-        let spokenText = cleanedTurnText;
-        try {
-          spokenText = normalizeUzbekSpeech(spokenText, {
-            decimalStyle: DUBBING_MODELS_CONFIG.decimalPronunciationStyle,
-          });
-        } catch {}
-        const cleanSpeechText =
-          sanitizeDocumentedTtsTags(spokenText || cleanedTurnText || String(turn.text || "").trim()) ||
-          "...";
-
-        const styleTokens: string[] = [];
-        if (turn.speechStyle) styleTokens.push(String(turn.speechStyle));
-        if (turn.intonationRu) styleTokens.push(String(turn.intonationRu));
-        if (turnExtractedStyles && turnExtractedStyles.length > 0) {
-          styleTokens.push(turnExtractedStyles.join(", "));
-        }
+        const rawText = String(turn.text || "").trim() || "...";
 
         const nextStartSec =
           typeof turn.nextTurnStartSec === "number"
@@ -6045,9 +6076,9 @@ app.post(
           index: i,
           speakerId: speakerKey,
           speakerName: turn.speakerName || resolved.speakerName,
-          text: String(turn.text || "").trim() || "...",
-          cleanSpeechText,
-          style: styleTokens.filter(Boolean).join(", "),
+          text: rawText,
+          cleanSpeechText: rawText,
+          style: "",
           startSec: typeof turn.startSec === "number" ? turn.startSec : undefined,
           endSec: typeof turn.endSec === "number" ? turn.endSec : undefined,
           gapAfterSec,
@@ -6081,6 +6112,8 @@ app.post(
         turns: batchInputTurns,
         speakerMap: orderedSpeakerMap,
         strictTimeWindow: isTimeAlignedMode,
+        useDeliveryEmotions: effectiveUseDeliveryEmotions,
+        pronunciationDictionary: cleanPronunciationDict,
         startingCompletedBlocks: Number(req.body?.startingCompletedBlocks) || 0,
         totalProjectBlocks: Number(req.body?.totalProjectBlocks) || undefined,
         totalProjectSubBlocks: Number(req.body?.totalProjectSubBlocks) || undefined,
@@ -6112,6 +6145,11 @@ app.post(
             endTime: Math.round((startTime + r.dubbedDurationSec) * 100) / 100,
             fitStepApplied: r.fitStepApplied,
             slicingMethod: r.slicingMethod,
+            generationMode: r.generationMode,
+            lufsBefore: r.lufsBefore,
+            lufsAfter: r.lufsAfter,
+            sentStyle: r.sentStyle,
+            sentText: r.sentText,
             qa: r.qa,
             qaReason: r.qaReason,
             needsShorten: r.needsShorten,
@@ -6168,6 +6206,11 @@ app.post(
               endTime: Math.round((startTime + r.dubbedDurationSec) * 100) / 100,
               fitStepApplied: r.fitStepApplied,
               slicingMethod: r.slicingMethod,
+              generationMode: r.generationMode,
+              lufsBefore: r.lufsBefore,
+              lufsAfter: r.lufsAfter,
+              sentStyle: r.sentStyle,
+              sentText: r.sentText,
               qa: r.qa,
               qaReason: r.qaReason,
               needsShorten: r.needsShorten,
@@ -6225,6 +6268,11 @@ app.post(
               shiftedStartBySec: placement.shiftedStartBySec,
               fitStepApplied: r.fitStepApplied,
               slicingMethod: r.slicingMethod,
+              generationMode: r.generationMode,
+              lufsBefore: r.lufsBefore,
+              lufsAfter: r.lufsAfter,
+              sentStyle: r.sentStyle,
+              sentText: r.sentText,
               qa: r.qa,
               qaReason: r.qaReason,
               needsShorten: Boolean(r.needsShorten || placement.needsShorten),
@@ -6267,6 +6315,11 @@ app.post(
             shiftedStartBySec: 0,
             fitStepApplied: r.fitStepApplied,
             slicingMethod: r.slicingMethod,
+            generationMode: r.generationMode,
+            lufsBefore: r.lufsBefore,
+            lufsAfter: r.lufsAfter,
+            sentStyle: r.sentStyle,
+            sentText: r.sentText,
             qa: r.qa,
             qaReason: r.qaReason,
             needsShorten: r.needsShorten,
@@ -6519,22 +6572,45 @@ app.post("/api/podcast/parse-verbatim-storyboard", requireCreditBalance(1), asyn
   }
 });
 
-// 2. Re-synthesize a single turn from the storyboard table and optionally re-stitch master track
+// 2. Re-synthesize a single turn in Mode A with [prev, target, next] context (same 2 voices & styles) and BS.1770 leveling
 app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (req, res) => {
   try {
     const {
       turn,
+      prevTurn: explicitPrevTurn,
+      nextTurn: explicitNextTurn,
       allTurns = [],
       host1Voice = {},
       host2Voice = {},
       speakerVoices = {},
+      speakers: rawSpeakersInput,
+      useDeliveryEmotions = true,
+      pronunciationDictionary: rawPronunciationDictionary = [],
       masterAudioMode = "time_aligned",
       totalVideoDurationSec,
       totalTimelineSec,
       forceRephraseShorter = false,
-      forceFastPace = false,
       measuredPace,
     } = req.body;
+
+    const mergedSpeakerVoices: Record<string, any> = {
+      ...(speakerVoices && typeof speakerVoices === "object" ? speakerVoices : {}),
+    };
+    if (Array.isArray(rawSpeakersInput)) {
+      for (const sp of rawSpeakersInput) {
+        const spId = sp?.speakerId || sp?.id;
+        if (spId) {
+          mergedSpeakerVoices[spId] = { ...(mergedSpeakerVoices[spId] || {}), ...sp };
+        }
+      }
+    } else if (rawSpeakersInput && typeof rawSpeakersInput === "object") {
+      for (const [k, v] of Object.entries(rawSpeakersInput)) {
+        mergedSpeakerVoices[k] = { ...(mergedSpeakerVoices[k] || {}), ...(v as any) };
+      }
+    }
+
+    const cleanPronunciationDict = normalizePronunciationDictionary(rawPronunciationDictionary);
+    const effectiveUseDeliveryEmotions = useDeliveryEmotions !== false;
 
     const resolvedTotalVideoDurationSec =
       Number(totalVideoDurationSec ?? totalTimelineSec) > 0
@@ -6554,83 +6630,198 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
       });
     }
 
-    const resolved = resolveSpeakerVoiceProfile(
-      turn.speakerId || "HOST_1",
-      turn,
-      host1Voice,
-      host2Voice,
-      speakerVoices
-    );
+    // Если пользователь явно нажал «Сократить текст и переозвучить» — сначала сокращаем текст
+    let workingTurn = { ...turn };
+    let rephraseAttempts = 0;
+    if (forceRephraseShorter && !isFakeDubbingTtsEnabled()) {
+      const currentSyl = Math.max(1, countSyllables(workingTurn.text || ""));
+      const winSec =
+        typeof workingTurn.startSec === "number" &&
+        typeof workingTurn.endSec === "number" &&
+        workingTurn.endSec > workingTurn.startSec
+          ? Math.max(0.5, workingTurn.endSec - workingTurn.startSec)
+          : 0;
+      const targetForButton =
+        winSec > 0
+          ? Math.max(4, Math.floor(winSec * (Number(measuredPace) || DUBBING_MODELS_CONFIG.PACE || 5.0) * 0.88))
+          : Math.max(4, Math.floor(currentSyl * 0.8));
+      const shortened = await rephraseTurnShorterViaLlm(ai, {
+        originalTextRu: workingTurn.originalTextRu || workingTurn.originalText || workingTurn.text,
+        currentUzbekText: workingTurn.text,
+        targetMaxSyllables: targetForButton,
+        speakerGender: workingTurn.speakerGender,
+        emotion: workingTurn.intonationRu || workingTurn.emotion,
+        inlineTags: workingTurn.inlineTags,
+      });
+      workingTurn.text = stripLegacyPauseArtifacts(shortened) || workingTurn.text;
+      rephraseAttempts = 1;
+    }
 
-    const { extractedStyles } = cleanScriptForSpeech(turn.text || "");
-    const combinedTurnStyle = [
-      turn.speechStyle,
-      turn.intonationRu,
-      extractedStyles.length > 0 ? extractedStyles.join(", ") : "",
-    ]
-      .filter(Boolean)
-      .join(", ");
-
-    let computedGapAfterSec = typeof turn.gapAfterSec === "number" ? turn.gapAfterSec : 0;
-    if (Array.isArray(allTurns) && allTurns.length > 0) {
-      const idxInAll = allTurns.findIndex((t: any) => t.id === turn.id);
-      if (idxInAll !== -1 && idxInAll + 1 < allTurns.length && typeof allTurns[idxInAll + 1]?.startSec === "number") {
-        computedGapAfterSec = Math.max(
-          0,
-          Math.round((allTurns[idxInAll + 1].startSec - (turn.endSec || 0)) * 100) / 100
-        );
-      } else if (idxInAll === allTurns.length - 1 && resolvedTotalVideoDurationSec) {
-        computedGapAfterSec = Math.max(
-          0,
-          Math.round((resolvedTotalVideoDurationSec - (turn.endSec || 0)) * 100) / 100
-        );
+    // Определяем соседние реплики [prev, target, next] для синтеза в Mode A с контекстом
+    let prevTurn = explicitPrevTurn && explicitPrevTurn.text ? explicitPrevTurn : null;
+    let nextTurn = explicitNextTurn && explicitNextTurn.text ? explicitNextTurn : null;
+    if ((!prevTurn || !nextTurn) && Array.isArray(allTurns) && allTurns.length > 0) {
+      const idxInAll = allTurns.findIndex((t: any) => t.id === workingTurn.id);
+      if (idxInAll !== -1) {
+        if (!prevTurn && idxInAll > 0 && allTurns[idxInAll - 1]?.text) {
+          prevTurn = allTurns[idxInAll - 1];
+        }
+        if (!nextTurn && idxInAll + 1 < allTurns.length && allTurns[idxInAll + 1]?.text) {
+          nextTurn = allTurns[idxInAll + 1];
+        }
       }
     }
 
-    const cascadeResult = await synthesizeTurnWithDurationCascade({
-      turn,
-      gapAfterSec: computedGapAfterSec,
-      measuredPace: Number(measuredPace) || DUBBING_MODELS_CONFIG.PACE || 5.0,
-      forceRephraseShorter: Boolean(forceRephraseShorter),
-      forceFastPace: Boolean(forceFastPace),
-      voiceId: resolved.voiceId,
-      baseVoice: resolved.baseVoice,
-      speakerName: resolved.speakerName,
-      combinedTurnStyle,
-      strictTimeWindow: masterAudioMode === "time_aligned",
-    });
+    const rawContextList: any[] = [];
+    if (prevTurn) rawContextList.push(prevTurn);
+    const targetIndex = rawContextList.length;
+    rawContextList.push(workingTurn);
+    if (nextTurn) rawContextList.push(nextTurn);
 
-    if (cascadeResult.failed) {
-      return res.status(502).json({ error: cascadeResult.qaReason || "Не удалось переозвучить выбранную реплику." });
-    }
-
-    let updatedTurn = {
-      ...turn,
-      text: cascadeResult.finalText,
-      actualSyllables: countSyllables(cascadeResult.finalText),
-      speakerName: turn.speakerName || resolved.speakerName,
-      audioBase64: cascadeResult.rawWav.toString("base64"),
-      durationSeconds: cascadeResult.dubbedDurationSec,
-      originalDurationSec: cascadeResult.originalDurationSec,
-      dubbedDurationSec: cascadeResult.dubbedDurationSec,
-      atempoApplied: cascadeResult.atempoApplied,
-      rephraseAttempts: cascadeResult.rephraseAttempts,
-      syncStatus: cascadeResult.syncStatus,
-      fitStepApplied: cascadeResult.fitStepApplied,
-      slicingMethod: cascadeResult.slicingMethod,
-      qa: cascadeResult.qa,
-      qaReason: cascadeResult.qaReason,
-      needsShorten: cascadeResult.needsShorten,
-      shiftedStartBySec: 0,
-      synthesisFailed: false,
+    const isClonedVoiceId = (id?: string, cfg?: any): boolean => {
+      if (cfg && (cfg.voiceSampleAudio || cfg.consentAudio || cfg.voiceConsentSignature)) return true;
+      const l = String(id || "").toLowerCase();
+      return (
+        l === "voice_17raj9ewke3g" ||
+        l === "user-replicated" ||
+        l === "shohrux" ||
+        l === "shokhrukh"
+      );
     };
 
-    // If allTurns was passed, re-assemble the master track immediately so preview & video sync update in 1 click
+    const speakerMap = new Map<string, ResolvedBatchSpeaker>();
+    const addSpeakerToMap = (spId: string, sampleTurn: any) => {
+      if (speakerMap.has(spId)) return;
+      const resolved = resolveSpeakerVoiceProfile(
+        spId,
+        sampleTurn,
+        host1Voice,
+        host2Voice,
+        mergedSpeakerVoices
+      );
+      const customEntry =
+        mergedSpeakerVoices[spId] ||
+        (spId === "HOST_1" ? host1Voice : spId === "HOST_2" ? host2Voice : null) ||
+        {};
+      const hostFallback =
+        spId === "HOST_1" ? host1Voice : spId === "HOST_2" ? host2Voice : null;
+      const replicatedCfg =
+        sampleTurn?.replicatedVoiceConfig || customEntry?.replicatedVoiceConfig || undefined;
+      speakerMap.set(spId, {
+        speakerId: spId,
+        speakerName: resolved.speakerName,
+        baseVoice: resolved.baseVoice,
+        voiceId: resolved.voiceId,
+        gender: resolved.gender,
+        isCloned: isClonedVoiceId(resolved.voiceId, replicatedCfg),
+        replicatedVoiceConfig: replicatedCfg,
+        baseSpeechStyle: sanitizeBaseStyle(
+          customEntry?.baseStyle ?? hostFallback?.baseStyle,
+          resolved.gender
+        ),
+      });
+    };
+
+    // Всегда регистрируем обоих ведущих (если переданы), чтобы Mode A сохранял ту же пару голосов
+    if (host1Voice && (host1Voice.baseVoice || host1Voice.voiceId || host1Voice.name)) {
+      addSpeakerToMap("HOST_1", { speakerId: "HOST_1", speakerName: host1Voice.name, speakerGender: host1Voice.gender });
+    }
+    if (host2Voice && (host2Voice.baseVoice || host2Voice.voiceId || host2Voice.name)) {
+      addSpeakerToMap("HOST_2", { speakerId: "HOST_2", speakerName: host2Voice.name, speakerGender: host2Voice.gender });
+    }
+    for (const ct of rawContextList) {
+      addSpeakerToMap(ct.speakerId || "HOST_1", ct);
+    }
+
+    const orderedSpeakerMap = new Map<string, ResolvedBatchSpeaker>(
+      Array.from(speakerMap.entries()).sort(([a], [b]) => {
+        if (a === "HOST_1") return -1;
+        if (b === "HOST_1") return 1;
+        if (a === "HOST_2") return -1;
+        if (b === "HOST_2") return 1;
+        return a.localeCompare(b);
+      })
+    );
+
+    const contextBatchTurns: BatchInputTurn[] = rawContextList.map((ct, idx) => {
+      const spId = ct.speakerId || "HOST_1";
+      const sp = orderedSpeakerMap.get(spId);
+      const nextCt = idx + 1 < rawContextList.length ? rawContextList[idx + 1] : null;
+      let gapAfterSec = typeof ct.gapAfterSec === "number" && ct.gapAfterSec >= 0 ? ct.gapAfterSec : 0;
+      if (typeof ct.endSec === "number" && typeof nextCt?.startSec === "number") {
+        gapAfterSec = Math.max(0, Math.round((nextCt.startSec - ct.endSec) * 100) / 100);
+      } else if (
+        idx === targetIndex &&
+        resolvedTotalVideoDurationSec &&
+        typeof ct.endSec === "number" &&
+        !nextCt
+      ) {
+        gapAfterSec = Math.max(0, Math.round((resolvedTotalVideoDurationSec - ct.endSec) * 100) / 100);
+      }
+      const rawText = String(ct.text || "").trim() || "...";
+      return {
+        id: ct.id || `ctx-turn-${idx}`,
+        index: idx,
+        speakerId: spId,
+        speakerName: ct.speakerName || sp?.speakerName || spId,
+        text: rawText,
+        cleanSpeechText: rawText,
+        style: "",
+        startSec: typeof ct.startSec === "number" ? ct.startSec : undefined,
+        endSec: typeof ct.endSec === "number" ? ct.endSec : undefined,
+        gapAfterSec,
+        emotion: ct.emotion,
+        intonationRu: ct.intonationRu,
+        originalTextRu: ct.originalTextRu || ct.originalText,
+        speakerGender: ct.speakerGender || sp?.gender,
+        sceneTitle: ct.sceneTitle || ct.chapter || undefined,
+        inlineTags: ct.inlineTags,
+        rawTurn: ct,
+      };
+    });
+
+    const singleResult = await synthesizeSingleTurnInModeAContext(ai, {
+      contextTurns: contextBatchTurns,
+      targetIndex,
+      speakerMap: orderedSpeakerMap,
+      strictTimeWindow: masterAudioMode === "time_aligned",
+      useDeliveryEmotions: effectiveUseDeliveryEmotions,
+      pronunciationDictionary: cleanPronunciationDict,
+    });
+
+    const r = singleResult.turn;
+    let updatedTurn: any = {
+      ...workingTurn,
+      text: workingTurn.text,
+      actualSyllables: countSyllables(workingTurn.text),
+      speakerName: workingTurn.speakerName || r.speakerName,
+      audioBase64: r.wavBase64,
+      durationSeconds: r.dubbedDurationSec,
+      originalDurationSec: r.originalDurationSec,
+      dubbedDurationSec: r.dubbedDurationSec,
+      atempoApplied: r.atempoApplied,
+      rephraseAttempts,
+      syncStatus: r.syncStatus,
+      fitStepApplied: r.fitStepApplied,
+      slicingMethod: r.slicingMethod,
+      generationMode: r.generationMode,
+      lufsBefore: r.lufsBefore,
+      lufsAfter: r.lufsAfter,
+      sentStyle: r.sentStyle,
+      sentText: r.sentText,
+      qa: r.qa,
+      qaReason: r.qaReason,
+      needsShorten: r.needsShorten,
+      shiftedStartBySec: 0,
+      synthesisFailed: r.qa === "failed",
+    };
+
+    // If allTurns was passed and client did not opt out of master stitch, re-assemble master track
     let masterAudioBase64: string | undefined;
     let totalDurationSeconds: number | undefined;
     let srtSubtitles: string | undefined;
 
-    if (Array.isArray(allTurns) && allTurns.length > 0) {
+    if (Array.isArray(allTurns) && allTurns.length > 0 && !req.body?.skipMasterStitch) {
       const mergedTurns = allTurns.map((t: any) =>
         t.id === updatedTurn.id ? updatedTurn : t
       );
@@ -6692,6 +6883,10 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
 
     res.json({
       turn: updatedTurn,
+      generationMode: r.generationMode,
+      ttsCallsUsed: singleResult.ttsCallsUsed,
+      transcribeCallsUsed: singleResult.transcribeCallsUsed,
+      provider: singleResult.provider,
       masterAudioBase64,
       totalDurationSeconds,
       totalVideoDurationSec: totalDurationSeconds,

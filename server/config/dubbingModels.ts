@@ -1,4 +1,8 @@
 import { ThinkingLevel } from "@google/genai";
+import {
+  SUB_BLOCK_MAX_SEC,
+  SUB_BLOCK_MAX_TURNS,
+} from "../../src/utils/dubbingLimits.ts";
 
 /**
  * Централизованный конфигурационный файл моделей и параметров бюджета длины
@@ -87,12 +91,10 @@ export const DUBBING_MODELS_CONFIG = {
   ttsDailyQuotaLimit: Number(process.env.GEMINI_TTS_DAILY_LIMIT || 100),
 
   /**
-   * Лимиты подблока озвучки (можно переопределять через env):
-   * - DUBBING_SUBBLOCK_MAX_TURNS (по умолчанию 8 реплик)
-   * - DUBBING_SUBBLOCK_MAX_SEC (по умолчанию 40 секунд суммарных окон)
+   * Единые лимиты суб-блока озвучки из src/utils/dubbingLimits.ts (общие для сервера и браузера).
    */
-  subBlockMaxTurns: Number(process.env.DUBBING_SUBBLOCK_MAX_TURNS || 8),
-  subBlockMaxSec: Number(process.env.DUBBING_SUBBLOCK_MAX_SEC || 40),
+  subBlockMaxTurns: SUB_BLOCK_MAX_TURNS,
+  subBlockMaxSec: SUB_BLOCK_MAX_SEC,
 
   /**
    * Единое предельное ускорение ffmpeg atempo (до 1.10x) при укладке в таймкоды (раздел 2.6).

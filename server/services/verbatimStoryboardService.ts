@@ -1992,7 +1992,7 @@ export async function muxDubbedAudioWithVideoFile({
       .map((iv) => `between(t,${Math.max(0, iv.startSec - 0.1).toFixed(2)},${(iv.endSec + 0.15).toFixed(2)})`)
       .join("+");
 
-    const filterComplex = `[0:a]volume=${duckGain}:enable='${betweenClauses}'[orig_ducked];[1:a]volume=1.15[dub_voice];[orig_ducked][dub_voice]amix=inputs=2:duration=first:dropout_transition=0,alimiter=limit=0.95[aout]`;
+    const filterComplex = `[0:a]volume=${duckGain}:enable='${betweenClauses}'[orig_ducked];[1:a]volume=1.15[dub_voice];[orig_ducked][dub_voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95[aout]`;
 
     try {
       await execFileAsync(ffmpegBin, [

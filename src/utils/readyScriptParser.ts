@@ -1,4 +1,8 @@
 import { DialogueTurn } from '../types/podcast';
+import {
+  normalizePronunciationDictionary,
+  type PronunciationDictionaryEntry,
+} from './pronunciationDictionary';
 
 export type ReadyScriptFormat = 'pipe' | 'json' | 'csv' | 'srt';
 
@@ -6,6 +10,7 @@ export interface ParsedSpeakerInfo {
   speakerId: 'HOST_1' | 'HOST_2';
   name: string;
   gender: 'male' | 'female';
+  baseStyle?: string;
 }
 
 export interface ReadyScriptNoSpeechInterval {
@@ -29,6 +34,8 @@ export interface ReadyScriptParseResult {
   noSpeechIntervals: ReadyScriptNoSpeechInterval[];
   totalDurationSec: number;
   errors: ReadyScriptValidationError[];
+  useDeliveryEmotions?: boolean;
+  pronunciationDictionary?: PronunciationDictionaryEntry[];
 }
 
 export interface VideoAutoAnalysisGuardInput {
@@ -790,7 +797,16 @@ function parseJsonScript(cleanText: string): ReadyScriptParseResult {
       });
       continue;
     }
-    const info: ParsedSpeakerInfo = { speakerId: spId, name, gender };
+    const baseStyle =
+      typeof sp?.baseStyle === 'string' && sp.baseStyle.trim()
+        ? sp.baseStyle.trim()
+        : undefined;
+    const info: ParsedSpeakerInfo = {
+      speakerId: spId,
+      name,
+      gender,
+      ...(baseStyle ? { baseStyle } : {}),
+    };
     declaredByKey.set(normalizeSpeakerKey(name), info);
     declaredById.set(spId, info);
   }
@@ -960,6 +976,15 @@ function parseJsonScript(cleanText: string): ReadyScriptParseResult {
     ...rawNoSpeech.map((n) => Number(n.endSec) || 0)
   );
 
+  const useDeliveryEmotions =
+    !Array.isArray(parsed) && typeof parsed?.useDeliveryEmotions === 'boolean'
+      ? parsed.useDeliveryEmotions
+      : undefined;
+  const pronunciationDictionary =
+    !Array.isArray(parsed) && Array.isArray(parsed?.pronunciationDictionary)
+      ? normalizePronunciationDictionary(parsed.pronunciationDictionary)
+      : undefined;
+
   return {
     ok: errors.length === 0,
     format: 'json',
@@ -968,6 +993,8 @@ function parseJsonScript(cleanText: string): ReadyScriptParseResult {
     noSpeechIntervals: errors.length === 0 ? rawNoSpeech : [],
     totalDurationSec: errors.length === 0 ? totalDurationSec : 0,
     errors,
+    ...(useDeliveryEmotions !== undefined ? { useDeliveryEmotions } : {}),
+    ...(pronunciationDictionary !== undefined ? { pronunciationDictionary } : {}),
   };
 }
 
@@ -1404,10 +1431,16 @@ function resolveSpeakerNameForExport(
 /**
  * Export turns table to JSON (preserving edits & syncStatus, strictly WITHOUT audio data).
  */
+export interface JsonExportProjectSettings {
+  useDeliveryEmotions?: boolean;
+  pronunciationDictionary?: PronunciationDictionaryEntry[];
+}
+
 export function exportTurnsToJson(
   turns: DialogueTurn[],
   speakers?: ParsedSpeakerInfo[],
-  noSpeechIntervals: ReadyScriptNoSpeechInterval[] = []
+  noSpeechIntervals: ReadyScriptNoSpeechInterval[] = [],
+  projectSettings?: JsonExportProjectSettings
 ): string {
   const sanitizedTurns = turns.map((turn, idx) => {
     const { startSec, endSec } = resolveTurnTimeBounds(turn);
@@ -1439,7 +1472,12 @@ export function exportTurnsToJson(
 
   const resolvedSpeakers: ParsedSpeakerInfo[] =
     speakers && speakers.length > 0
-      ? speakers
+      ? speakers.map((s) => ({
+          speakerId: s.speakerId,
+          name: s.name,
+          gender: s.gender,
+          ...(s.baseStyle && s.baseStyle.trim() ? { baseStyle: s.baseStyle.trim() } : {}),
+        }))
       : Array.from(
           new Map(
             sanitizedTurns.map((t) => [
@@ -1453,21 +1491,28 @@ export function exportTurnsToJson(
           ).values()
         );
 
-  return JSON.stringify(
-    {
-      speakers: resolvedSpeakers,
-      turns: sanitizedTurns,
-      noSpeechIntervals: noSpeechIntervals.map((ns) => ({
-        timecode: ns.timecode,
-        startSec: ns.startSec,
-        endSec: ns.endSec,
-        durationSec: ns.durationSec,
-        description: ns.description,
-      })),
-    },
-    null,
-    2
-  );
+  const exportPayload: Record<string, any> = {
+    speakers: resolvedSpeakers,
+    turns: sanitizedTurns,
+    noSpeechIntervals: noSpeechIntervals.map((ns) => ({
+      timecode: ns.timecode,
+      startSec: ns.startSec,
+      endSec: ns.endSec,
+      durationSec: ns.durationSec,
+      description: ns.description,
+    })),
+  };
+
+  if (typeof projectSettings?.useDeliveryEmotions === 'boolean') {
+    exportPayload.useDeliveryEmotions = projectSettings.useDeliveryEmotions;
+  }
+  if (Array.isArray(projectSettings?.pronunciationDictionary)) {
+    exportPayload.pronunciationDictionary = normalizePronunciationDictionary(
+      projectSettings.pronunciationDictionary
+    );
+  }
+
+  return JSON.stringify(exportPayload, null, 2);
 }
 
 function escapeCsvCell(value: string | number | undefined | null): string {

@@ -1,23 +1,43 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { parseReadyScript } from "../src/utils/readyScriptParser.ts";
+import { execFileSync } from "node:child_process";
+import os from "node:os";
+import {
+  parseReadyScript,
+  exportTurnsToCsv,
+  exportTurnsToJson,
+} from "../src/utils/readyScriptParser.ts";
 import { planDialogueSubBlocks } from "../src/utils/dialogueMacroBlocks.ts";
 import { stitchDialogueTurnsClient } from "../src/utils/clientMasterStitcher.ts";
 import {
   DUBBING_CACHE_VERSION as CLIENT_CACHE_VERSION,
+  DEFAULT_DUBBING_TTS_MODEL,
   computeSubBlockClientHash,
   buildSubBlockCacheKey,
   planSubBlockCacheExecution,
   type CachedDialogueSubBlock,
 } from "../src/utils/dubbingSubBlockCache.ts";
+import { SUB_BLOCK_MAX_TURNS, SUB_BLOCK_MAX_SEC } from "../src/utils/dubbingLimits.ts";
+import {
+  DEFAULT_BASE_STYLE_MALE,
+  DEFAULT_BASE_STYLE_FEMALE,
+  buildTurnTtsStyle,
+  prepareTurnTextForTts,
+  shouldAppendLaughTag,
+} from "../src/utils/dubbingStyle.ts";
+import {
+  DEFAULT_PRONUNCIATION_DICTIONARY,
+  applyPronunciationDictionary,
+} from "../src/utils/pronunciationDictionary.ts";
 import { countSyllables } from "../server/services/verbatimStoryboardService.ts";
 import {
   DUBBING_CACHE_VERSION,
   DUBBING_PROMPT_VERSION,
   synthesizeDialogueInMacroBlocks,
+  synthesizeSingleTurnInModeAContext,
+  splitTurnsIntoDubbingSubBlocks,
   evaluateSubBlockQa,
-  buildTurnPaceDirective,
   buildCleanTurnStyleForTts,
   tokenizeForQa,
   computeSubBlockCacheHash,
@@ -29,10 +49,16 @@ import {
   type ResolvedBatchSpeaker,
 } from "../server/services/dubbing/batchDialogueEngine.ts";
 import {
+  buildWav24k,
   generateSyntheticTurnPcm,
   parseAlignmentModelOutput,
   type SlicedTurnClip,
 } from "../server/services/dubbing/batchAudioSlicer.ts";
+import {
+  levelSubBlockClipsLoudness,
+  measureIntegratedLufsPcm,
+  measurePeakDbfsPcm,
+} from "../server/services/dubbing/loudnessLeveler.ts";
 import { DUBBING_MODELS_CONFIG } from "../server/config/dubbingModels.ts";
 import type { DialogueTurn } from "../src/types/podcast.ts";
 
@@ -71,7 +97,7 @@ function makeDefaultSpeakerMap(): Map<string, ResolvedBatchSpeaker> {
     voiceId: "charon",
     gender: "male",
     isCloned: false,
-    baseSpeechStyle: "",
+    baseSpeechStyle: DEFAULT_BASE_STYLE_MALE,
   });
   speakerMap.set("HOST_2", {
     speakerId: "HOST_2",
@@ -80,7 +106,7 @@ function makeDefaultSpeakerMap(): Map<string, ResolvedBatchSpeaker> {
     voiceId: "kore",
     gender: "female",
     isCloned: false,
-    baseSpeechStyle: "",
+    baseSpeechStyle: DEFAULT_BASE_STYLE_FEMALE,
   });
   return speakerMap;
 }
@@ -238,55 +264,118 @@ async function runAllStageTests() {
   const { turns: tiggoTurns, speakerMap } = loadTiggo8BatchTurns();
 
   // =========================================================================
-  // 1. GEMINI 3.8 TTS STYLE & PROMPT RULES
+  // 1. SHARED SCENE-SIZED SUB-BLOCKS (20 / 110s) & 1 SUB-BLOCK = 1 HTTP REQUEST
   // =========================================================================
-  console.log("=== Test 1: Gemini 3.8 TTS Style & Clean Text Rules ===");
+  console.log("=== Test 1A: Shared Sub-Block Limits (20 / 110s) & 1 Sub-Block = 1 Request ===");
+  assert.equal(SUB_BLOCK_MAX_TURNS, 20);
+  assert.equal(SUB_BLOCK_MAX_SEC, 110);
+  assert.equal(DUBBING_MODELS_CONFIG.subBlockMaxTurns, 20);
+  assert.equal(DUBBING_MODELS_CONFIG.subBlockMaxSec, 110);
 
-  assert.equal(
-    buildTurnPaceDirective({
-      cleanSpeechText: "Batareya yaxshi himoyalangan va harorat nazorati bor, sinovdan o‘tgan.",
-      startSec: 0,
-      endSec: 3, // > 5.5 syl/s
-    }),
-    "speaking rapidly"
+  const clientSubsTiggo = planDialogueSubBlocks(tiggoTurns);
+  const serverSubsTiggo = splitTurnsIntoDubbingSubBlocks(tiggoTurns);
+  const clientSizes = clientSubsTiggo.map((sb) => sb.turns.length);
+  const serverSizes = serverSubsTiggo.map((sb) => sb.length);
+  assert.deepEqual(
+    clientSizes,
+    [16, 17, 11, 13, 7, 15],
+    `Tiggo 8 v4 must split into [16, 17, 11, 13, 7, 15], got [${clientSizes.join(", ")}]`
   );
-  assert.equal(
-    buildTurnPaceDirective({
-      cleanSpeechText: "Hammaga salom, men Azizman, bugun mashina ko‘ramiz.",
-      startSec: 0,
-      endSec: 3.4, // ~4.7 syl/s
-    }),
-    "natural conversational pace"
+  assert.deepEqual(
+    serverSizes,
+    clientSizes,
+    "Server and browser sub-block sizes must match identically"
   );
-  assert.equal(
-    buildTurnPaceDirective({
-      cleanSpeechText: "Hammaga xayr!",
-      startSec: 0,
-      endSec: 2, // < 4.5 syl/s
-    }),
-    "relaxed pace"
-  );
-  assert.equal(
-    buildTurnPaceDirective({ cleanSpeechText: "Salom", startSec: 0, endSec: 5 }, true),
-    "speaking rapidly"
-  );
-
-  // Dirty legacy style input must be distilled into short English delivery (2-4 words) + pace
-  const cleanSampleStyle = buildCleanTurnStyleForTts({
-    cleanSpeechText: "Hammaga salom, bugun yangi avtomobilni ko‘ramiz.",
-    startSec: 0,
-    endSec: 3.2,
-    intonationRu: "Бодро, радостно",
-    style:
-      "Natural male Uzbek speaker (Азиз). Clear warm baritone voice, 100% authentic Uzbek pronunciation. Say the line exactly once, word for word.",
+  for (let i = 0; i < clientSubsTiggo.length; i++) {
+    assert.deepEqual(
+      serverSubsTiggo[i].map((t) => t.id),
+      clientSubsTiggo[i].turns.map((t) => t.id),
+      `Sub-block #${i + 1} turn IDs must match turn-for-turn between browser and server`
+    );
+  }
+  const emptyCachePlan = planSubBlockCacheExecution({
+    fullTurns: tiggoTurns,
+    projectKey: "test_project",
+    getSpeakerVoiceKey: (t) => (t.speakerId === "HOST_1" ? "charon" : "kore"),
+    getTurnStyleKey: (t) => t.style || "",
+    cachedSubBlocksByKey: new Map(),
   });
+  assert.equal(
+    emptyCachePlan.requestBatches.length,
+    6,
+    `1 sub-block = 1 HTTP request -> expected 6 requestBatches, got ${emptyCachePlan.requestBatches.length}`
+  );
   assert.ok(
-    cleanSampleStyle === "cheerful, lively, natural conversational pace",
-    `Unexpected clean style: ${cleanSampleStyle}`
+    emptyCachePlan.requestBatches.every((b) => b.subBlocks.length === 1),
+    "Every HTTP request batch must contain strictly 1 sub-block"
+  );
+  console.log("✅ TEST 1A PASSED: Tiggo 8 splits into [16, 17, 11, 13, 7, 15], client===server, 6 HTTP batches.");
+
+  // =========================================================================
+  // 1B. BASE STYLE, DELIVERY EMOTIONS, NO PACE DIRECTIVES & <laugh>
+  // =========================================================================
+  console.log("=== Test 1B: Constant Base Style, Delivery Emotions (Tiggo 8 Scenes 1-2) & <laugh> ===");
+
+  // Legacy dirty input -> stripped, no pace directives
+  const cleanSampleStyle = buildCleanTurnStyleForTts(
+    {
+      cleanSpeechText: "Hammaga salom, bugun yangi avtomobilni ko‘ramiz.",
+      startSec: 0,
+      endSec: 3.2,
+      intonationRu: "Бодро, радостно",
+      speakerGender: "male",
+      style:
+        "Natural male Uzbek speaker (Азиз). Clear warm baritone voice, 100% authentic Uzbek pronunciation. Say the line exactly once, word for word.",
+    },
+    speakerMap.get("HOST_1"),
+    true
+  );
+  assert.equal(cleanSampleStyle, "warm, relaxed, friendly, energetic, happy");
+  assert.ok(!/rapidly|pace/i.test(cleanSampleStyle), `Pace directive forbidden in style: ${cleanSampleStyle}`);
+
+  // When delivery emotions disabled -> base style ONLY, never <laugh>
+  const disabledEmotionStyle = buildTurnTtsStyle({
+    baseStyle: DEFAULT_BASE_STYLE_FEMALE,
+    gender: "female",
+    intonationRu: "kulib, taklif qilib",
+    useDeliveryEmotions: false,
+  }).style;
+  assert.equal(disabledEmotionStyle, DEFAULT_BASE_STYLE_FEMALE);
+  assert.equal(
+    shouldAppendLaughTag({
+      textForSyllables: "Hammaga salom!",
+      intonationRu: "kulib",
+      useDeliveryEmotions: false,
+      windowSec: 6,
+      gapAfterSec: 1,
+    }),
+    false,
+    "<laugh> must NOT be added when useDeliveryEmotions=false"
+  );
+  assert.equal(
+    shouldAppendLaughTag({
+      textForSyllables: "Bu juda uzun jumla bo‘lib vaqt yetmaydi deb hisoblaymiz hammamiz birga.",
+      intonationRu: "kulib",
+      useDeliveryEmotions: true,
+      windowSec: 2.0,
+      gapAfterSec: 0,
+    }),
+    false,
+    "<laugh> must NOT be added when free time < 0.5s"
   );
 
-  const scene2Turns = tiggoTurns.filter((t) => /2-SAHNA/i.test(t.sceneTitle || ""));
-  assert.equal(scene2Turns.length, 9, "Expected 9 turns in Scene 2 of Tiggo 8");
+  // Verify exact Tiggo 8 v4 Scenes 1-2 (first 16 turns = sub-block #1)
+  const scenes12Turns = clientSubsTiggo[0].turns;
+  assert.equal(scenes12Turns.length, 16, "Expected 16 turns in Tiggo 8 Scenes 1-2");
+
+  const expectedScene12Emotions: Record<number, string> = {
+    1: "excited, amused",
+    2: "amused, inviting",
+    4: "smiling",
+    6: "doubtful, curious",
+    8: "curious",
+    16: "pleased, smiling",
+  };
 
   const observedPayloads: Array<{ channel: string; text: string; style: string; speaker?: string }> = [];
   setTtsPayloadObserverForTesting(({ channel, parts }) => {
@@ -295,33 +384,259 @@ async function runAllStageTests() {
     }
   });
 
-  await synthesizeDialogueInMacroBlocks(trapAi, {
-    turns: scene2Turns,
+  const scenes12Result = await synthesizeDialogueInMacroBlocks(trapAi, {
+    turns: scenes12Turns,
     speakerMap,
     strictTimeWindow: true,
     bypassCache: true,
+    useDeliveryEmotions: true,
+    pronunciationDictionary: DEFAULT_PRONUNCIATION_DICTIONARY,
   });
   setTtsPayloadObserverForTesting(null);
 
-  assert.equal(observedPayloads.length, 9);
-  for (const p of observedPayloads) {
+  assert.equal(observedPayloads.length, 16);
+  for (let i = 0; i < observedPayloads.length; i++) {
+    const turnNum = i + 1;
+    const p = observedPayloads[i];
+    const t = scenes12Turns[i];
+    const expectedBase =
+      t.speakerId === "HOST_1" ? DEFAULT_BASE_STYLE_MALE : DEFAULT_BASE_STYLE_FEMALE;
+    const expectedEmotionSuffix = expectedScene12Emotions[turnNum];
+    const expectedFullStyle = expectedEmotionSuffix
+      ? `${expectedBase}, ${expectedEmotionSuffix}`
+      : expectedBase;
+
+    assert.equal(
+      p.style,
+      expectedFullStyle,
+      `Turn #${turnNum} (${t.intonationRu}) style mismatch: expected "${expectedFullStyle}", got "${p.style}"`
+    );
+    assert.ok(!/rapidly|pace/i.test(p.style), `Forbidden pace directive in style: ${p.style}`);
     assert.ok(!/short\s+pause/i.test(p.text), `Found <short pause> in text: ${p.text}`);
     assert.ok(
       !/^\s*Speaker(?:One|Two)\s*:/i.test(p.text),
       `FORBIDDEN SpeakerOne:/SpeakerTwo: prefix in text: ${p.text}`
     );
-    assert.ok(!/distinct\s+pause/i.test(p.style), `Found distinct pause in style: ${p.style}`);
-    assert.ok(!/Say\s+the\s+line\s+exactly\s+once/i.test(p.style), `Found forbidden phrase in style: ${p.style}`);
-    assert.ok(!/baritone/i.test(p.style), `Found baritone in style: ${p.style}`);
-    assert.ok(!/100%\s*authentic/i.test(p.style), `Found 100% authentic in style: ${p.style}`);
-    assert.ok(!/Natural\s+(?:male|female)/i.test(p.style), `Found Natural male/female in style: ${p.style}`);
-    assert.ok(!/Азиз|Вероника/i.test(p.style), `Found speaker name in style: ${p.style}`);
+    assert.ok(!/distinct\s+pause|Say\s+the\s+line|baritone|100%\s*authentic|Natural\s+(?:male|female)|Азиз|Вероника/i.test(p.style));
+
+    const hasLaugh = p.text.includes("<laugh>");
+    if (turnNum === 1 || turnNum === 2) {
+      assert.equal(hasLaugh, true, `Turn #${turnNum} must end with <laugh>, got: ${p.text}`);
+      assert.ok(p.text.endsWith("<laugh>"), `Turn #${turnNum} <laugh> must be at the end: ${p.text}`);
+    } else {
+      assert.equal(hasLaugh, false, `Turn #${turnNum} must NOT have <laugh>, got: ${p.text}`);
+    }
+  }
+  // Check Hybrid -> gibrid happened in TTS payload for the turn containing 'Hybrid', while returned turn.text kept original Hybrid
+  const hybridIdx = scenes12Turns.findIndex((t) => /\bHybrid\b/i.test(t.text));
+  assert.ok(hybridIdx >= 0, "Expected at least one turn in Tiggo 8 Scenes 1-2 to contain 'Hybrid'");
+  assert.ok(
+    /\bgibrid\b/i.test(observedPayloads[hybridIdx].text) &&
+      !/\bHybrid\b/i.test(observedPayloads[hybridIdx].text),
+    `Turn #${hybridIdx + 1} TTS text must replace Hybrid -> gibrid, got: ${observedPayloads[hybridIdx].text}`
+  );
+  assert.ok(
+    /\bHybrid\b/.test(scenes12Result.turns[hybridIdx].text),
+    `Returned turn #${hybridIdx + 1} script text must preserve original 'Hybrid', got: ${scenes12Result.turns[hybridIdx].text}`
+  );
+  console.log("✅ TEST 1B PASSED: Scenes 1-2 styles, <laugh> only on #01/#02, zero pace directives verified.");
+
+  // =========================================================================
+  // 1C. PRONUNCIATION DICTIONARY SAFETY, NON-DESTRUCTIVE EXPORT & CACHE INVALIDATION
+  // =========================================================================
+  console.log("=== Test 1C: Pronunciation Dictionary Safety, Export Preservation & Cache Key Invalidation ===");
+
+  // Whole-word, case-insensitive, Uzbek apostrophes are word chars, skips <...> tags
+  assert.equal(
+    applyPronunciationDictionary("Tiggo 8 Hybrid va HYBRID-auto, lekin Hybridlik emas <laugh>", [
+      { word: "Hybrid", pronunciation: "gibrid" },
+      { word: "laugh", pronunciation: "kulgi" },
+    ]),
+    "Tiggo 8 gibrid va gibrid-auto, lekin Hybridlik emas <laugh>"
+  );
+  assert.equal(
+    applyPronunciationDictionary("Oʻzbekiston va O'zbekiston hamda o‘z", [
+      { word: "o", pronunciation: "ZERO" },
+      { word: "zbekiston", pronunciation: "BAD" },
+    ]),
+    "Oʻzbekiston va O'zbekiston hamda o‘z",
+    "Uzbek apostrophe word chars must NOT split words for whole-word dictionary matching"
+  );
+
+  // Subtitles / CSV / JSON export preserve original "Hybrid" text
+  const rawHybridTurn = scenes12Turns[hybridIdx].rawTurn;
+  assert.ok(rawHybridTurn.text.includes("Hybrid"), `Fixture turn #${hybridIdx + 1} should contain Hybrid`);
+  const exportedCsv = exportTurnsToCsv([rawHybridTurn]);
+  assert.ok(exportedCsv.includes("Hybrid"), "CSV export must preserve original 'Hybrid'");
+  const exportedJson = exportTurnsToJson([rawHybridTurn], undefined, undefined, {
+    useDeliveryEmotions: true,
+    pronunciationDictionary: DEFAULT_PRONUNCIATION_DICTIONARY,
+  });
+  const parsedExported = parseReadyScript(exportedJson);
+  assert.equal(parsedExported.ok, true);
+  assert.ok(parsedExported.turns[0].text.includes("Hybrid"), "JSON round-trip must preserve 'Hybrid'");
+  assert.equal(parsedExported.useDeliveryEmotions, true);
+  assert.deepEqual(parsedExported.pronunciationDictionary, DEFAULT_PRONUNCIATION_DICTIONARY);
+
+  // Dictionary change invalidates BOTH client and server cache keys
+  const clientHashDictA = computeSubBlockClientHash({
+    subBlockTurns: scenes12Turns,
+    getSpeakerVoiceKey: (t) => (t.speakerId === "HOST_1" ? "charon" : "kore"),
+    getTurnStyleKey: (t) => t.style || "",
+    getTurnTtsText: (t) =>
+      prepareTurnTextForTts({
+        rawText: t.text,
+        intonationRu: t.intonationRu,
+        useDeliveryEmotions: true,
+        pronunciationDictionary: [{ word: "Hybrid", pronunciation: "gibrid" }],
+        windowSec: (t.endSec || 2) - (t.startSec || 0),
+        gapAfterSec: t.gapAfterSec || 0,
+      }).ttsText,
+    ttsModel: DEFAULT_DUBBING_TTS_MODEL,
+  });
+  const clientHashDictB = computeSubBlockClientHash({
+    subBlockTurns: scenes12Turns,
+    getSpeakerVoiceKey: (t) => (t.speakerId === "HOST_1" ? "charon" : "kore"),
+    getTurnStyleKey: (t) => t.style || "",
+    getTurnTtsText: (t) =>
+      prepareTurnTextForTts({
+        rawText: t.text,
+        intonationRu: t.intonationRu,
+        useDeliveryEmotions: true,
+        pronunciationDictionary: [{ word: "Hybrid", pronunciation: "xibrid" }],
+        windowSec: (t.endSec || 2) - (t.startSec || 0),
+        gapAfterSec: t.gapAfterSec || 0,
+      }).ttsText,
+    ttsModel: DEFAULT_DUBBING_TTS_MODEL,
+  });
+  assert.notEqual(
+    clientHashDictA,
+    clientHashDictB,
+    "Changing pronunciation dictionary MUST invalidate client sub-block cache hash"
+  );
+
+  const serverTurnsDictA = scenes12Turns.map((t) => ({
+    ...t,
+    cleanSpeechText: applyPronunciationDictionary(t.text, [{ word: "Hybrid", pronunciation: "gibrid" }]),
+  }));
+  const serverTurnsDictB = scenes12Turns.map((t) => ({
+    ...t,
+    cleanSpeechText: applyPronunciationDictionary(t.text, [{ word: "Hybrid", pronunciation: "xibrid" }]),
+  }));
+  assert.notEqual(
+    computeSubBlockCacheHash(serverTurnsDictA, speakerMap, "A"),
+    computeSubBlockCacheHash(serverTurnsDictB, speakerMap, "A"),
+    "Changing pronunciation dictionary MUST invalidate server sub-block cache hash"
+  );
+  console.log("✅ TEST 1C PASSED: Pronunciation dictionary whole-word/apostrophe/tag safety, export preservation & cache invalidation verified.");
+
+  // =========================================================================
+  // 1D. BS.1770-4 LOUDNESS LEVELING & FFMPEG EBUR128 CROSS-CHECK
+  // =========================================================================
+  console.log("=== Test 1D: BS.1770-4 Loudness Leveling (-18 / -21 LUFS, <= -1 dBFS, <1s median, ffmpeg ebur128) ===");
+
+  const makeSinePcmAtDbfs = (durationSec: number, peakDbfs: number, freqHz = 440): Buffer => {
+    const sampleRate = 24000;
+    const totalSamples = Math.round(durationSec * sampleRate);
+    const amp = Math.min(0.999, Math.pow(10, peakDbfs / 20)) * 32767;
+    const buf = Buffer.alloc(totalSamples * 2);
+    for (let i = 0; i < totalSamples; i++) {
+      const s = Math.round(Math.sin((2 * Math.PI * freqHz * i) / sampleRate) * amp);
+      buf.writeInt16LE(Math.max(-32768, Math.min(32767, s)), i * 2);
+    }
+    return buf;
+  };
+
+  // Multi-tone speech-like synthetic clips from ~-30 LUFS up to ~-10 LUFS + a quietly clip + a <1.0s short clip
+  const rawLevelClips = [
+    { speaker: "HOST_1", style: "warm, relaxed, friendly", pcm: makeSinePcmAtDbfs(2.5, -27, 300) },
+    { speaker: "HOST_1", style: "warm, relaxed, friendly", pcm: makeSinePcmAtDbfs(2.5, -18, 340) },
+    { speaker: "HOST_1", style: "warm, relaxed, friendly", pcm: makeSinePcmAtDbfs(2.5, -7, 380) },
+    { speaker: "HOST_1", style: "warm, relaxed, friendly", pcm: makeSinePcmAtDbfs(0.55, -26, 320) }, // < 1.0s short clip!
+    { speaker: "HOST_2", style: "lively, casual, friendly, quietly", pcm: makeSinePcmAtDbfs(2.5, -12, 420) },
+    { speaker: "HOST_2", style: "lively, casual, friendly", pcm: makeSinePcmAtDbfs(2.5, -25, 450) },
+  ];
+
+  const leveled = levelSubBlockClipsLoudness(rawLevelClips);
+  assert.equal(leveled.length, rawLevelClips.length);
+
+  for (const idx of [0, 1, 2, 5]) {
+    const res = leveled[idx];
     assert.ok(
-      /(?:speaking rapidly|natural conversational pace|relaxed pace)$/.test(p.style),
-      `Style must end with official pace directive, got: ${p.style}`
+      res.lufsAfter !== null && Math.abs(res.lufsAfter - -18.0) <= 0.5,
+      `Clip #${idx} expected -18.0 ± 0.5 LUFS, got ${res.lufsAfter} (before=${res.lufsBefore})`
+    );
+    assert.ok(
+      res.peakAfterDbfs !== null && res.peakAfterDbfs <= -0.95,
+      `Clip #${idx} peak must be <= -1.0 dBFS, got ${res.peakAfterDbfs}`
     );
   }
-  console.log("✅ TEST 1 PASSED: Gemini 3.8 TTS style & clean verbatim text verified.");
+  // Quietly clip -> -21 LUFS
+  assert.ok(
+    leveled[4].lufsAfter !== null && Math.abs(leveled[4].lufsAfter - -21.0) <= 0.5,
+    `Quietly clip expected -21.0 ± 0.5 LUFS, got ${leveled[4].lufsAfter}`
+  );
+  // Short clip (< 1.0s) used speaker median gain
+  assert.equal(leveled[3].usedMedianGain, true, "Short <1.0s clip must use speaker median gain");
+  const expectedMedianGain = leveled[1].gainDb; // median of [gain(clip0), gain(clip1), gain(clip2)]
+  assert.ok(
+    Math.abs(leveled[3].gainDb - expectedMedianGain) <= 0.25,
+    `Short clip gain (${leveled[3].gainDb}) should match HOST_1 median gain (${expectedMedianGain})`
+  );
+
+  // Cross-check clip #0 LUFS against real ffmpeg ebur128!
+  const tmpWav = path.join(os.tmpdir(), `ovoz-lufs-check-${Date.now()}.wav`);
+  try {
+    fs.writeFileSync(tmpWav, buildWav24k(leveled[0].pcm));
+    const { spawnSync } = await import("node:child_process");
+    const sp = spawnSync("ffmpeg", ["-nostats", "-i", tmpWav, "-af", "ebur128", "-f", "null", "-"], {
+      encoding: "utf8",
+    });
+    assert.equal(sp.status, 0, `ffmpeg ebur128 failed (code ${sp.status}): ${sp.stderr}`);
+    const ffmpegOutput = `${sp.stdout || ""}\n${sp.stderr || ""}`;
+    const iMatch = ffmpegOutput.match(/Integrated loudness:[\s\S]*?I:\s*(-?\d+(?:\.\d+)?)\s*LUFS/i);
+    assert.ok(iMatch, `Could not parse Integrated LUFS from ffmpeg ebur128 output:\n${ffmpegOutput.slice(-400)}`);
+    const ffmpegLufs = parseFloat(iMatch[1]);
+    const ourLufs = measureIntegratedLufsPcm(leveled[0].pcm, 24000);
+    const peakCheck = measurePeakDbfsPcm(leveled[0].pcm);
+    assert.ok(
+      Math.abs(ffmpegLufs - -18.0) <= 0.6 && Math.abs(ffmpegLufs - ourLufs) <= 0.5,
+      `ffmpeg ebur128 (${ffmpegLufs} LUFS) vs our BS.1770 (${ourLufs} LUFS) drifted beyond tolerance!`
+    );
+    assert.ok(peakCheck <= -0.95, `Peak exceeded -1.0 dBFS: ${peakCheck}`);
+    console.log(
+      `  ✓ ffmpeg ebur128 cross-check: ours=${ourLufs.toFixed(2)} LUFS, ffmpeg=${ffmpegLufs.toFixed(2)} LUFS, peak=${peakCheck.toFixed(2)} dBFS`
+    );
+  } finally {
+    if (fs.existsSync(tmpWav)) fs.unlinkSync(tmpWav);
+  }
+  console.log("✅ TEST 1D PASSED: BS.1770-4 loudness leveling (-18/-21 LUFS, limiter, <1s median, ffmpeg verified).");
+
+  // =========================================================================
+  // 1E. SINGLE-TURN REGEN IN MODE A CONTEXT ([prev, target, next])
+  // =========================================================================
+  console.log("=== Test 1E: Single-Turn Context Regeneration in Mode A ===");
+  const singleCtxObserved: Array<{ channel: string; count: number }> = [];
+  setTtsPayloadObserverForTesting(({ channel, parts }) => {
+    singleCtxObserved.push({ channel, count: parts.length });
+  });
+  const singleCtxRes = await synthesizeSingleTurnInModeAContext(trapAi, {
+    contextTurns: [scenes12Turns[0], scenes12Turns[1], scenes12Turns[2]],
+    targetIndex: 1,
+    speakerMap,
+    strictTimeWindow: true,
+    useDeliveryEmotions: true,
+    pronunciationDictionary: DEFAULT_PRONUNCIATION_DICTIONARY,
+  });
+  setTtsPayloadObserverForTesting(null);
+  assert.equal(singleCtxRes.turn.generationMode, "mode_a", "Single-turn regen with built-in voices must run in Mode A");
+  assert.equal(singleCtxRes.turn.id, scenes12Turns[1].id, "Must return ONLY the target turn");
+  assert.equal(singleCtxRes.provider, "fake", "Fake mode must not make real API calls");
+  assert.equal(singleCtxObserved.length, 1, "Must synthesize [prev, target, next] in a single Mode A TTS call");
+  assert.equal(singleCtxObserved[0].channel, "google_mode_a");
+  assert.equal(singleCtxObserved[0].count, 3, "Mode A context call must include all 3 turns [prev, target, next]");
+  assert.ok(singleCtxRes.turn.wavBase64 && singleCtxRes.turn.wavBase64.length > 64);
+  console.log("✅ TEST 1E PASSED: Single-turn context regen uses Mode A [prev, target, next] and returns target clip.");
 
   // =========================================================================
   // 2. PER-TURN ALIGNMENT QA: SHIFTED TAIL, GENDER, SILENCE SNAP, <=4 SYL, NORMALIZATION
@@ -539,10 +854,10 @@ async function runAllStageTests() {
   console.log("=== Test 3: 25% Extra TTS Retry Budget Cap ===");
   clearBlockCache();
 
-  // All sub-blocks of Tiggo 8 (~13 sub-blocks) fail QA; extra TTS calls MUST NOT exceed floor(subBlocks * 0.25)
+  // All sub-blocks of Tiggo 8 (6 sub-blocks) fail QA; extra TTS calls MUST NOT exceed floor(subBlocks * 0.25)
   const expectedSubBlockCount = planDialogueSubBlocks(tiggoTurns).length;
   const expectedBudget = Math.floor(expectedSubBlockCount * 0.25);
-  assert.ok(expectedBudget >= 2, `Expected >=2 retry budget for Tiggo 8, got ${expectedBudget}`);
+  assert.ok(expectedBudget >= 1, `Expected >=1 retry budget for Tiggo 8, got ${expectedBudget}`);
 
   setFakeDubbingFaultInjectorForTesting(() => ({
     overrideTranscript: "short pause broken",
@@ -694,7 +1009,20 @@ async function runAllStageTests() {
       sb.turns.some((t) => t.speakerId === "HOST_2")
   )!.turns;
 
-  const expectedServerHash = computeSubBlockCacheHash(oneMixedSub, speakerMap, "A");
+  const preparedOneMixedSub = oneMixedSub.map((t) => {
+    const startSec = typeof t.startSec === "number" ? t.startSec : 0;
+    const endSec = typeof t.endSec === "number" ? t.endSec : startSec + 2;
+    const prepared = prepareTurnTextForTts({
+      rawText: t.text,
+      pronunciationDictionary: DEFAULT_PRONUNCIATION_DICTIONARY,
+      intonationRu: t.intonationRu,
+      useDeliveryEmotions: true,
+      windowSec: Math.max(0.4, endSec - startSec),
+      gapAfterSec: t.gapAfterSec ?? 0,
+    });
+    return { ...t, cleanSpeechText: prepared.ttsText };
+  });
+  const expectedServerHash = computeSubBlockCacheHash(preparedOneMixedSub, speakerMap, "A");
   fs.mkdirSync(BLOCK_CACHE_DIR, { recursive: true });
   // Write a poisoned legacy v2 cache file under the exact same hash filename
   fs.writeFileSync(
@@ -714,6 +1042,7 @@ async function runAllStageTests() {
     speakerMap,
     strictTimeWindow: true,
     bypassCache: false,
+    pronunciationDictionary: DEFAULT_PRONUNCIATION_DICTIONARY,
   });
   assert.equal(
     afterLegacyServerRun.provider,
@@ -732,6 +1061,7 @@ async function runAllStageTests() {
     speakerMap,
     strictTimeWindow: true,
     bypassCache: false,
+    pronunciationDictionary: DEFAULT_PRONUNCIATION_DICTIONARY,
   });
   assert.equal(v3Hit.provider, "cache", "Second run with same voices must hit v3 disk cache");
 
@@ -742,7 +1072,7 @@ async function runAllStageTests() {
     baseVoice: "Aoede",
     voiceId: "aoede",
   });
-  const serverHashChanged = computeSubBlockCacheHash(oneMixedSub, speakerMapChanged, "A");
+  const serverHashChanged = computeSubBlockCacheHash(preparedOneMixedSub, speakerMapChanged, "A");
   assert.notEqual(expectedServerHash, serverHashChanged, "Server hash must change when one speaker voice changes");
 
   const reSynthBoth = await synthesizeDialogueInMacroBlocks(trapAi, {
@@ -750,6 +1080,7 @@ async function runAllStageTests() {
     speakerMap: speakerMapChanged,
     strictTimeWindow: true,
     bypassCache: false,
+    pronunciationDictionary: DEFAULT_PRONUNCIATION_DICTIONARY,
   });
   assert.equal(reSynthBoth.provider, "fake", "Changed voice must re-synthesize instead of hitting old cache");
   assert.equal(reSynthBoth.turns.length, oneMixedSub.length, "Must re-synthesize whole sub-block with both speakers");

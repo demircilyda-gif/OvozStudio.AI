@@ -119,6 +119,11 @@ export interface DialogueTurn {
   qa?: 'ok' | 'retried' | 'failed';
   qaReason?: string;
   slicingMethod?: string;
+  generationMode?: 'mode_a' | 'mode_b';
+  lufsBefore?: number | null;
+  lufsAfter?: number | null;
+  sentStyle?: string;
+  sentText?: string;
   shiftedStartBySec?: number;
   needsShorten?: boolean;
   subBlockIndex?: number;

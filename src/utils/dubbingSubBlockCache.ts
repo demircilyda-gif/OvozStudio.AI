@@ -3,8 +3,10 @@ import {
   type MacroBlockTurnLike,
   type PlannedSubBlock,
 } from './dialogueMacroBlocks';
+import { SUB_BLOCK_MAX_SEC, SUB_BLOCK_MAX_TURNS } from './dubbingLimits';
 
 export const DUBBING_CACHE_VERSION = 'v3' as const;
+export const DEFAULT_DUBBING_TTS_MODEL = 'gemini-3.8-flash-tts';
 
 export interface CachedSubBlockTurnRecord {
   turnId: string;
@@ -19,6 +21,9 @@ export interface CachedSubBlockTurnRecord {
   qa?: 'ok' | 'retried' | 'failed';
   qaReason?: string;
   slicingMethod?: string;
+  generationMode?: 'mode_a' | 'mode_b';
+  lufsBefore?: number | null;
+  lufsAfter?: number | null;
   shiftedStartBySec?: number;
   needsShorten?: boolean;
   subBlockIndex?: number;
@@ -60,17 +65,26 @@ function dualFnv1a64Hex(payload: string): string {
 }
 
 /**
- * Computes a deterministic v3 sub-block hash from:
+ * Computes a deterministic v3 sub-block hash from what ACTUALLY goes to TTS:
  * - DUBBING_CACHE_VERSION ('v3')
- * - voices of ALL speakers participating in the sub-block (both speakers for 2-speaker sub-blocks)
- * - texts, styles, speakerIds, and turnIds of every turn in the sub-block in exact order
+ * - ttsModel (e.g. 'gemini-3.8-flash-tts')
+ * - voices of ALL speakers participating in the sub-block
+ * - post-dictionary TTS text (with <laugh> if any), final resolved style, speakerId, and turnId of every turn
  */
 export function computeSubBlockClientHash<T extends SubBlockCacheKeyTurnLike>(params: {
   subBlockTurns: T[];
   getSpeakerVoiceKey: (turn: T) => string;
   getTurnStyleKey: (turn: T) => string;
+  getTurnTtsText?: (turn: T) => string;
+  ttsModel?: string;
 }): string {
-  const { subBlockTurns, getSpeakerVoiceKey, getTurnStyleKey } = params;
+  const {
+    subBlockTurns,
+    getSpeakerVoiceKey,
+    getTurnStyleKey,
+    getTurnTtsText,
+    ttsModel = DEFAULT_DUBBING_TTS_MODEL,
+  } = params;
 
   const speakerVoiceMap = new Map<string, string>();
   for (const t of subBlockTurns) {
@@ -85,11 +99,12 @@ export function computeSubBlockClientHash<T extends SubBlockCacheKeyTurnLike>(pa
 
   const payload = JSON.stringify({
     v: DUBBING_CACHE_VERSION,
+    model: String(ttsModel || DEFAULT_DUBBING_TTS_MODEL).trim(),
     speakers: sortedSpeakers,
     turns: subBlockTurns.map((t) => ({
       id: t.id,
       speakerId: String(t.speakerId || 'HOST_1').trim(),
-      text: String(t.text || '').trim(),
+      text: String(getTurnTtsText ? getTurnTtsText(t) : t.text || '').trim(),
       style: String(getTurnStyleKey(t) || '').trim(),
       voice: String(getSpeakerVoiceKey(t) || '').trim(),
     })),
@@ -151,10 +166,11 @@ export interface SubBlockCacheExecutionPlan<T extends SubBlockCacheKeyTurnLike> 
 }
 
 /**
- * Plans sub-blocks ALWAYS over the FULL script (`planDialogueSubBlocks`), resolves whole-sub-block
- * v3 cache hits, and groups uncached COMPLETE sub-blocks into server request batches.
+ * Plans sub-blocks ALWAYS over the FULL script (`planDialogueSubBlocks` with shared limits),
+ * resolves whole-sub-block v3 cache hits, and emits STRICTLY 1 HTTP request batch per uncached sub-block.
  *
  * Guarantees:
+ * - 1 sub-block = 1 HTTP request (no merging adjacent sub-blocks into a larger request).
  * - A sub-block is either taken 100% from v3 cache (all turns ok/retried) or sent 100% whole
  *   with all turns of BOTH speakers to the server.
  * - Never sends a cherry-picked subset of turns from inside a sub-block.
@@ -164,23 +180,25 @@ export function planSubBlockCacheExecution<T extends SubBlockCacheKeyTurnLike>(p
   projectKey: string;
   getSpeakerVoiceKey: (turn: T) => string;
   getTurnStyleKey: (turn: T) => string;
+  getTurnTtsText?: (turn: T) => string;
+  ttsModel?: string;
   cachedSubBlocksByKey: Map<string, Partial<CachedDialogueSubBlock>>;
   ignoreCache?: boolean;
-  maxTurnsPerRequest?: number;
 }): SubBlockCacheExecutionPlan<T> {
   const {
     fullTurns,
     projectKey,
     getSpeakerVoiceKey,
     getTurnStyleKey,
+    getTurnTtsText,
+    ttsModel = DEFAULT_DUBBING_TTS_MODEL,
     cachedSubBlocksByKey,
     ignoreCache = false,
-    maxTurnsPerRequest = 25,
   } = params;
 
   const plannedSubBlocks = planDialogueSubBlocks(fullTurns, {
-    maxTurns: 8,
-    maxWindowSec: 40,
+    maxTurns: SUB_BLOCK_MAX_TURNS,
+    maxWindowSec: SUB_BLOCK_MAX_SEC,
     macroBlockOptions: { maxSize: 25, minPauseSec: 0.5 },
   });
 
@@ -189,6 +207,8 @@ export function planSubBlockCacheExecution<T extends SubBlockCacheKeyTurnLike>(p
       subBlockTurns: subBlock.turns,
       getSpeakerVoiceKey,
       getTurnStyleKey,
+      getTurnTtsText,
+      ttsModel,
     });
     const cacheKey = buildSubBlockCacheKey(projectKey, subBlockHash);
     const rawEntry = ignoreCache ? undefined : cachedSubBlocksByKey.get(cacheKey);
@@ -206,49 +226,15 @@ export function planSubBlockCacheExecution<T extends SubBlockCacheKeyTurnLike>(p
   const cachedSubBlocks = allSubBlocks.filter((item) => item.isCached);
   const uncachedSubBlocks = allSubBlocks.filter((item) => !item.isCached);
 
-  // Group consecutive uncached complete sub-blocks from the same macro-block into HTTP requests
-  // (strictly preserving complete sub-blocks; never merging non-adjacent sub-blocks across a cached gap!)
-  const requestBatches: SubBlockExecutionBatch<T>[] = [];
-  let currentGroup: PlannedSubBlockWithCache<T>[] = [];
-  let currentTurnCount = 0;
-
-  const flushGroup = () => {
-    if (currentGroup.length === 0) return;
-    const turns = currentGroup.flatMap((g) => g.subBlock.turns);
-    requestBatches.push({
-      batchIndex: requestBatches.length,
-      macroBlockIndex: currentGroup[0].subBlock.macroBlockIndex,
-      subBlocks: currentGroup,
-      turns,
-      startTimecode: currentGroup[0].subBlock.startTimecode,
-      endTimecode: currentGroup[currentGroup.length - 1].subBlock.endTimecode,
-    });
-    currentGroup = [];
-    currentTurnCount = 0;
-  };
-
-  for (const item of uncachedSubBlocks) {
-    if (currentGroup.length === 0) {
-      currentGroup = [item];
-      currentTurnCount = item.subBlock.turns.length;
-      continue;
-    }
-
-    const prev = currentGroup[currentGroup.length - 1];
-    const isAdjacent = item.subBlock.subBlockIndex === prev.subBlock.subBlockIndex + 1;
-    const sameMacro = item.subBlock.macroBlockIndex === prev.subBlock.macroBlockIndex;
-    const fitsSize = currentTurnCount + item.subBlock.turns.length <= maxTurnsPerRequest;
-
-    if (isAdjacent && sameMacro && fitsSize) {
-      currentGroup.push(item);
-      currentTurnCount += item.subBlock.turns.length;
-    } else {
-      flushGroup();
-      currentGroup = [item];
-      currentTurnCount = item.subBlock.turns.length;
-    }
-  }
-  flushGroup();
+  // 1 sub-block = 1 HTTP request (never merge adjacent uncached sub-blocks)
+  const requestBatches: SubBlockExecutionBatch<T>[] = uncachedSubBlocks.map((item, idx) => ({
+    batchIndex: idx,
+    macroBlockIndex: item.subBlock.macroBlockIndex,
+    subBlocks: [item],
+    turns: item.subBlock.turns,
+    startTimecode: item.subBlock.startTimecode,
+    endTimecode: item.subBlock.endTimecode,
+  }));
 
   const cachedTurnCount = cachedSubBlocks.reduce((acc, item) => acc + item.subBlock.turns.length, 0);
 

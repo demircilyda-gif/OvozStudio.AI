@@ -1,3 +1,5 @@
+import { SUB_BLOCK_MAX_SEC, SUB_BLOCK_MAX_TURNS } from './dubbingLimits';
+
 export interface MacroBlockTurnLike {
   id?: string;
   speakerId?: string;
@@ -430,12 +432,12 @@ export function splitTurnsIntoMacroBlocks<T extends MacroBlockTurnLike>(
 }
 
 // =========================================================================
-// STAGE 1: SUB-BLOCK PLANNER (<= 8 turns AND <= 40s sum of turn windows)
+// STAGE 1: SUB-BLOCK PLANNER (defaults from src/utils/dubbingLimits.ts)
 // =========================================================================
 
 export interface SubBlockSplitOptions {
-  maxTurns?: number; // default 8
-  maxWindowSec?: number; // default 40
+  maxTurns?: number; // default SUB_BLOCK_MAX_TURNS (20)
+  maxWindowSec?: number; // default SUB_BLOCK_MAX_SEC (110)
   macroBlockOptions?: MacroBlockSplitOptions;
 }
 
@@ -626,8 +628,8 @@ export function planDialogueSubBlocks<T extends MacroBlockTurnLike>(
 ): PlannedSubBlock<T>[] {
   if (!Array.isArray(turns) || turns.length === 0) return [];
 
-  const maxTurns = Math.max(1, options.maxTurns ?? 8);
-  const maxWindowSec = Math.max(5, options.maxWindowSec ?? 40);
+  const maxTurns = Math.max(1, options.maxTurns ?? SUB_BLOCK_MAX_TURNS);
+  const maxWindowSec = Math.max(5, options.maxWindowSec ?? SUB_BLOCK_MAX_SEC);
 
   const macroBlocks = planDialogueMacroBlocks(turns, options.macroBlockOptions);
   const result: PlannedSubBlock<T>[] = [];

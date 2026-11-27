@@ -25,6 +25,15 @@ import {
 } from "./batchAudioSlicer.ts";
 import { normalizeUzbekSpeech } from "../../../src/utils/uzbekNormalizer.ts";
 import {
+  buildTurnTtsStyle,
+  prepareTurnTextForTts,
+  getDefaultBaseStyleForGender,
+} from "../../../src/utils/dubbingStyle.ts";
+import {
+  type PronunciationDictionaryEntry,
+} from "../../../src/utils/pronunciationDictionary.ts";
+import { levelSubBlockClipsLoudness } from "./loudnessLeveler.ts";
+import {
   applyMildAtempoPcm,
   countSyllables,
   type TurnSyncStatus,
@@ -100,6 +109,12 @@ export interface BatchSynthesizedTurnResult {
   fitStepApplied: string;
   syncStatus: TurnSyncStatus;
   slicingMethod: string;
+  generationMode: "mode_a" | "mode_b";
+  lufsBefore?: number | null;
+  lufsAfter?: number | null;
+  sentStyle?: string;
+  sentText?: string;
+  spokenText?: string;
   qa: TurnQaStatus;
   qaReason?: string;
   needsShorten: boolean;
@@ -131,6 +146,9 @@ export interface BatchDialogueExecutionResult {
   transcribeCallsUsed: number;
   extraTtsCallsUsed: number;
   extraTtsBudget: number;
+  ttsWallTimeMs: number;
+  alignWallTimeMs: number;
+  heardTranscripts: string[];
   provider: "google" | "kie.ai" | "cache" | "fake" | "mixed";
   modeUsed: "mode_a_multispeaker" | "mode_b_per_speaker" | "cache" | "fake";
   blocksTotal: number;
@@ -258,75 +276,80 @@ export function computeTurnSyllableDensity(
 }
 
 /**
- * Стиль темпа по документации Gemini 3.8 TTS (слоги / (endSec - startSec)):
- * - >= 5.5 (или forceFastPace) -> "speaking rapidly"
- * - 4.5–5.5 -> "natural conversational pace"
- * - < 4.5 -> "relaxed pace"
- */
-export function buildTurnPaceDirective(
-  turn: { cleanSpeechText: string; startSec?: number; endSec?: number; forceFastPace?: boolean },
-  forceFastPace?: boolean
-): string {
-  const density = computeTurnSyllableDensity(turn.cleanSpeechText, turn.startSec, turn.endSec);
-  if (forceFastPace || turn.forceFastPace || density >= 5.5) {
-    return "speaking rapidly";
-  }
-  if (density >= 4.5) {
-    return "natural conversational pace";
-  }
-  return "relaxed pace";
-}
-
-/**
- * Короткая подача (строго 2–4 слова на английском) без имени, пола, baritone и длинных инструкций.
- */
-export function buildShortEnglishDelivery(turn: {
-  intonationRu?: string;
-  emotion?: string;
-  style?: string;
-}): string {
-  const hint = `${turn.intonationRu || ""} ${turn.emotion || ""} ${turn.style || ""}`.toLowerCase();
-
-  if (/восторг|восхищ|удивл|вау|пораж|amazed|excited|surprised|wow/i.test(hint)) {
-    return "excited, amazed";
-  }
-  if (/радост|весел|бодр|энергич|улыб|сме[её]|шутл|живо|cheerful|lively|energetic|bright|smiling/i.test(hint)) {
-    return "cheerful, lively";
-  }
-  if (/любопыт|интерес|вопрос|спраш|заинтерес|curious|engaging|inquisitive/i.test(hint)) {
-    return "curious, engaging";
-  }
-  if (/ирон|скепт|сомн|подкол|подшуч|playful|skeptical|teasing/i.test(hint)) {
-    return "playful, skeptical";
-  }
-  if (/тревож|обеспок|взволн|эмоц|драмат|concerned|emotional|urgent/i.test(hint)) {
-    return "expressive, concerned";
-  }
-  if (/уверен|эксперт|делов|ч[её]тк|информат|по делу|confident|clear|assertive|authoritative/i.test(hint)) {
-    return "confident, clear";
-  }
-  if (/серь[её]з|сдержан|задумч|вдумч|calm|thoughtful|serious|measured/i.test(hint)) {
-    return "calm, thoughtful";
-  }
-  if (/спокойн|мягк|тепл|дружел|приветл|warm|friendly|gentle/i.test(hint)) {
-    return "warm, friendly";
-  }
-  return "warm, natural";
-}
-
-/**
- * Gemini 3.8 TTS style: короткая подача (2–4 слова на английском) + темп.
- * Без имени, пола, baritone, "100% authentic" и "Say the line exactly once".
- * Голос задаётся исключительно в voiceConfig.
+ * Gemini 3.8 TTS style: постоянный базовый стиль спикера + до 2 эмоций из «Подачи».
+ * НИКАКИХ указаний темпа ("speaking rapidly", "natural conversational pace", "relaxed pace") —
+ * темпом управляет только atempo.
+ * На нейтральных репликах строка style полностью одинакова (только базовый стиль спикера).
  */
 export function buildCleanTurnStyleForTts(
-  turn: Pick<BatchInputTurn, "cleanSpeechText" | "startSec" | "endSec" | "forceFastPace" | "intonationRu" | "emotion" | "style">,
-  _extraContext?: string,
-  forceFastPace?: boolean
+  turn: Pick<BatchInputTurn, "intonationRu" | "speakerGender" | "speakerId">,
+  speakerOrBaseStyle?: ResolvedBatchSpeaker | string | null,
+  useDeliveryEmotions: boolean = true
 ): string {
-  const delivery = buildShortEnglishDelivery(turn);
-  const pace = buildTurnPaceDirective(turn, forceFastPace);
-  return `${delivery}, ${pace}`;
+  const speakerObj =
+    speakerOrBaseStyle && typeof speakerOrBaseStyle === "object"
+      ? speakerOrBaseStyle
+      : undefined;
+  const gender = inferSpeakerGender(speakerObj, turn as BatchInputTurn);
+  const baseStyle =
+    typeof speakerOrBaseStyle === "string"
+      ? speakerOrBaseStyle
+      : speakerObj?.baseSpeechStyle || getDefaultBaseStyleForGender(gender);
+
+  return buildTurnTtsStyle({
+    baseStyle,
+    gender,
+    intonationRu: turn.intonationRu,
+    useDeliveryEmotions,
+  }).style;
+}
+
+/**
+ * Готовит BatchInputTurn к отправке в TTS:
+ * - применяет словарь произношения ДО всех остальных текстовых преобразований;
+ * - нормализует числа/сокращения и очищает теги;
+ * - при наличии `kulib` и запаса >= 0.5 с до следующей реплики добавляет `<laugh>`;
+ * - собирает финальный style (базовый стиль + до 2 эмоций из «Подачи», без темпа).
+ * Исходное поле `turn.text` (для субтитров/SRT/таблицы/экспорта) НЕ изменяется.
+ */
+export function prepareBatchTurnForTts(
+  turn: BatchInputTurn,
+  speaker: ResolvedBatchSpeaker | undefined,
+  options: {
+    useDeliveryEmotions?: boolean;
+    pronunciationDictionary?: ReadonlyArray<Partial<PronunciationDictionaryEntry>> | null;
+  } = {}
+): BatchInputTurn {
+  const useDeliveryEmotions = options.useDeliveryEmotions !== false;
+  const windowSec =
+    typeof turn.startSec === "number" &&
+    typeof turn.endSec === "number" &&
+    turn.endSec > turn.startSec
+      ? Math.max(0.5, turn.endSec - turn.startSec)
+      : 0;
+
+  const rawSourceText = String(turn.text || turn.cleanSpeechText || "").trim();
+  const preparedText = prepareTurnTextForTts({
+    rawText: rawSourceText,
+    pronunciationDictionary: options.pronunciationDictionary,
+    intonationRu: turn.intonationRu,
+    useDeliveryEmotions,
+    windowSec,
+    gapAfterSec: turn.gapAfterSec ?? 0,
+    decimalStyle: DUBBING_MODELS_CONFIG.decimalPronunciationStyle || "butun",
+  });
+
+  const resolvedStyle = buildCleanTurnStyleForTts(
+    turn,
+    speaker,
+    useDeliveryEmotions
+  );
+
+  return {
+    ...turn,
+    cleanSpeechText: preparedText.ttsText,
+    style: resolvedStyle,
+  };
 }
 
 /**
@@ -452,7 +475,8 @@ function inferSpeakerGender(
 export function computeSubBlockCacheHash(
   subBlockTurns: BatchInputTurn[],
   speakerMap: Map<string, ResolvedBatchSpeaker>,
-  mode: "A" | "B"
+  mode: "A" | "B",
+  useDeliveryEmotions: boolean = true
 ): string {
   const participatingSpeakerIds = Array.from(
     new Set(subBlockTurns.map((t) => String(t.speakerId || "HOST_1")))
@@ -471,6 +495,7 @@ export function computeSubBlockCacheHash(
     v: 3,
     cacheVersion: DUBBING_CACHE_VERSION,
     promptVersion: DUBBING_PROMPT_VERSION,
+    ttsModel: DUBBING_MODELS_CONFIG.ttsDubbingModel,
     mode,
     speakers: speakersPayload,
     turns: subBlockTurns.map((t) => {
@@ -480,7 +505,7 @@ export function computeSubBlockCacheHash(
         speakerId: t.speakerId,
         text: stripLegacyPauseArtifacts(t.cleanSpeechText),
         voice: sp?.isCloned ? sp.voiceId || "cloned" : sp?.baseVoice || "Charon",
-        style: buildCleanTurnStyleForTts(t),
+        style: buildCleanTurnStyleForTts(t, sp, useDeliveryEmotions),
       };
     }),
   };
@@ -493,6 +518,9 @@ interface CachedBlockEntryV3 {
   promptVersion: string;
   qa: TurnQaStatus;
   methods: string[];
+  generationModes?: Array<"mode_a" | "mode_b">;
+  lufsBefore?: Array<number | null>;
+  lufsAfter?: Array<number | null>;
   savedAt: string;
   clips: string[];
 }
@@ -500,7 +528,14 @@ interface CachedBlockEntryV3 {
 function loadCachedBlockPcmsV3(
   hash: string,
   expectedCount: number
-): { pcms: Buffer[]; methods: string[]; qa: TurnQaStatus } | null {
+): {
+  pcms: Buffer[];
+  methods: string[];
+  generationModes: Array<"mode_a" | "mode_b">;
+  lufsBefore: Array<number | null>;
+  lufsAfter: Array<number | null>;
+  qa: TurnQaStatus;
+} | null {
   try {
     const metaPath = path.join(BLOCK_CACHE_DIR, `${hash}.json`);
     if (!fs.existsSync(metaPath)) return null;
@@ -520,9 +555,24 @@ function loadCachedBlockPcmsV3(
         ? meta.methods
         : new Array(expectedCount).fill("cache");
     if (methods.some((m) => DISALLOWED_CACHE_METHODS.has(m))) return null;
+    const generationModes: Array<"mode_a" | "mode_b"> =
+      Array.isArray(meta.generationModes) && meta.generationModes.length === expectedCount
+        ? meta.generationModes
+        : new Array(expectedCount).fill("mode_a");
+    const lufsBefore: Array<number | null> =
+      Array.isArray(meta.lufsBefore) && meta.lufsBefore.length === expectedCount
+        ? meta.lufsBefore
+        : new Array(expectedCount).fill(null);
+    const lufsAfter: Array<number | null> =
+      Array.isArray(meta.lufsAfter) && meta.lufsAfter.length === expectedCount
+        ? meta.lufsAfter
+        : new Array(expectedCount).fill(null);
     return {
       pcms: meta.clips.map((b64) => Buffer.from(b64, "base64")),
       methods: methods.map((m) => (m === "cache" ? "cache" : `cache:${m}`)),
+      generationModes,
+      lufsBefore,
+      lufsAfter,
       qa: meta.qa,
     };
   } catch {
@@ -540,7 +590,10 @@ function saveCachedBlockPcmsV3(
   hash: string,
   pcms: Buffer[],
   methods: string[],
-  qa: TurnQaStatus
+  qa: TurnQaStatus,
+  generationModes?: Array<"mode_a" | "mode_b">,
+  lufsBefore?: Array<number | null>,
+  lufsAfter?: Array<number | null>
 ): boolean {
   if (!canSaveSubBlockToCache(qa, methods)) return false;
   try {
@@ -552,6 +605,9 @@ function saveCachedBlockPcmsV3(
       promptVersion: DUBBING_PROMPT_VERSION,
       qa,
       methods,
+      generationModes,
+      lufsBefore,
+      lufsAfter,
       savedAt: new Date().toISOString(),
       clips: pcms.map((p) => p.toString("base64")),
     };
@@ -987,10 +1043,11 @@ function buildSingleSpeakerVoiceConfig(sp: ResolvedBatchSpeaker): any {
 async function synthesizeMissingSingleTurnPcm(
   ai: GoogleGenAI,
   turn: BatchInputTurn,
-  speaker: ResolvedBatchSpeaker
-): Promise<{ pcm: Buffer; provider: "google" | "kie.ai" | "fake" }> {
+  speaker: ResolvedBatchSpeaker,
+  useDeliveryEmotions: boolean = true
+): Promise<{ pcm: Buffer; provider: "google" | "kie.ai" | "fake"; sentStyle: string; sentText: string }> {
   const cleanText = stripLegacyPauseArtifacts(turn.cleanSpeechText);
-  const cleanStyle = buildCleanTurnStyleForTts(turn);
+  const cleanStyle = buildCleanTurnStyleForTts(turn, speaker, useDeliveryEmotions);
 
   if (ttsPayloadObserver) {
     ttsPayloadObserver({
@@ -1004,6 +1061,8 @@ async function synthesizeMissingSingleTurnPcm(
     return {
       pcm: generateSyntheticTurnPcm(Math.max(0.35, syl / 4.8), 360),
       provider: "fake",
+      sentStyle: cleanStyle,
+      sentText: cleanText,
     };
   }
 
@@ -1047,6 +1106,8 @@ async function synthesizeMissingSingleTurnPcm(
         6
       ),
       provider: "google",
+      sentStyle: cleanStyle,
+      sentText: cleanText,
     };
   } catch (err: any) {
     if (isQuota429Error(err) && !speaker.isCloned) {
@@ -1062,6 +1123,8 @@ async function synthesizeMissingSingleTurnPcm(
       return {
         pcm: applyMicroEdgeFades(trimSilenceEdgesPcm(kieRes.pcm, 25), 6),
         provider: "kie.ai",
+        sentStyle: cleanStyle,
+        sentText: cleanText,
       };
     }
     throw err;
@@ -1078,6 +1141,10 @@ interface AlignedTurnClipWithQa {
   detectedVoice?: "male" | "female" | "unknown";
   boundarySnapped?: boolean;
   boundaryIssue?: string;
+  lufsBefore?: number | null;
+  lufsAfter?: number | null;
+  sentStyle?: string;
+  sentText?: string;
 }
 
 /**
@@ -1098,6 +1165,7 @@ async function sliceBlockAudioIntoTurns(
   transcribeCalls: number;
   recoveryTtsCalls: number;
   heardTranscript?: string;
+  wallTimeMs: number;
 }> {
   const aligned = await alignBatchAudioViaTranscribe(
     ai,
@@ -1169,6 +1237,7 @@ async function sliceBlockAudioIntoTurns(
     transcribeCalls,
     recoveryTtsCalls: 0,
     heardTranscript: aligned.heardTranscript,
+    wallTimeMs: aligned.wallTimeMs,
   };
 }
 
@@ -1322,16 +1391,14 @@ export async function fitSlicedTurnToTimecode(
 // =========================================================================
 
 interface SubBlockSynthesisAttemptResult {
-  clips: Array<{
-    pcm: Buffer;
-    startMs: number;
-    endMs: number;
-    durationSec: number;
-    method: string;
-  }>;
+  clips: AlignedTurnClipWithQa[];
   qaEval: SubBlockQaEvaluation;
+  generationMode: "mode_a" | "mode_b";
   ttsCalls: number;
   transcribeCalls: number;
+  ttsWallTimeMs: number;
+  alignWallTimeMs: number;
+  heardTranscript?: string;
   providers: Array<"google" | "kie.ai" | "fake">;
   quotaPaused?: boolean;
   quotaPauseMessageRu?: string;
@@ -1344,6 +1411,7 @@ async function runSingleSubBlockAttempt(
     speakerMap: Map<string, ResolvedBatchSpeaker>;
     uniqueSpeakers: ResolvedBatchSpeaker[];
     forceMode: "A" | "B";
+    useDeliveryEmotions: boolean;
     attemptNumber: number;
     stage: "primary" | "retry" | "split_half" | "mode_b";
     startingCompletedBlocks: number;
@@ -1356,6 +1424,7 @@ async function runSingleSubBlockAttempt(
     speakerMap,
     uniqueSpeakers,
     forceMode,
+    useDeliveryEmotions,
     attemptNumber,
     stage,
     startingCompletedBlocks,
@@ -1366,11 +1435,18 @@ async function runSingleSubBlockAttempt(
   const providers: Array<"google" | "kie.ai" | "fake"> = [];
   let ttsCalls = 0;
   let transcribeCalls = 0;
+  let ttsWallTimeMs = 0;
+  let alignWallTimeMs = 0;
 
   const injectedFault: FakeAttemptFault | null =
     isFakeDubbingTtsEnabled() && fakeFaultInjector
       ? fakeFaultInjector({ attempt: attemptNumber, stage, turns: subTurns, mode: forceMode })
       : null;
+
+  const resolvedSentStyles = subTurns.map((t) =>
+    buildCleanTurnStyleForTts(t, speakerMap.get(t.speakerId), useDeliveryEmotions)
+  );
+  const resolvedSentTexts = subTurns.map((t) => stripLegacyPauseArtifacts(t.cleanSpeechText));
 
   if (forceMode === "A") {
     const spList = uniqueSpeakers.slice(0, 2);
@@ -1385,16 +1461,14 @@ async function runSingleSubBlockAttempt(
     const tag1 = "SpeakerOne";
     const tag2 = "SpeakerTwo";
 
-    const parts = subTurns.map((t) => {
+    const parts = subTurns.map((t, idx) => {
       const isFirst = t.speakerId === sp1.speakerId;
       const speakerTag = isFirst ? tag1 : tag2;
-      const cleanText = stripLegacyPauseArtifacts(t.cleanSpeechText);
-      const cleanStyle = buildCleanTurnStyleForTts(t);
       return {
-        text: cleanText,
+        text: resolvedSentTexts[idx],
         speechMetadata: {
           speaker: speakerTag,
-          style: cleanStyle,
+          style: resolvedSentStyles[idx],
         },
       };
     });
@@ -1411,12 +1485,13 @@ async function runSingleSubBlockAttempt(
     }
 
     let blockPcm: Buffer;
+    const tTtsStart = Date.now();
     if (isFakeDubbingTtsEnabled()) {
       const fakeTurns = (injectedFault?.omitLastTurnInAudio && subTurns.length > 1
         ? subTurns.slice(0, subTurns.length - 1)
         : subTurns
       ).map((t, idx) => {
-        const syl = Math.max(1, countSyllables(stripLegacyPauseArtifacts(t.cleanSpeechText)));
+        const syl = Math.max(1, countSyllables(resolvedSentTexts[idx]));
         const mult =
           injectedFault?.perTurnDurationMultipliers?.[idx] ??
           injectedFault?.durationMultiplier ??
@@ -1475,13 +1550,13 @@ async function runSingleSubBlockAttempt(
       } catch (err: any) {
         if (isQuota429Error(err)) {
           markGoogleTtsQuotaExhaustedToday();
-          const kieTurns: KieDialogueTurnInput[] = subTurns.map((t) => {
+          const kieTurns: KieDialogueTurnInput[] = subTurns.map((t, idx) => {
             const isFirst = t.speakerId === sp1.speakerId;
             return {
               speaker: isFirst ? tag1 : tag2,
               voice: isFirst ? sp1.baseVoice || "Charon" : sp2.baseVoice || "Kore",
-              text: stripLegacyPauseArtifacts(t.cleanSpeechText),
-              style: buildCleanTurnStyleForTts(t),
+              text: resolvedSentTexts[idx],
+              style: resolvedSentStyles[idx],
             };
           });
           if (ttsPayloadObserver) {
@@ -1503,6 +1578,7 @@ async function runSingleSubBlockAttempt(
         }
       }
     }
+    ttsWallTimeMs += Date.now() - tTtsStart;
 
     // Ровно ОДИН запрос транскрипции на подблок: одновременно нарезка (по паузам >= 120 мс в ±0.6 с)
     // и порепликовая верификация (SPOKEN_TEXT + VOICE)
@@ -1512,10 +1588,30 @@ async function runSingleSubBlockAttempt(
     });
     transcribeCalls += sliced.transcribeCalls;
     ttsCalls += sliced.recoveryTtsCalls;
+    alignWallTimeMs += sliced.wallTimeMs;
 
-    const clips = sliced.clips.map((c) =>
+    const rawClips = sliced.clips.map((c) =>
       injectedFault?.forceMethod ? { ...c, method: injectedFault.forceMethod } : c
     );
+
+    // Пункт 4: Выравнивание громкости BS.1770 (-18 LUFS / -21 LUFS для quietly, лимитер <= -1 dBFS)
+    // СРАЗУ после нарезки суб-блока на клипы — ДО записи в кэш и ДО отправки в браузер!
+    const leveled = levelSubBlockClipsLoudness(
+      rawClips.map((c, idx) => ({
+        pcm: c.pcm,
+        speaker: subTurns[idx]?.speakerId || "HOST_1",
+        style: resolvedSentStyles[idx],
+      }))
+    );
+
+    const clips: AlignedTurnClipWithQa[] = rawClips.map((c, idx) => ({
+      ...c,
+      pcm: leveled[idx]?.pcm ?? c.pcm,
+      lufsBefore: leveled[idx]?.lufsBefore ?? null,
+      lufsAfter: leveled[idx]?.lufsAfter ?? null,
+      sentStyle: resolvedSentStyles[idx],
+      sentText: resolvedSentTexts[idx],
+    }));
 
     const qaEval = evaluateSubBlockQa({
       expectedTurns: subTurns,
@@ -1527,7 +1623,17 @@ async function runSingleSubBlockAttempt(
       speakerMap,
     });
 
-    return { clips, qaEval, ttsCalls, transcribeCalls, providers };
+    return {
+      clips,
+      qaEval,
+      generationMode: "mode_a",
+      ttsCalls,
+      transcribeCalls,
+      ttsWallTimeMs,
+      alignWallTimeMs,
+      heardTranscript: sliced.heardTranscript,
+      providers,
+    };
   }
 
   // =========================================================================
@@ -1549,11 +1655,11 @@ async function runSingleSubBlockAttempt(
     const sp = speakerMap.get(spId)!;
     const spTurns = localIndices.map((idx) => subTurns[idx]);
 
-    const parts = spTurns.map((t) => ({
-      text: stripLegacyPauseArtifacts(t.cleanSpeechText),
+    const parts = localIndices.map((origIdx) => ({
+      text: resolvedSentTexts[origIdx],
       speechMetadata: {
         ...(sp.isCloned ? {} : { speaker: sp.baseVoice || "Charon" }),
-        style: buildCleanTurnStyleForTts(t),
+        style: resolvedSentStyles[origIdx],
       },
     }));
 
@@ -1569,10 +1675,11 @@ async function runSingleSubBlockAttempt(
     }
 
     let spBlockPcm: Buffer;
+    const tTtsStart = Date.now();
     if (isFakeDubbingTtsEnabled()) {
       const fakeTurns = spTurns.map((t, j) => {
         const origLocalIdx = localIndices[j];
-        const syl = Math.max(1, countSyllables(stripLegacyPauseArtifacts(t.cleanSpeechText)));
+        const syl = Math.max(1, countSyllables(resolvedSentTexts[origLocalIdx]));
         const mult =
           injectedFault?.perTurnDurationMultipliers?.[origLocalIdx] ??
           injectedFault?.durationMultiplier ??
@@ -1631,18 +1738,21 @@ async function runSingleSubBlockAttempt(
                 badClipIndices: [],
                 badMethods: [],
               },
+              generationMode: "mode_b",
               ttsCalls,
               transcribeCalls,
+              ttsWallTimeMs: ttsWallTimeMs + (Date.now() - tTtsStart),
+              alignWallTimeMs,
               providers,
               quotaPaused: true,
               quotaPauseMessageRu: `Дневной лимит исчерпан. Готово ${doneTotal} из ${totalProjectBlocks} подблоков, продолжим после 13:00 по Ташкенту`,
             };
           }
-          const kieTurns: KieDialogueTurnInput[] = spTurns.map((t) => ({
+          const kieTurns: KieDialogueTurnInput[] = localIndices.map((origIdx) => ({
             speaker: sp.speakerName,
             voice: sp.baseVoice || "Charon",
-            text: stripLegacyPauseArtifacts(t.cleanSpeechText),
-            style: buildCleanTurnStyleForTts(t),
+            text: resolvedSentTexts[origIdx],
+            style: resolvedSentStyles[origIdx],
           }));
           if (ttsPayloadObserver) {
             ttsPayloadObserver({
@@ -1663,6 +1773,7 @@ async function runSingleSubBlockAttempt(
         }
       }
     }
+    ttsWallTimeMs += Date.now() - tTtsStart;
 
     if (qaPcmParts.length > 0) qaPcmParts.push(silenceGap400ms);
     qaPcmParts.push(spBlockPcm);
@@ -1687,6 +1798,7 @@ async function runSingleSubBlockAttempt(
   );
   transcribeCalls += combinedAligned.transcribeCalls;
   ttsCalls += combinedAligned.recoveryTtsCalls;
+  alignWallTimeMs += combinedAligned.wallTimeMs;
 
   const assembledClips = new Array<AlignedTurnClipWithQa>(subTurns.length);
   qaOrigIndices.forEach((origLocalIdx, k) => {
@@ -1696,12 +1808,27 @@ async function runSingleSubBlockAttempt(
       : c;
   });
 
+  // Выравнивание громкости BS.1770 сразу после нарезки в Mode B
+  const leveled = levelSubBlockClipsLoudness(
+    assembledClips.map((c, idx) => ({
+      pcm: c.pcm,
+      speaker: subTurns[idx]?.speakerId || "HOST_1",
+      style: resolvedSentStyles[idx],
+    }))
+  );
+
   // Нормализуем монотонные startMs/endMs в порядке сценария
   let runningMs = 0;
-  const orderedClips = assembledClips.map((c) => {
-    const durMs = Math.max(100, Math.round((c.pcm.length / PCM_BYTES_PER_SEC) * 1000));
-    const out = {
+  const orderedClips: AlignedTurnClipWithQa[] = assembledClips.map((c, idx) => {
+    const pcm = leveled[idx]?.pcm ?? c.pcm;
+    const durMs = Math.max(100, Math.round((pcm.length / PCM_BYTES_PER_SEC) * 1000));
+    const out: AlignedTurnClipWithQa = {
       ...c,
+      pcm,
+      lufsBefore: leveled[idx]?.lufsBefore ?? null,
+      lufsAfter: leveled[idx]?.lufsAfter ?? null,
+      sentStyle: resolvedSentStyles[idx],
+      sentText: resolvedSentTexts[idx],
       startMs: runningMs,
       endMs: runningMs + durMs,
     };
@@ -1719,7 +1846,17 @@ async function runSingleSubBlockAttempt(
     speakerMap,
   });
 
-  return { clips: orderedClips, qaEval, ttsCalls, transcribeCalls, providers };
+  return {
+    clips: orderedClips,
+    qaEval,
+    generationMode: "mode_b",
+    ttsCalls,
+    transcribeCalls,
+    ttsWallTimeMs,
+    alignWallTimeMs,
+    heardTranscript: combinedAligned.heardTranscript,
+    providers,
+  };
 }
 
 function chooseSmartHalfSplitIndex(turns: BatchInputTurn[]): number {
@@ -1746,10 +1883,19 @@ function chooseSmartHalfSplitIndex(turns: BatchInputTurn[]): number {
 interface ResolvedSubBlockOutput {
   pcms: Buffer[];
   methods: string[];
+  generationModes: Array<"mode_a" | "mode_b">;
+  lufsBefore: Array<number | null>;
+  lufsAfter: Array<number | null>;
+  sentStyles: string[];
+  sentTexts: string[];
+  spokenTexts: Array<string | undefined>;
   qas: TurnQaStatus[];
   qaReasons: Array<string | undefined>;
   ttsCalls: number;
   transcribeCalls: number;
+  ttsWallTimeMs: number;
+  alignWallTimeMs: number;
+  heardTranscripts: string[];
   retriesUsed: number;
   providers: Array<"google" | "kie.ai" | "cache" | "fake">;
   quotaPaused?: boolean;
@@ -1782,6 +1928,7 @@ async function executeSubBlockWithQaAndEscalation(
     speakerMap: Map<string, ResolvedBatchSpeaker>;
     uniqueSpeakers: ResolvedBatchSpeaker[];
     canUseModeA: boolean;
+    useDeliveryEmotions: boolean;
     bypassCache: boolean;
     startingCompletedBlocks: number;
     blocksCompletedSoFar: number;
@@ -1794,6 +1941,7 @@ async function executeSubBlockWithQaAndEscalation(
     speakerMap,
     uniqueSpeakers,
     canUseModeA,
+    useDeliveryEmotions,
     bypassCache,
     startingCompletedBlocks,
     blocksCompletedSoFar,
@@ -1802,7 +1950,16 @@ async function executeSubBlockWithQaAndEscalation(
   } = params;
 
   const primaryMode: "A" | "B" = canUseModeA ? "A" : "B";
-  const cacheHash = computeSubBlockCacheHash(subTurns, speakerMap, primaryMode);
+  const cacheHash = computeSubBlockCacheHash(
+    subTurns,
+    speakerMap,
+    primaryMode,
+    useDeliveryEmotions
+  );
+  const resolvedSentStyles = subTurns.map((t) =>
+    buildCleanTurnStyleForTts(t, speakerMap.get(t.speakerId), useDeliveryEmotions)
+  );
+  const resolvedSentTexts = subTurns.map((t) => stripLegacyPauseArtifacts(t.cleanSpeechText));
 
   if (!bypassCache) {
     const cached = loadCachedBlockPcmsV3(cacheHash, subTurns.length);
@@ -1810,10 +1967,19 @@ async function executeSubBlockWithQaAndEscalation(
       return {
         pcms: cached.pcms,
         methods: cached.methods,
+        generationModes: cached.generationModes,
+        lufsBefore: cached.lufsBefore,
+        lufsAfter: cached.lufsAfter,
+        sentStyles: resolvedSentStyles,
+        sentTexts: resolvedSentTexts,
+        spokenTexts: subTurns.map(() => undefined),
         qas: subTurns.map(() => cached.qa),
         qaReasons: subTurns.map(() => undefined),
         ttsCalls: 0,
         transcribeCalls: 0,
+        ttsWallTimeMs: 0,
+        alignWallTimeMs: 0,
+        heardTranscripts: [],
         retriesUsed: 0,
         providers: ["cache"],
       };
@@ -1822,6 +1988,9 @@ async function executeSubBlockWithQaAndEscalation(
 
   let totalTts = 0;
   let totalTranscribe = 0;
+  let totalTtsWallMs = 0;
+  let totalAlignWallMs = 0;
+  const heardTranscripts: string[] = [];
   let retriesUsed = 0;
   const providers: Array<"google" | "kie.ai" | "cache" | "fake"> = [];
   let attemptCounter = 0;
@@ -1829,6 +1998,9 @@ async function executeSubBlockWithQaAndEscalation(
   const accumulate = (res: SubBlockSynthesisAttemptResult) => {
     totalTts += res.ttsCalls;
     totalTranscribe += res.transcribeCalls;
+    totalTtsWallMs += res.ttsWallTimeMs;
+    totalAlignWallMs += res.alignWallTimeMs;
+    if (res.heardTranscript) heardTranscripts.push(res.heardTranscript);
     providers.push(...res.providers);
   };
 
@@ -1839,6 +2011,28 @@ async function executeSubBlockWithQaAndEscalation(
     retryBudget.extraTtsUsed += spentCalls;
   };
 
+  const buildQuotaPausedReturn = (msg?: string): ResolvedSubBlockOutput => ({
+    pcms: [],
+    methods: [],
+    generationModes: [],
+    lufsBefore: [],
+    lufsAfter: [],
+    sentStyles: [],
+    sentTexts: [],
+    spokenTexts: [],
+    qas: [],
+    qaReasons: [],
+    ttsCalls: totalTts,
+    transcribeCalls: totalTranscribe,
+    ttsWallTimeMs: totalTtsWallMs,
+    alignWallTimeMs: totalAlignWallMs,
+    heardTranscripts,
+    retriesUsed,
+    providers,
+    quotaPaused: true,
+    quotaPauseMessageRu: msg,
+  });
+
   // --- ПОПЫТКА 1: Основная (не тратит лимит переделок) ---
   attemptCounter += 1;
   const attempt1 = await runSingleSubBlockAttempt(ai, {
@@ -1846,6 +2040,7 @@ async function executeSubBlockWithQaAndEscalation(
     speakerMap,
     uniqueSpeakers,
     forceMode: primaryMode,
+    useDeliveryEmotions,
     attemptNumber: attemptCounter,
     stage: "primary",
     startingCompletedBlocks,
@@ -1854,31 +2049,42 @@ async function executeSubBlockWithQaAndEscalation(
   });
   accumulate(attempt1);
   if (attempt1.quotaPaused) {
-    return {
-      pcms: [],
-      methods: [],
-      qas: [],
-      qaReasons: [],
-      ttsCalls: totalTts,
-      transcribeCalls: totalTranscribe,
-      retriesUsed,
-      providers,
-      quotaPaused: true,
-      quotaPauseMessageRu: attempt1.quotaPauseMessageRu,
-    };
+    return buildQuotaPausedReturn(attempt1.quotaPauseMessageRu);
   }
 
   if (attempt1.qaEval.passed) {
     const pcms = attempt1.clips.map((c) => c.pcm);
     const methods = attempt1.clips.map((c) => c.method);
-    saveCachedBlockPcmsV3(cacheHash, pcms, methods, "ok");
+    const generationModes = subTurns.map(() => attempt1.generationMode);
+    const lufsBefore = attempt1.clips.map((c) => c.lufsBefore ?? null);
+    const lufsAfter = attempt1.clips.map((c) => c.lufsAfter ?? null);
+    if (!bypassCache) {
+      saveCachedBlockPcmsV3(
+        cacheHash,
+        pcms,
+        methods,
+        "ok",
+        generationModes,
+        lufsBefore,
+        lufsAfter
+      );
+    }
     return {
       pcms,
       methods,
+      generationModes,
+      lufsBefore,
+      lufsAfter,
+      sentStyles: attempt1.clips.map((c, idx) => c.sentStyle ?? resolvedSentStyles[idx]),
+      sentTexts: attempt1.clips.map((c, idx) => c.sentText ?? resolvedSentTexts[idx]),
+      spokenTexts: attempt1.clips.map((c) => c.spokenText),
       qas: subTurns.map(() => "ok"),
       qaReasons: subTurns.map(() => undefined),
       ttsCalls: totalTts,
       transcribeCalls: totalTranscribe,
+      ttsWallTimeMs: totalTtsWallMs,
+      alignWallTimeMs: totalAlignWallMs,
+      heardTranscripts,
       retriesUsed,
       providers,
     };
@@ -1901,6 +2107,7 @@ async function executeSubBlockWithQaAndEscalation(
       speakerMap,
       uniqueSpeakers,
       forceMode: primaryMode,
+      useDeliveryEmotions,
       attemptNumber: attemptCounter,
       stage: "retry",
       startingCompletedBlocks,
@@ -1909,31 +2116,42 @@ async function executeSubBlockWithQaAndEscalation(
     });
     accumulate(attempt2);
     if (attempt2.quotaPaused) {
-      return {
-        pcms: [],
-        methods: [],
-        qas: [],
-        qaReasons: [],
-        ttsCalls: totalTts,
-        transcribeCalls: totalTranscribe,
-        retriesUsed,
-        providers,
-        quotaPaused: true,
-        quotaPauseMessageRu: attempt2.quotaPauseMessageRu,
-      };
+      return buildQuotaPausedReturn(attempt2.quotaPauseMessageRu);
     }
 
     if (attempt2.qaEval.passed) {
       const pcms = attempt2.clips.map((c) => c.pcm);
       const methods = attempt2.clips.map((c) => c.method);
-      saveCachedBlockPcmsV3(cacheHash, pcms, methods, "retried");
+      const generationModes = subTurns.map(() => attempt2.generationMode);
+      const lufsBefore = attempt2.clips.map((c) => c.lufsBefore ?? null);
+      const lufsAfter = attempt2.clips.map((c) => c.lufsAfter ?? null);
+      if (!bypassCache) {
+        saveCachedBlockPcmsV3(
+          cacheHash,
+          pcms,
+          methods,
+          "retried",
+          generationModes,
+          lufsBefore,
+          lufsAfter
+        );
+      }
       return {
         pcms,
         methods,
+        generationModes,
+        lufsBefore,
+        lufsAfter,
+        sentStyles: attempt2.clips.map((c, idx) => c.sentStyle ?? resolvedSentStyles[idx]),
+        sentTexts: attempt2.clips.map((c, idx) => c.sentText ?? resolvedSentTexts[idx]),
+        spokenTexts: attempt2.clips.map((c) => c.spokenText),
         qas: subTurns.map(() => "retried"),
         qaReasons: subTurns.map(() => `Исправлено при повторе (${firstFailureSummary})`),
         ttsCalls: totalTts,
         transcribeCalls: totalTranscribe,
+        ttsWallTimeMs: totalTtsWallMs,
+        alignWallTimeMs: totalAlignWallMs,
+        heardTranscripts,
         retriesUsed,
         providers,
       };
@@ -1956,6 +2174,12 @@ async function executeSubBlockWithQaAndEscalation(
       retriesUsed += 1;
       const halfPcms: Buffer[] = [];
       const halfMethods: string[] = [];
+      const halfGenModes: Array<"mode_a" | "mode_b"> = [];
+      const halfLufsBefore: Array<number | null> = [];
+      const halfLufsAfter: Array<number | null> = [];
+      const halfSentStyles: string[] = [];
+      const halfSentTexts: string[] = [];
+      const halfSpokenTexts: Array<string | undefined> = [];
       const halfQas: TurnQaStatus[] = [];
       const halfReasons: Array<string | undefined> = [];
       let allHalvesPassed = true;
@@ -1967,6 +2191,7 @@ async function executeSubBlockWithQaAndEscalation(
           speakerMap,
           uniqueSpeakers,
           forceMode: primaryMode,
+          useDeliveryEmotions,
           attemptNumber: attemptCounter,
           stage: "split_half",
           startingCompletedBlocks,
@@ -1975,25 +2200,18 @@ async function executeSubBlockWithQaAndEscalation(
         });
         accumulate(halfAttempt);
         if (halfAttempt.quotaPaused) {
-          return {
-            pcms: [],
-            methods: [],
-            qas: [],
-            qaReasons: [],
-            ttsCalls: totalTts,
-            transcribeCalls: totalTranscribe,
-            retriesUsed,
-            providers,
-            quotaPaused: true,
-            quotaPauseMessageRu: halfAttempt.quotaPauseMessageRu,
-          };
+          return buildQuotaPausedReturn(halfAttempt.quotaPauseMessageRu);
         }
 
         if (halfAttempt.qaEval.passed) {
-          const hp = halfAttempt.clips.map((c) => c.pcm);
-          const hm = halfAttempt.clips.map((c) => c.method);
-          halfPcms.push(...hp);
-          halfMethods.push(...hm);
+          halfPcms.push(...halfAttempt.clips.map((c) => c.pcm));
+          halfMethods.push(...halfAttempt.clips.map((c) => c.method));
+          halfGenModes.push(...halfTurns.map(() => halfAttempt.generationMode));
+          halfLufsBefore.push(...halfAttempt.clips.map((c) => c.lufsBefore ?? null));
+          halfLufsAfter.push(...halfAttempt.clips.map((c) => c.lufsAfter ?? null));
+          halfSentStyles.push(...halfAttempt.clips.map((c) => c.sentStyle ?? ""));
+          halfSentTexts.push(...halfAttempt.clips.map((c) => c.sentText ?? ""));
+          halfSpokenTexts.push(...halfAttempt.clips.map((c) => c.spokenText));
           halfQas.push(...halfTurns.map(() => "retried" as TurnQaStatus));
           halfReasons.push(
             ...halfTurns.map(() => `Исправлено делением пополам (${firstFailureSummary})`)
@@ -2006,6 +2224,12 @@ async function executeSubBlockWithQaAndEscalation(
             const failReason = `${halfAttempt.qaEval.reasons.join("; ") || firstFailureSummary}; retry_budget_exhausted (${retryBudget.extraTtsUsed}/${retryBudget.extraTtsLimit})`;
             halfPcms.push(...halfAttempt.clips.map((c) => c.pcm));
             halfMethods.push(...halfAttempt.clips.map((c) => c.method));
+            halfGenModes.push(...halfTurns.map(() => halfAttempt.generationMode));
+            halfLufsBefore.push(...halfAttempt.clips.map((c) => c.lufsBefore ?? null));
+            halfLufsAfter.push(...halfAttempt.clips.map((c) => c.lufsAfter ?? null));
+            halfSentStyles.push(...halfAttempt.clips.map((c) => c.sentStyle ?? ""));
+            halfSentTexts.push(...halfAttempt.clips.map((c) => c.sentText ?? ""));
+            halfSpokenTexts.push(...halfAttempt.clips.map((c) => c.spokenText));
             halfQas.push(...halfTurns.map(() => "failed" as TurnQaStatus));
             halfReasons.push(...halfTurns.map(() => failReason));
             continue;
@@ -2019,6 +2243,7 @@ async function executeSubBlockWithQaAndEscalation(
             speakerMap,
             uniqueSpeakers,
             forceMode: "B",
+            useDeliveryEmotions,
             attemptNumber: attemptCounter,
             stage: "mode_b",
             startingCompletedBlocks,
@@ -2027,25 +2252,18 @@ async function executeSubBlockWithQaAndEscalation(
           });
           accumulate(modeBAttempt);
           if (modeBAttempt.quotaPaused) {
-            return {
-              pcms: [],
-              methods: [],
-              qas: [],
-              qaReasons: [],
-              ttsCalls: totalTts,
-              transcribeCalls: totalTranscribe,
-              retriesUsed,
-              providers,
-              quotaPaused: true,
-              quotaPauseMessageRu: modeBAttempt.quotaPauseMessageRu,
-            };
+            return buildQuotaPausedReturn(modeBAttempt.quotaPauseMessageRu);
           }
 
           if (modeBAttempt.qaEval.passed) {
-            const mp = modeBAttempt.clips.map((c) => c.pcm);
-            const mm = modeBAttempt.clips.map((c) => c.method);
-            halfPcms.push(...mp);
-            halfMethods.push(...mm);
+            halfPcms.push(...modeBAttempt.clips.map((c) => c.pcm));
+            halfMethods.push(...modeBAttempt.clips.map((c) => c.method));
+            halfGenModes.push(...halfTurns.map(() => "mode_b" as const));
+            halfLufsBefore.push(...modeBAttempt.clips.map((c) => c.lufsBefore ?? null));
+            halfLufsAfter.push(...modeBAttempt.clips.map((c) => c.lufsAfter ?? null));
+            halfSentStyles.push(...modeBAttempt.clips.map((c) => c.sentStyle ?? ""));
+            halfSentTexts.push(...modeBAttempt.clips.map((c) => c.sentText ?? ""));
+            halfSpokenTexts.push(...modeBAttempt.clips.map((c) => c.spokenText));
             halfQas.push(...halfTurns.map(() => "retried" as TurnQaStatus));
             halfReasons.push(
               ...halfTurns.map(() => `Исправлено в режиме 1 голос/запрос (${firstFailureSummary})`)
@@ -2059,24 +2277,47 @@ async function executeSubBlockWithQaAndEscalation(
             const failReason = chosen.qaEval.reasons.join("; ") || firstFailureSummary;
             halfPcms.push(...chosen.clips.map((c) => c.pcm));
             halfMethods.push(...chosen.clips.map((c) => c.method));
+            halfGenModes.push(...halfTurns.map(() => chosen.generationMode));
+            halfLufsBefore.push(...chosen.clips.map((c) => c.lufsBefore ?? null));
+            halfLufsAfter.push(...chosen.clips.map((c) => c.lufsAfter ?? null));
+            halfSentStyles.push(...chosen.clips.map((c) => c.sentStyle ?? ""));
+            halfSentTexts.push(...chosen.clips.map((c) => c.sentText ?? ""));
+            halfSpokenTexts.push(...chosen.clips.map((c) => c.spokenText));
             halfQas.push(...halfTurns.map(() => "failed" as TurnQaStatus));
             halfReasons.push(...halfTurns.map(() => failReason));
           }
         }
       }
 
-      if (allHalvesPassed) {
+      if (allHalvesPassed && !bypassCache) {
         // Кэшируем ТОЛЬКО целый подблок, если обе половины прошли QA!
-        saveCachedBlockPcmsV3(cacheHash, halfPcms, halfMethods, "retried");
+        saveCachedBlockPcmsV3(
+          cacheHash,
+          halfPcms,
+          halfMethods,
+          "retried",
+          halfGenModes,
+          halfLufsBefore,
+          halfLufsAfter
+        );
       }
 
       return {
         pcms: halfPcms,
         methods: halfMethods,
+        generationModes: halfGenModes,
+        lufsBefore: halfLufsBefore,
+        lufsAfter: halfLufsAfter,
+        sentStyles: halfSentStyles,
+        sentTexts: halfSentTexts,
+        spokenTexts: halfSpokenTexts,
         qas: halfQas,
         qaReasons: halfReasons,
         ttsCalls: totalTts,
         transcribeCalls: totalTranscribe,
+        ttsWallTimeMs: totalTtsWallMs,
+        alignWallTimeMs: totalAlignWallMs,
+        heardTranscripts,
         retriesUsed,
         providers,
       };
@@ -2095,6 +2336,7 @@ async function executeSubBlockWithQaAndEscalation(
         speakerMap,
         uniqueSpeakers,
         forceMode: "B",
+        useDeliveryEmotions,
         attemptNumber: attemptCounter,
         stage: "mode_b",
         startingCompletedBlocks,
@@ -2105,14 +2347,36 @@ async function executeSubBlockWithQaAndEscalation(
       if (modeBAttempt.qaEval.passed) {
         const mp = modeBAttempt.clips.map((c) => c.pcm);
         const mm = modeBAttempt.clips.map((c) => c.method);
-        saveCachedBlockPcmsV3(cacheHash, mp, mm, "retried");
+        const mGenModes = subTurns.map(() => "mode_b" as const);
+        const mLufsBefore = modeBAttempt.clips.map((c) => c.lufsBefore ?? null);
+        const mLufsAfter = modeBAttempt.clips.map((c) => c.lufsAfter ?? null);
+        if (!bypassCache) {
+          saveCachedBlockPcmsV3(
+            cacheHash,
+            mp,
+            mm,
+            "retried",
+            mGenModes,
+            mLufsBefore,
+            mLufsAfter
+          );
+        }
         return {
           pcms: mp,
           methods: mm,
+          generationModes: mGenModes,
+          lufsBefore: mLufsBefore,
+          lufsAfter: mLufsAfter,
+          sentStyles: modeBAttempt.clips.map((c, idx) => c.sentStyle ?? resolvedSentStyles[idx]),
+          sentTexts: modeBAttempt.clips.map((c, idx) => c.sentText ?? resolvedSentTexts[idx]),
+          spokenTexts: modeBAttempt.clips.map((c) => c.spokenText),
           qas: subTurns.map(() => "retried"),
           qaReasons: subTurns.map(() => `Исправлено в режиме 1 голос/запрос (${firstFailureSummary})`),
           ttsCalls: totalTts,
           transcribeCalls: totalTranscribe,
+          ttsWallTimeMs: totalTtsWallMs,
+          alignWallTimeMs: totalAlignWallMs,
+          heardTranscripts,
           retriesUsed,
           providers,
         };
@@ -2133,10 +2397,19 @@ async function executeSubBlockWithQaAndEscalation(
   return {
     pcms: bestFallbackAttempt.clips.map((c) => c.pcm),
     methods: bestFallbackAttempt.clips.map((c) => c.method),
+    generationModes: subTurns.map(() => bestFallbackAttempt.generationMode),
+    lufsBefore: bestFallbackAttempt.clips.map((c) => c.lufsBefore ?? null),
+    lufsAfter: bestFallbackAttempt.clips.map((c) => c.lufsAfter ?? null),
+    sentStyles: bestFallbackAttempt.clips.map((c, idx) => c.sentStyle ?? resolvedSentStyles[idx]),
+    sentTexts: bestFallbackAttempt.clips.map((c, idx) => c.sentText ?? resolvedSentTexts[idx]),
+    spokenTexts: bestFallbackAttempt.clips.map((c) => c.spokenText),
     qas: subTurns.map(() => "failed"),
     qaReasons: subTurns.map(() => finalFailReason),
     ttsCalls: totalTts,
     transcribeCalls: totalTranscribe,
+    ttsWallTimeMs: totalTtsWallMs,
+    alignWallTimeMs: totalAlignWallMs,
+    heardTranscripts,
     retriesUsed,
     providers,
   };
@@ -2152,6 +2425,8 @@ export async function synthesizeDialogueInMacroBlocks(
     turns: BatchInputTurn[];
     speakerMap: Map<string, ResolvedBatchSpeaker>;
     strictTimeWindow: boolean;
+    useDeliveryEmotions?: boolean;
+    pronunciationDictionary?: ReadonlyArray<Partial<PronunciationDictionaryEntry>> | null;
     startingCompletedBlocks?: number;
     totalProjectBlocks?: number;
     totalProjectSubBlocks?: number;
@@ -2159,7 +2434,25 @@ export async function synthesizeDialogueInMacroBlocks(
     bypassCache?: boolean;
   }
 ): Promise<BatchDialogueExecutionResult> {
-  const { turns, speakerMap, strictTimeWindow, bypassCache = false } = params;
+  const {
+    turns: rawInputTurns,
+    speakerMap,
+    strictTimeWindow,
+    useDeliveryEmotions = true,
+    pronunciationDictionary,
+    bypassCache = false,
+  } = params;
+
+  // Готовим каждый BatchInputTurn через общий конвейер:
+  // словарь произношения -> normalizeUzbekSpeech -> <laugh> -> базовый стиль + эмоции.
+  // Исходное поле `turn.text` сохраняется нетронутым для субтитров/таблицы/экспорта!
+  const turns = rawInputTurns.map((t) =>
+    prepareBatchTurnForTts(t, speakerMap.get(t.speakerId), {
+      useDeliveryEmotions,
+      pronunciationDictionary,
+    })
+  );
+
   const uniqueSpeakers = Array.from(speakerMap.values());
   const usesClonedVoice = uniqueSpeakers.some((s) => s.isCloned);
   const canUseModeA = !usesClonedVoice && uniqueSpeakers.length <= 2 && uniqueSpeakers.length >= 1;
@@ -2194,7 +2487,10 @@ export async function synthesizeDialogueInMacroBlocks(
       plannedSubBlocks.push({
         globalSubBlockIndex: currentIdx,
         startTimecode: formatTc(currentTurns[0]?.startSec),
-        endTimecode: formatTc(currentTurns[currentTurns.length - 1]?.endSec ?? currentTurns[currentTurns.length - 1]?.startSec),
+        endTimecode: formatTc(
+          currentTurns[currentTurns.length - 1]?.endSec ??
+            currentTurns[currentTurns.length - 1]?.startSec
+        ),
         turns: currentTurns,
       });
       currentTurns = [];
@@ -2252,6 +2548,9 @@ export async function synthesizeDialogueInMacroBlocks(
   const failedSubBlocks: FailedSubBlockSummary[] = [];
   let totalTtsCalls = 0;
   let totalTranscribeCalls = 0;
+  let totalTtsWallTimeMs = 0;
+  let totalAlignWallTimeMs = 0;
+  const allHeardTranscripts: string[] = [];
   let totalRetriesUsed = 0;
   const providersUsed = new Set<"google" | "kie.ai" | "cache" | "fake">();
   let subBlocksCompleted = 0;
@@ -2269,6 +2568,7 @@ export async function synthesizeDialogueInMacroBlocks(
       speakerMap,
       uniqueSpeakers,
       canUseModeA,
+      useDeliveryEmotions,
       bypassCache,
       startingCompletedBlocks: startingCompleted,
       blocksCompletedSoFar: subBlocksCompleted,
@@ -2278,6 +2578,9 @@ export async function synthesizeDialogueInMacroBlocks(
 
     totalTtsCalls += subRes.ttsCalls;
     totalTranscribeCalls += subRes.transcribeCalls;
+    totalTtsWallTimeMs += subRes.ttsWallTimeMs;
+    totalAlignWallTimeMs += subRes.alignWallTimeMs;
+    allHeardTranscripts.push(...subRes.heardTranscripts);
     totalRetriesUsed += subRes.retriesUsed;
     for (const p of subRes.providers) providersUsed.add(p);
 
@@ -2339,6 +2642,12 @@ export async function synthesizeDialogueInMacroBlocks(
         fitStepApplied: fitted.fitStepApplied,
         syncStatus: fitted.syncStatus,
         slicingMethod: subRes.methods[i] || "batch",
+        generationMode: subRes.generationModes[i] || (canUseModeA ? "mode_a" : "mode_b"),
+        lufsBefore: subRes.lufsBefore[i] ?? null,
+        lufsAfter: subRes.lufsAfter[i] ?? null,
+        sentStyle: subRes.sentStyles[i],
+        sentText: subRes.sentTexts[i],
+        spokenText: subRes.spokenTexts[i],
         qa: subRes.qas[i] || "ok",
         qaReason: subRes.qaReasons[i],
         needsShorten: fitted.needsShorten,
@@ -2383,6 +2692,9 @@ export async function synthesizeDialogueInMacroBlocks(
     transcribeCallsUsed: totalTranscribeCalls,
     extraTtsCallsUsed: retryBudget.extraTtsUsed,
     extraTtsBudget: retryBudget.extraTtsLimit,
+    ttsWallTimeMs: totalTtsWallTimeMs,
+    alignWallTimeMs: totalAlignWallTimeMs,
+    heardTranscripts: allHeardTranscripts,
     provider: providerSummary,
     modeUsed:
       providerSummary === "cache"
@@ -2413,3 +2725,180 @@ export async function synthesizeDialogueInMacroBlocks(
     quotaLimit: quota.limit,
   };
 }
+
+/**
+ * Пункт 5: Перегенерация одной реплики в режиме A с контекстом [предыдущая, нужная, следующая],
+ * теми же двумя голосами и стилями. После нарезки и выравнивания громкости BS.1770
+ * вырезается и возвращается ТОЛЬКО клип нужной реплики.
+ * Fallback на Mode B — только для клонированных голосов или если Mode A не смог выделить нужную реплику.
+ */
+export async function synthesizeSingleTurnInModeAContext(
+  ai: GoogleGenAI,
+  params: {
+    contextTurns: BatchInputTurn[];
+    targetIndex: number;
+    speakerMap: Map<string, ResolvedBatchSpeaker>;
+    strictTimeWindow: boolean;
+    useDeliveryEmotions?: boolean;
+    pronunciationDictionary?: ReadonlyArray<Partial<PronunciationDictionaryEntry>> | null;
+  }
+): Promise<{
+  turn: BatchSynthesizedTurnResult;
+  ttsCallsUsed: number;
+  transcribeCallsUsed: number;
+  provider: "google" | "kie.ai" | "fake";
+}> {
+  const {
+    contextTurns: rawContext,
+    targetIndex,
+    speakerMap,
+    strictTimeWindow,
+    useDeliveryEmotions = true,
+    pronunciationDictionary,
+  } = params;
+
+  const preparedContext = rawContext.map((t) =>
+    prepareBatchTurnForTts(t, speakerMap.get(t.speakerId), {
+      useDeliveryEmotions,
+      pronunciationDictionary,
+    })
+  );
+  const targetTurn = preparedContext[targetIndex];
+  if (!targetTurn) {
+    throw new Error(`Invalid targetIndex=${targetIndex} for context length ${preparedContext.length}`);
+  }
+
+  const uniqueSpeakers = Array.from(speakerMap.values());
+  const usesClonedVoice = uniqueSpeakers.some((s) => s.isCloned);
+  const canUseModeA = !usesClonedVoice && uniqueSpeakers.length <= 2 && uniqueSpeakers.length >= 1;
+
+  let ttsCallsUsed = 0;
+  let transcribeCallsUsed = 0;
+
+  if (canUseModeA) {
+    const attempt = await runSingleSubBlockAttempt(ai, {
+      subTurns: preparedContext,
+      speakerMap,
+      uniqueSpeakers,
+      forceMode: "A",
+      useDeliveryEmotions,
+      attemptNumber: 1,
+      stage: "primary",
+      startingCompletedBlocks: 0,
+      blocksCompletedSoFar: 0,
+      totalProjectBlocks: 1,
+    });
+    ttsCallsUsed += attempt.ttsCalls;
+    transcribeCallsUsed += attempt.transcribeCalls;
+
+    const targetClip = attempt.clips[targetIndex];
+    if (
+      targetClip &&
+      targetClip.method !== "missing_turn" &&
+      targetClip.pcm.length > 0
+    ) {
+      const fitted = await fitSlicedTurnToTimecode(
+        targetClip.pcm,
+        targetTurn,
+        strictTimeWindow,
+        0
+      );
+      const wavBuf = buildWav24k(fitted.pcm);
+      const targetQaFailed =
+        !attempt.qaEval.passed &&
+        (attempt.qaEval.badClipIndices.includes(targetIndex) ||
+          attempt.qaEval.badClipIndices.length === 0);
+
+      return {
+        turn: {
+          index: targetTurn.index,
+          id: targetTurn.id,
+          speakerId: targetTurn.speakerId,
+          speakerName: targetTurn.speakerName,
+          text: targetTurn.text,
+          pcm: fitted.pcm,
+          wavBase64: wavBuf.toString("base64"),
+          durationSec: fitted.dubbedDurationSec,
+          originalDurationSec: fitted.originalDurationSec,
+          dubbedDurationSec: fitted.dubbedDurationSec,
+          atempoApplied: fitted.atempoApplied,
+          rephraseAttempts: 0,
+          fitStepApplied: fitted.fitStepApplied,
+          syncStatus: fitted.syncStatus,
+          slicingMethod: targetClip.method,
+          generationMode: "mode_a",
+          lufsBefore: targetClip.lufsBefore ?? null,
+          lufsAfter: targetClip.lufsAfter ?? null,
+          sentStyle: targetClip.sentStyle,
+          sentText: targetClip.sentText,
+          spokenText: targetClip.spokenText,
+          qa: targetQaFailed ? "failed" : "ok",
+          qaReason: targetQaFailed ? attempt.qaEval.reasons.join("; ") : undefined,
+          needsShorten: fitted.needsShorten,
+          subBlockIndex: targetTurn.plannedSubBlockIndex ?? 0,
+        },
+        ttsCallsUsed,
+        transcribeCallsUsed,
+        provider: attempt.providers[0] || "google",
+      };
+    }
+  }
+
+  // Fallback Mode B (клонированный голос или Mode A не смог выделить нужную реплику)
+  const sp = speakerMap.get(targetTurn.speakerId) || uniqueSpeakers[0];
+  const single = await synthesizeMissingSingleTurnPcm(
+    ai,
+    targetTurn,
+    sp,
+    useDeliveryEmotions
+  );
+  ttsCallsUsed += single.provider === "fake" ? 0 : 1;
+
+  const leveled = levelSubBlockClipsLoudness([
+    {
+      pcm: single.pcm,
+      speaker: targetTurn.speakerId,
+      style: single.sentStyle,
+    },
+  ])[0];
+
+  const fitted = await fitSlicedTurnToTimecode(
+    leveled?.pcm ?? single.pcm,
+    targetTurn,
+    strictTimeWindow,
+    0
+  );
+  const wavBuf = buildWav24k(fitted.pcm);
+
+  return {
+    turn: {
+      index: targetTurn.index,
+      id: targetTurn.id,
+      speakerId: targetTurn.speakerId,
+      speakerName: targetTurn.speakerName,
+      text: targetTurn.text,
+      pcm: fitted.pcm,
+      wavBase64: wavBuf.toString("base64"),
+      durationSec: fitted.dubbedDurationSec,
+      originalDurationSec: fitted.originalDurationSec,
+      dubbedDurationSec: fitted.dubbedDurationSec,
+      atempoApplied: fitted.atempoApplied,
+      rephraseAttempts: 0,
+      fitStepApplied: fitted.fitStepApplied,
+      syncStatus: fitted.syncStatus,
+      slicingMethod: "single_mode_b",
+      generationMode: "mode_b",
+      lufsBefore: leveled?.lufsBefore ?? null,
+      lufsAfter: leveled?.lufsAfter ?? null,
+      sentStyle: single.sentStyle,
+      sentText: single.sentText,
+      qa: "ok",
+      needsShorten: fitted.needsShorten,
+      subBlockIndex: targetTurn.plannedSubBlockIndex ?? 0,
+    },
+    ttsCallsUsed,
+    transcribeCallsUsed,
+    provider: single.provider,
+  };
+}
+

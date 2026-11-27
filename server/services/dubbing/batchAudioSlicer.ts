@@ -1179,14 +1179,18 @@ export async function alignBatchAudioViaTranscribe(
 
   try {
     const wavBuf = buildWav24k(pcm);
+    const turnHasTrailingLaugh = expectedTurns.map((t) =>
+      /<\s*laugh\s*>/i.test(String(t.text || ""))
+    );
     const turnListText = expectedTurns
-      .map(
-        (t, i) =>
-          `${i}: [${t.speaker}${t.gender ? `/${t.gender}` : ""}] ${String(t.text || "")
-            .replace(/<[^>]+>/g, " ")
-            .replace(/\s+/g, " ")
-            .trim()}`
-      )
+      .map((t, i) => {
+        const cleanBody = String(t.text || "")
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+        const laughNote = turnHasTrailingLaugh[i] ? " (ends with laughter)" : "";
+        return `${i}: [${t.speaker}${t.gender ? `/${t.gender}` : ""}] ${cleanBody}${laughNote}`;
+      })
       .join("\n");
 
     const silenceSummary =
@@ -1213,6 +1217,7 @@ RULES:
 - Return every turn index from 0 to ${expectedTurns.length - 1} once in ascending order.
 - startSec and endSec are decimal seconds within [0.00, ${totalDurationSec.toFixed(2)}], covering the full spoken utterance without cutting any word.
 - Align inter-turn boundaries to the real silence pauses listed above whenever a pause separates two turns.
+- If a turn ends with laughter (marked "(ends with laughter)"), that trailing laughter belongs to THAT turn: include the laughter inside that turn's [startSec, endSec] and place endSec at the silence pause right BEFORE the first word of the NEXT turn (do NOT cut off the laughter).
 - Timestamps MUST be strictly non-overlapping and ascending: next startSec >= previous endSec.
 - voice MUST be strictly "male" or "female" based on the ACTUAL voice heard in that audio interval (use "unknown" only if silent/unintelligible). Do NOT blindly copy the script gender if the wrong voice spoke that line.
 - spokenText MUST transcribe VERBATIM what was ACTUALLY spoken in Uzbek in that exact interval (do NOT copy from the script if the audio differed; include any repeated words, cut-offs, or English words actually heard).
@@ -1355,9 +1360,13 @@ ${turnListText}`;
       }
 
       // 2) Привязка END к ближайшей паузе-кандидату (>= 120 мс) в пределах ±0.6 с
+      // Если реплика заканчивается на <laugh>, смех остаётся в её клипе: режем по паузе
+      // непосредственно ПЕРЕД первым словом следующей реплики, чтобы не обрубить смех.
       let endSample: number;
+      const hasLaughAtEnd = turnHasTrailingLaugh[i];
       if (i === expectedTurns.length - 1) {
         if (
+          hasLaughAtEnd ||
           totalDurationSec - safeEndSec <= snapToleranceSec ||
           Math.abs(safeEndSec - lastSpeechSec) <= snapToleranceSec
         ) {
@@ -1379,19 +1388,44 @@ ${turnListText}`;
           }
         }
       } else {
-        const candEnd = findNearestSilenceCandidate(
-          silenceCandidates,
-          safeEndSec,
-          snapToleranceSec,
-          startSample
-        );
+        const nextSeg = segMap.get(i + 1);
+        const nextStartSec =
+          hasLaughAtEnd &&
+          nextSeg?.found &&
+          typeof nextSeg.startSec === "number" &&
+          nextSeg.startSec > safeEndSec
+            ? Math.min(totalDurationSec, nextSeg.startSec)
+            : null;
+
+        let candEnd =
+          nextStartSec !== null
+            ? findNearestSilenceCandidate(
+                silenceCandidates,
+                nextStartSec,
+                snapToleranceSec,
+                Math.max(startSample, Math.round((safeEndSec - 0.15) * PCM_SAMPLE_RATE))
+              )
+            : null;
+
+        if (!candEnd) {
+          candEnd = findNearestSilenceCandidate(
+            silenceCandidates,
+            safeEndSec,
+            snapToleranceSec,
+            startSample
+          );
+        }
+
         if (candEnd) {
           endSample = candEnd.midSample;
         } else {
           boundarySnapped = false;
           boundaryIssue =
             boundaryIssue || `no_silence_boundary_near_end (turn ${i} @ ${safeEndSec.toFixed(2)}s)`;
-          endSample = Math.min(totalSamples, Math.round(safeEndSec * PCM_SAMPLE_RATE));
+          endSample = Math.min(
+            totalSamples,
+            Math.round((nextStartSec ?? safeEndSec) * PCM_SAMPLE_RATE)
+          );
         }
       }
 
