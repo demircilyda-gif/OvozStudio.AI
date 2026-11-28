@@ -7,10 +7,11 @@ export interface VoiceProfile {
   name: string;
   baseVoice: BaseVoiceModel;
   gender?: 'female' | 'male';
-  voiceId?: string; // OvozStudio Voice ID (e.g. "voice_17raj9ewke3g")
+  voiceId?: string; // OvozStudio Voice ID (e.g. "voice_17raj9ewke3g", "voice_din40bswsfcy")
   voiceKey?: string; // Client-managed voice key
   voiceType?: VoiceType;
-  model?: string; // e.g. "ovozstudio-neural-hd"
+  identityVersion?: string; // e.g. "aziz-m2-v1", "veronika-f1-v1"
+  model?: string; // e.g. "gemini-3.8-flash-tts"
   expireTime?: string;
   timbre: string;
   tempo: string;
@@ -24,6 +25,8 @@ export interface VoiceProfile {
   consentAudioBase64?: string;
   sampleNotes?: string;
 }
+
+export type VoiceLockMode = 'standard' | 'full_speaker_tracks';
 
 // ----------------------------------------------------
 // 1. Voiceover & Dubbing Types
@@ -91,6 +94,8 @@ export interface DialogueTurn {
   speakerName: string;
   speakerGender?: 'female' | 'male';
   voiceId?: string;
+  voiceType?: VoiceType;
+  identityVersion?: string;
   baseVoice?: string;
   text: string;
   originalText?: string;
@@ -119,7 +124,7 @@ export interface DialogueTurn {
   qa?: 'ok' | 'retried' | 'failed';
   qaReason?: string;
   slicingMethod?: string;
-  generationMode?: 'mode_a' | 'mode_b';
+  generationMode?: 'mode_a' | 'mode_b' | 'voice_lock';
   lufsBefore?: number | null;
   lufsAfter?: number | null;
   sentStyle?: string;

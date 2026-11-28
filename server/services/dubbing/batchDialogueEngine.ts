@@ -60,15 +60,52 @@ function ensureBlockCacheDir() {
 
 export type TurnQaStatus = "ok" | "retried" | "failed";
 
+export type SpeakerVoiceType = "prebuilt" | "prompted" | "replicated";
+
 export interface ResolvedBatchSpeaker {
   speakerId: string;
   speakerName: string;
   baseVoice: string;
   voiceId?: string;
+  voiceType?: SpeakerVoiceType;
+  identityVersion?: string;
   gender?: "male" | "female";
   isCloned: boolean;
   replicatedVoiceConfig?: any;
   baseSpeechStyle: string;
+}
+
+export function isStoredVoiceId(voiceId?: string | null): boolean {
+  return /^voice_[a-z0-9_-]+$/i.test(String(voiceId || "").trim());
+}
+
+export function resolveEffectiveVoiceType(
+  sp?: Partial<ResolvedBatchSpeaker> | null
+): SpeakerVoiceType {
+  if (!sp) return "prebuilt";
+  if (sp.voiceType === "prompted" || sp.voiceType === "replicated" || sp.voiceType === "prebuilt") {
+    // Even if caller mistakenly marked a voice_... ID as prebuilt, never silently downgrade it
+    if (sp.voiceType === "prebuilt" && isStoredVoiceId(sp.voiceId)) {
+      return "prompted";
+    }
+    return sp.voiceType;
+  }
+  if (sp.replicatedVoiceConfig?.voiceSampleAudio) return "replicated";
+  if (isStoredVoiceId(sp.voiceId)) {
+    return String(sp.voiceId).trim().toLowerCase() === "voice_17raj9ewke3g"
+      ? "replicated"
+      : "prompted";
+  }
+  if (sp.isCloned) return "replicated";
+  return "prebuilt";
+}
+
+export function isPersistentVoiceSpeaker(
+  sp?: Partial<ResolvedBatchSpeaker> | null
+): boolean {
+  if (!sp) return false;
+  const vt = resolveEffectiveVoiceType(sp);
+  return vt === "prompted" || vt === "replicated" || isStoredVoiceId(sp.voiceId) || Boolean(sp.isCloned);
 }
 
 export interface BatchInputTurn {
@@ -109,7 +146,7 @@ export interface BatchSynthesizedTurnResult {
   fitStepApplied: string;
   syncStatus: TurnSyncStatus;
   slicingMethod: string;
-  generationMode: "mode_a" | "mode_b";
+  generationMode: "mode_a" | "mode_b" | "voice_lock";
   lufsBefore?: number | null;
   lufsAfter?: number | null;
   sentStyle?: string;
@@ -203,21 +240,162 @@ export function setFakeDubbingFaultInjectorForTesting(fn: FakeFaultInjector | nu
   fakeFaultInjector = fn;
 }
 
-let ttsPayloadObserver:
-  | ((payload: {
-      channel: "google_mode_a" | "kie_mode_a" | "google_mode_b" | "kie_mode_b" | "single_recovery";
-      parts: Array<{ text: string; style: string; speaker?: string }>;
-    }) => void)
-  | null = null;
+export interface TtsPayloadObservation {
+  channel:
+    | "google_mode_a"
+    | "kie_mode_a"
+    | "google_mode_b"
+    | "kie_mode_b"
+    | "single_recovery"
+    | "google_voice_lock";
+  parts: Array<{ text: string; style: string; speaker?: string }>;
+  voiceConfig?: any;
+  usedMultiSpeaker?: boolean;
+  speakerId?: string;
+  voiceId?: string;
+  voiceType?: SpeakerVoiceType;
+  identityVersion?: string;
+}
+
+let ttsPayloadObserver: ((payload: TtsPayloadObservation) => void) | null = null;
 export function setTtsPayloadObserverForTesting(
-  fn:
-    | ((payload: {
-        channel: "google_mode_a" | "kie_mode_a" | "google_mode_b" | "kie_mode_b" | "single_recovery";
-        parts: Array<{ text: string; style: string; speaker?: string }>;
-      }) => void)
-    | null
+  fn: ((payload: TtsPayloadObservation) => void) | null
 ) {
   ttsPayloadObserver = fn;
+}
+
+export function emitTtsPayloadObservation(payload: TtsPayloadObservation): void {
+  if (ttsPayloadObserver) {
+    ttsPayloadObserver(payload);
+  }
+}
+
+export interface ValidatedStoredVoiceInfo {
+  voiceId: string;
+  voiceType: SpeakerVoiceType;
+  displayName?: string;
+  model?: string;
+  expireTime?: string;
+  sampleAudioBytes?: Buffer;
+  sampleAudioMimeType?: string;
+}
+
+type FakeStoredVoiceValidator = (
+  voiceId: string,
+  sp: ResolvedBatchSpeaker
+) => ValidatedStoredVoiceInfo | Promise<ValidatedStoredVoiceInfo>;
+
+let fakeStoredVoiceValidator: FakeStoredVoiceValidator | null = null;
+export function setFakeStoredVoiceValidatorForTesting(fn: FakeStoredVoiceValidator | null) {
+  fakeStoredVoiceValidator = fn;
+}
+
+const validatedStoredVoiceCache = new Map<
+  string,
+  { expiresAtMs: number; info: ValidatedStoredVoiceInfo }
+>();
+
+export function clearValidatedStoredVoiceCache(): void {
+  validatedStoredVoiceCache.clear();
+}
+
+/**
+ * Явная проверка существования и срока действия сохранённого голоса (`voice_...`) через read-only `ai.voices.get(voiceId)`.
+ * Если голос не найден или истёк — бросает явную ошибку БЕЗ подмены на Charon/Kore.
+ */
+export async function validateStoredVoiceBeforeTts(
+  ai: GoogleGenAI,
+  sp: ResolvedBatchSpeaker,
+  options?: { forceFresh?: boolean }
+): Promise<ValidatedStoredVoiceInfo | null> {
+  const voiceType = resolveEffectiveVoiceType(sp);
+  if (voiceType === "prebuilt") return null;
+
+  const voiceId = String(sp.voiceId || "").trim();
+  if (!isStoredVoiceId(voiceId)) {
+    throw new Error(
+      `Некорректный ID сохранённого голоса для спикера «${sp.speakerName}» (voiceType=${voiceType}): получен "${voiceId || "пусто"}". Ожидается voice_... ID без подмены на базовый голос.`
+    );
+  }
+
+  if (isFakeDubbingTtsEnabled()) {
+    if (fakeStoredVoiceValidator) {
+      return await fakeStoredVoiceValidator(voiceId, sp);
+    }
+    return {
+      voiceId,
+      voiceType,
+      displayName: sp.speakerName,
+      model: DUBBING_MODELS_CONFIG.ttsDubbingModel,
+      expireTime: new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString(),
+      sampleAudioBytes: buildWav24k(generateSyntheticTurnPcm(2.0, sp.gender === "female" ? 235 : 135)),
+      sampleAudioMimeType: "audio/wav",
+    };
+  }
+
+  const now = Date.now();
+  if (!options?.forceFresh) {
+    const cached = validatedStoredVoiceCache.get(voiceId);
+    if (cached && cached.expiresAtMs > now) {
+      return cached.info;
+    }
+  }
+
+  let voiceObj: any;
+  try {
+    voiceObj = await (ai as any).voices.get(voiceId);
+  } catch (err: any) {
+    const msg = String(err?.message || err || "Voice lookup failed");
+    throw new Error(
+      `Сохранённый голос ${voiceId} (${sp.speakerName}, ${voiceType}) недоступен или не найден в Gemini API: ${msg}. Подмена на Charon/Kore запрещена.`
+    );
+  }
+
+  if (!voiceObj || !voiceObj.id) {
+    throw new Error(
+      `Сохранённый голос ${voiceId} (${sp.speakerName}) не найден в Gemini API. Подмена на Charon/Kore запрещена.`
+    );
+  }
+
+  const expireTimeStr = voiceObj.expire_time || voiceObj.expireTime;
+  if (expireTimeStr) {
+    const expMs = Date.parse(String(expireTimeStr));
+    if (Number.isFinite(expMs) && expMs <= now) {
+      throw new Error(
+        `Срок действия сохранённого голоса ${voiceId} (${sp.speakerName}) истёк (${expireTimeStr}). Подмена на Charon/Kore запрещена.`
+      );
+    }
+  }
+
+  const sampleDataB64 = voiceObj.sample_audio?.data || voiceObj.sampleAudio?.data;
+  const sampleMime =
+    voiceObj.sample_audio?.mime_type ||
+    voiceObj.sample_audio?.mimeType ||
+    voiceObj.sampleAudio?.mimeType ||
+    "audio/wav";
+
+  const info: ValidatedStoredVoiceInfo = {
+    voiceId,
+    voiceType:
+      voiceObj.type === "prompted" || voiceObj.type === "replicated"
+        ? voiceObj.type
+        : voiceType,
+    displayName: voiceObj.display_name || voiceObj.displayName || sp.speakerName,
+    model: voiceObj.model,
+    expireTime: expireTimeStr ? String(expireTimeStr) : undefined,
+    sampleAudioBytes:
+      typeof sampleDataB64 === "string" && sampleDataB64.length > 0
+        ? Buffer.from(sampleDataB64, "base64")
+        : undefined,
+    sampleAudioMimeType: sampleMime,
+  };
+
+  validatedStoredVoiceCache.set(voiceId, {
+    expiresAtMs: now + 5 * 60 * 1000,
+    info,
+  });
+
+  return info;
 }
 
 function isDubbingKieFallbackEnabled(): boolean {
@@ -524,9 +702,14 @@ export function computeSubBlockCacheHash(
 
   const speakersPayload = participatingSpeakerIds.map((spId) => {
     const sp = speakerMap.get(spId);
+    const vt = resolveEffectiveVoiceType(sp);
+    const isPersistent = vt !== "prebuilt";
     return {
       speakerId: spId,
-      voice: sp?.isCloned ? sp.voiceId || "cloned" : sp?.baseVoice || "Charon",
+      voiceType: vt,
+      voiceId: isPersistent ? sp?.voiceId || "" : sp?.baseVoice || "Charon",
+      identityVersion: sp?.identityVersion || "",
+      voice: isPersistent ? sp?.voiceId || "stored" : sp?.baseVoice || "Charon",
       gender: inferSpeakerGender(sp) || "unknown",
     };
   });
@@ -540,11 +723,16 @@ export function computeSubBlockCacheHash(
     speakers: speakersPayload,
     turns: subBlockTurns.map((t) => {
       const sp = speakerMap.get(t.speakerId);
+      const vt = resolveEffectiveVoiceType(sp);
+      const isPersistent = vt !== "prebuilt";
       return {
         id: t.id,
         speakerId: t.speakerId,
         text: stripLegacyPauseArtifacts(t.cleanSpeechText),
-        voice: sp?.isCloned ? sp.voiceId || "cloned" : sp?.baseVoice || "Charon",
+        voiceType: vt,
+        voiceId: isPersistent ? sp?.voiceId || "" : sp?.baseVoice || "Charon",
+        identityVersion: sp?.identityVersion || "",
+        voice: isPersistent ? sp?.voiceId || "stored" : sp?.baseVoice || "Charon",
         style: buildCleanTurnStyleForTts(t, sp, useDeliveryEmotions),
       };
     }),
@@ -1047,9 +1235,13 @@ export function evaluateSubBlockQa(params: {
 // VOICE CONFIG & SINGLE-TURN RECOVERY
 // =========================================================================
 
-function buildSingleSpeakerVoiceConfig(sp: ResolvedBatchSpeaker): any {
-  if (sp.isCloned) {
+export function buildSingleSpeakerVoiceConfig(sp: ResolvedBatchSpeaker): any {
+  const voiceType = resolveEffectiveVoiceType(sp);
+  const rawVoiceId = String(sp.voiceId || "").trim();
+
+  if (voiceType === "prompted" || voiceType === "replicated" || isStoredVoiceId(rawVoiceId)) {
     if (
+      voiceType === "replicated" &&
       sp.replicatedVoiceConfig?.voiceSampleAudio &&
       (sp.replicatedVoiceConfig?.consentAudio || sp.replicatedVoiceConfig?.voiceConsentSignature)
     ) {
@@ -1070,11 +1262,16 @@ function buildSingleSpeakerVoiceConfig(sp: ResolvedBatchSpeaker): any {
         },
       };
     }
-    return {
-      voice:
-        sp.voiceId && sp.voiceId.startsWith("voice_") ? sp.voiceId : "voice_17raj9ewke3g",
-    };
+    if (isStoredVoiceId(rawVoiceId)) {
+      return {
+        voice: rawVoiceId,
+      };
+    }
+    throw new Error(
+      `Для спикера «${sp.speakerName}» указан voiceType="${voiceType}", но отсутствует валидный voice_... ID ("${rawVoiceId}"). Подмена на Charon/Kore или другой голос запрещена.`
+    );
   }
+
   return {
     prebuiltVoiceConfig: { voiceName: sp.baseVoice || "Charon" },
   };
@@ -1088,15 +1285,32 @@ async function synthesizeMissingSingleTurnPcm(
 ): Promise<{ pcm: Buffer; provider: "google" | "kie.ai" | "fake"; sentStyle: string; sentText: string }> {
   const cleanText = stripLegacyPauseArtifacts(turn.cleanSpeechText);
   const cleanStyle = buildCleanTurnStyleForTts(turn, speaker, useDeliveryEmotions);
+  const isPersistent = isPersistentVoiceSpeaker(speaker);
+  const voiceConfig = buildSingleSpeakerVoiceConfig(speaker);
 
   if (ttsPayloadObserver) {
     ttsPayloadObserver({
       channel: "single_recovery",
-      parts: [{ text: cleanText, style: cleanStyle, speaker: speaker.baseVoice || "Charon" }],
+      parts: [
+        {
+          text: cleanText,
+          style: cleanStyle,
+          ...(isPersistent ? {} : { speaker: speaker.baseVoice || "Charon" }),
+        },
+      ],
+      voiceConfig,
+      usedMultiSpeaker: false,
+      speakerId: speaker.speakerId,
+      voiceId: speaker.voiceId,
+      voiceType: resolveEffectiveVoiceType(speaker),
+      identityVersion: speaker.identityVersion,
     });
   }
 
   if (isFakeDubbingTtsEnabled()) {
+    if (isPersistent) {
+      await validateStoredVoiceBeforeTts(ai, speaker);
+    }
     const syl = Math.max(1, countSyllables(cleanText));
     return {
       pcm: generateSyntheticTurnPcm(Math.max(0.35, syl / 4.8), 360),
@@ -1106,7 +1320,9 @@ async function synthesizeMissingSingleTurnPcm(
     };
   }
 
-  const voiceConfig = buildSingleSpeakerVoiceConfig(speaker);
+  if (isPersistent) {
+    await validateStoredVoiceBeforeTts(ai, speaker);
+  }
 
   try {
     if (simulateDubbingGoogle429) {
@@ -1124,7 +1340,7 @@ async function synthesizeMissingSingleTurnPcm(
             {
               text: cleanText,
               speechMetadata: {
-                ...(speaker.isCloned ? {} : { speaker: speaker.baseVoice || "Charon" }),
+                ...(isPersistent ? {} : { speaker: speaker.baseVoice || "Charon" }),
                 style: cleanStyle,
               },
             } as any,
@@ -1151,7 +1367,7 @@ async function synthesizeMissingSingleTurnPcm(
       if (isDailyQuota429Error(err)) {
         markGoogleTtsQuotaExhaustedToday();
       }
-      if (isDubbingKieFallbackEnabled() && !speaker.isCloned) {
+      if (isDubbingKieFallbackEnabled() && !isPersistent) {
         const kieRes = await synthesizeDialogueBlockViaKieAi([
           {
             speaker: speaker.speakerName,
@@ -1491,6 +1707,11 @@ async function runSingleSubBlockAttempt(
 
   if (forceMode === "A") {
     const spList = uniqueSpeakers.slice(0, 2);
+    if (spList.some((s) => isPersistentVoiceSpeaker(s))) {
+      throw new Error(
+        "Сохранённые голоса (prompted/replicated voice_...) не могут передаваться в multiSpeakerVoiceConfig (Mode A)."
+      );
+    }
     const sp1 = spList[0];
     const sp2 =
       spList[1] || {
@@ -1517,6 +1738,7 @@ async function runSingleSubBlockAttempt(
     if (ttsPayloadObserver) {
       ttsPayloadObserver({
         channel: "google_mode_a",
+        usedMultiSpeaker: true,
         parts: parts.map((p) => ({
           text: p.text,
           style: p.speechMetadata.style,
@@ -1702,22 +1924,34 @@ async function runSingleSubBlockAttempt(
   for (const [spId, localIndices] of perSpeakerIndices.entries()) {
     const sp = speakerMap.get(spId)!;
     const spTurns = localIndices.map((idx) => subTurns[idx]);
+    const isPersistent = isPersistentVoiceSpeaker(sp);
+    const singleVoiceConfig = buildSingleSpeakerVoiceConfig(sp);
 
     const parts = localIndices.map((origIdx) => ({
       text: resolvedSentTexts[origIdx],
       speechMetadata: {
-        ...(sp.isCloned ? {} : { speaker: sp.baseVoice || "Charon" }),
+        ...(isPersistent ? {} : { speaker: sp.baseVoice || "Charon" }),
         style: resolvedSentStyles[origIdx],
       },
     }));
 
+    if (isPersistent) {
+      await validateStoredVoiceBeforeTts(ai, sp);
+    }
+
     if (ttsPayloadObserver) {
       ttsPayloadObserver({
         channel: "google_mode_b",
+        voiceConfig: singleVoiceConfig,
+        usedMultiSpeaker: false,
+        speakerId: sp.speakerId,
+        voiceId: sp.voiceId,
+        voiceType: resolveEffectiveVoiceType(sp),
+        identityVersion: sp.identityVersion,
         parts: parts.map((p) => ({
           text: p.text,
           style: p.speechMetadata.style,
-          speaker: sp.speakerName,
+          ...(isPersistent ? {} : { speaker: sp.speakerName }),
         })),
       });
     }
@@ -1757,7 +1991,7 @@ async function runSingleSubBlockAttempt(
           config: {
             responseModalities: ["AUDIO"],
             speechConfig: {
-              voiceConfig: buildSingleSpeakerVoiceConfig(sp),
+              voiceConfig: singleVoiceConfig,
             },
           },
         });
@@ -1779,7 +2013,7 @@ async function runSingleSubBlockAttempt(
           if (isDaily) {
             markGoogleTtsQuotaExhaustedToday();
           }
-          if (sp.isCloned && isDaily) {
+          if (isPersistent && isDaily) {
             const doneTotal = startingCompletedBlocks + blocksCompletedSoFar;
             return {
               clips: [],
@@ -1800,7 +2034,7 @@ async function runSingleSubBlockAttempt(
               quotaPauseMessageRu: `Дневной лимит исчерпан. Готово ${doneTotal} из ${totalProjectBlocks} подблоков, продолжим после 13:00 по Ташкенту`,
             };
           }
-          if (isDubbingKieFallbackEnabled() && !sp.isCloned) {
+          if (isDubbingKieFallbackEnabled() && !isPersistent) {
             const kieTurns: KieDialogueTurnInput[] = localIndices.map((origIdx) => ({
               speaker: sp.speakerName,
               voice: sp.baseVoice || "Charon",
@@ -2510,8 +2744,8 @@ export async function synthesizeDialogueInMacroBlocks(
   );
 
   const uniqueSpeakers = Array.from(speakerMap.values());
-  const usesClonedVoice = uniqueSpeakers.some((s) => s.isCloned);
-  const canUseModeA = !usesClonedVoice && uniqueSpeakers.length <= 2 && uniqueSpeakers.length >= 1;
+  const usesPersistentVoice = uniqueSpeakers.some((s) => isPersistentVoiceSpeaker(s));
+  const canUseModeA = !usesPersistentVoice && uniqueSpeakers.length <= 2 && uniqueSpeakers.length >= 1;
 
   // Если клиент уже разбил ПОЛНЫЙ сценарий через planDialogueSubBlocks и передал plannedSubBlockIndex,
   // сохраняем точные границы подблоков полного сценария (иначе планируем здесь же).
@@ -2825,8 +3059,8 @@ export async function synthesizeSingleTurnInModeAContext(
   }
 
   const uniqueSpeakers = Array.from(speakerMap.values());
-  const usesClonedVoice = uniqueSpeakers.some((s) => s.isCloned);
-  const canUseModeA = !usesClonedVoice && uniqueSpeakers.length <= 2 && uniqueSpeakers.length >= 1;
+  const usesPersistentVoice = uniqueSpeakers.some((s) => isPersistentVoiceSpeaker(s));
+  const canUseModeA = !usesPersistentVoice && uniqueSpeakers.length <= 2 && uniqueSpeakers.length >= 1;
 
   let ttsCallsUsed = 0;
   let transcribeCallsUsed = 0;

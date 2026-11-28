@@ -194,6 +194,43 @@ export function measurePeakDbfsPcm(pcm: Buffer): number {
 }
 
 /**
+ * Оценка 4x-пересэмплированного True Peak (dBFS) через кубическую интерполяцию Catmull-Rom.
+ */
+export function measureTruePeakDbfsFloat(samples: Float64Array): number {
+  const n = samples.length;
+  if (n === 0) return -Infinity;
+  let maxAbs = 0;
+  for (let i = 0; i < n; i++) {
+    const a = Math.abs(samples[i]);
+    if (a > maxAbs) maxAbs = a;
+    if (i >= 1 && i + 2 < n) {
+      const y0 = samples[i - 1];
+      const y1 = samples[i];
+      const y2 = samples[i + 1];
+      const y3 = samples[i + 2];
+      for (const t of [0.25, 0.5, 0.75]) {
+        const t2 = t * t;
+        const t3 = t2 * t;
+        const v =
+          0.5 *
+          (2 * y1 +
+            (-y0 + y2) * t +
+            (2 * y0 - 5 * y1 + 4 * y2 - y3) * t2 +
+            (-y0 + 3 * y1 - 3 * y2 + y3) * t3);
+        const av = Math.abs(v);
+        if (av > maxAbs) maxAbs = av;
+      }
+    }
+  }
+  if (maxAbs <= 1e-12) return -Infinity;
+  return 20 * Math.log10(maxAbs);
+}
+
+export function measureTruePeakDbfsPcm(pcm: Buffer): number {
+  return measureTruePeakDbfsFloat(pcm16ToFloat64(pcm));
+}
+
+/**
  * Применяет усиление (в дБ) и мягкий lookahead brickwall peak-лимитер с потолком ceilingLinear (-1.0 dBFS).
  * Не допускает жёсткого клиппинга и гарантирует peak <= ceilingLinear.
  */
@@ -303,6 +340,7 @@ export interface LeveledClipResult {
   targetLufs: number;
   gainDb: number;
   peakAfterDbfs: number | null;
+  truePeakAfterDbfs?: number | null;
   usedMedianGain: boolean;
 }
 
@@ -440,6 +478,20 @@ export function levelSubBlockClipsLoudness(
       measuredAfter = measureIntegratedLufsFloat(processed, sampleRate);
     }
 
+    let truePeakAfter = measureTruePeakDbfsFloat(processed);
+    if (Number.isFinite(truePeakAfter) && truePeakAfter > ceilingDbfs) {
+      const margin = truePeakAfter - ceilingDbfs + 0.2;
+      const tightenedCeiling = Math.pow(10, (ceilingDbfs - margin) / 20);
+      processed = applyGainAndPeakLimiter(
+        item.samples,
+        gainDb,
+        sampleRate,
+        tightenedCeiling
+      );
+      measuredAfter = measureIntegratedLufsFloat(processed, sampleRate);
+      truePeakAfter = measureTruePeakDbfsFloat(processed);
+    }
+
     const peakAfter = measurePeakDbfsFloat(processed);
 
     return {
@@ -453,6 +505,9 @@ export function levelSubBlockClipsLoudness(
       gainDb: Math.round(gainDb * 100) / 100,
       peakAfterDbfs: Number.isFinite(peakAfter)
         ? Math.round(peakAfter * 100) / 100
+        : null,
+      truePeakAfterDbfs: Number.isFinite(truePeakAfter)
+        ? Math.round(truePeakAfter * 100) / 100
         : null,
       usedMedianGain,
     };

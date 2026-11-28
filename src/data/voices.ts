@@ -7,6 +7,7 @@ export const USER_REPLICATED_VOICE: VoiceProfile = {
   gender: 'male',
   voiceId: 'voice_17raj9ewke3g',
   voiceType: 'replicated',
+  identityVersion: 'shokhrukh-replicated-v1',
   model: 'ovozstudio-neural-hd',
   timbre: 'Tabiiy chuqur bariton, 0% aksent',
   tempo: '1.0x',
@@ -20,10 +21,71 @@ export const USER_REPLICATED_VOICE: VoiceProfile = {
   sampleNotes: 'Shaxsiy klonlangan ovoz (voice_17raj9ewke3g)',
 };
 
+export const AZIZ_VOICE_LOCK_M2: VoiceProfile = {
+  id: 'voice_din40bswsfcy',
+  name: 'Aziz Voice Lock M2',
+  baseVoice: 'Charon',
+  gender: 'male',
+  voiceId: 'voice_din40bswsfcy',
+  voiceType: 'prompted',
+  identityVersion: 'aziz-m2-v1',
+  model: 'gemini-3.8-flash-tts',
+  timbre: 'Yengil, iliq va jonli suhbat baritoni',
+  tempo: '1.0x',
+  pitchLevel: "O'rta (Bariton)",
+  style: 'Voice Lock M2 — bir xil jonli boshlovchi ovozi',
+  customPersonaPrompt:
+    'Persistent Gemini Voice Remix M2 (voice_din40bswsfcy, aziz-m2-v1) — airy, conversational Uzbek car-video host.',
+  isUserCustomVoice: true,
+  isReplicatedVoice: false,
+  sampleAudioUrl: '/audio/voice-lock/M2-sample.wav',
+  sampleNotes: 'Voice Lock M2 (voice_din40bswsfcy · aziz-m2-v1)',
+};
+
+export const VERONIKA_VOICE_LOCK_F1: VoiceProfile = {
+  id: 'voice_jobdfz42xizz',
+  name: 'Veronika Voice Lock F1',
+  baseVoice: 'Kore',
+  gender: 'female',
+  voiceId: 'voice_jobdfz42xizz',
+  voiceType: 'prompted',
+  identityVersion: 'veronika-f1-v1',
+  model: 'gemini-3.8-flash-tts',
+  timbre: 'Yengil, yorqin va samimiy soprano',
+  tempo: '1.0x',
+  pitchLevel: 'Baland (Tenor/Soprano)',
+  style: 'Voice Lock F1 — bir xil jonli ayol boshlovchi ovozi',
+  customPersonaPrompt:
+    'Persistent Gemini Voice Remix F1 (voice_jobdfz42xizz, veronika-f1-v1) — bright, playful Uzbek car-video host.',
+  isUserCustomVoice: true,
+  isReplicatedVoice: false,
+  sampleAudioUrl: '/audio/voice-lock/F1-sample.wav',
+  sampleNotes: 'Voice Lock F1 (voice_jobdfz42xizz · veronika-f1-v1)',
+};
+
+export const VOICE_LOCK_DEFAULTS = {
+  male: AZIZ_VOICE_LOCK_M2,
+  female: VERONIKA_VOICE_LOCK_F1,
+} as const;
+
 export const DEFAULT_USER_VOICE: VoiceProfile = USER_REPLICATED_VOICE;
+
+export function isStoredPersistentVoiceId(voiceId?: string | null): boolean {
+  return /^voice_[a-z0-9_-]+$/i.test(String(voiceId || '').trim());
+}
+
+export function getKnownIdentityVersionForVoice(voiceId?: string | null): string | undefined {
+  const id = String(voiceId || '').trim().toLowerCase();
+  if (id === 'voice_din40bswsfcy') return 'aziz-m2-v1';
+  if (id === 'voice_jobdfz42xizz') return 'veronika-f1-v1';
+  if (id === 'voice_17raj9ewke3g') return 'shokhrukh-replicated-v1';
+  return undefined;
+}
 
 export const PREBUILT_VOICE_PROFILES: VoiceProfile[] = [
   USER_REPLICATED_VOICE,
+  AZIZ_VOICE_LOCK_M2,
+  VERONIKA_VOICE_LOCK_F1,
   {
     id: 'ulugbek-history',
     name: "Ulug'bek · Tarix & Hujjatli",
@@ -383,8 +445,10 @@ const CANONICAL_BASE_MAP: Record<string, BaseVoiceModel> = {
   fenrir: 'Fenrir',
   zephyr: 'Zephyr',
   aoede: 'Aoede',
-  // Cloned & canonical Uzbek aliases
+  // Cloned, prompted Voice Lock & canonical Uzbek aliases (metadata baseVoice only)
   voice_17raj9ewke3g: 'Charon',
+  voice_din40bswsfcy: 'Charon',
+  voice_jobdfz42xizz: 'Kore',
   'user-replicated': 'Charon',
   shokhrukh: 'Charon',
   shohrux: 'Charon',

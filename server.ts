@@ -11,7 +11,10 @@ import { YoutubeTranscript } from "youtube-transcript";
 import { extractMediaAudio } from "./server/services/mediaExtractor.ts";
 import { runMediaDubbingPipeline, getPipelineLogs } from "./server/services/mediaPipeline.ts";
 import { normalizeUzbekSpeech } from "./src/utils/uzbekNormalizer.ts";
-import { resolveCanonicalBaseVoice } from "./src/data/voices.ts";
+import {
+  resolveCanonicalBaseVoice,
+  getKnownIdentityVersionForVoice,
+} from "./src/data/voices.ts";
 import { getApps, initializeApp, getApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
@@ -68,9 +71,14 @@ import {
   buildCleanTurnStyleForTts,
   stripLegacyPauseArtifacts,
   stripLegacyStylePauseDirective,
+  isStoredVoiceId,
+  resolveEffectiveVoiceType,
+  validateStoredVoiceBeforeTts,
   type BatchInputTurn,
   type ResolvedBatchSpeaker,
+  type SpeakerVoiceType,
 } from "./server/services/dubbing/batchDialogueEngine.ts";
+import { synthesizeDialogueInVoiceLockMode } from "./server/services/dubbing/voiceLockEngine.ts";
 import {
   isFakeDubbingTtsEnabled,
   generateSyntheticTurnPcm,
@@ -724,6 +732,7 @@ export async function generateGeminiSpeechPcm({
   text,
   voiceName,
   voiceId,
+  voiceType,
   replicatedVoiceConfig,
   speechStyle,
   speakerName,
@@ -731,6 +740,7 @@ export async function generateGeminiSpeechPcm({
   text: string;
   voiceName: string;
   voiceId?: string;
+  voiceType?: SpeakerVoiceType;
   replicatedVoiceConfig?: any;
   speechStyle?: string;
   speakerName?: string;
@@ -746,17 +756,31 @@ export async function generateGeminiSpeechPcm({
   };
 
   const rawKey = (voiceName || "").trim().toLowerCase();
-  const rawId = (voiceId || voiceName || "").trim().toLowerCase();
-  const isClonedShohrux =
-    Boolean(replicatedVoiceConfig) ||
-    rawId === "voice_17raj9ewke3g" ||
-    rawId === "user-replicated" ||
-    rawId === "shohrux" ||
-    rawId === "shokhrukh" ||
-    rawKey === "voice_17raj9ewke3g" ||
+  const rawVoiceIdTrimmed = (voiceId || "").trim();
+  const rawVoiceNameTrimmed = (voiceName || "").trim();
+  const rawIdLower = (rawVoiceIdTrimmed || rawVoiceNameTrimmed).toLowerCase();
+
+  let exactStoredVoiceId: string | null = null;
+  if (isStoredVoiceId(rawVoiceIdTrimmed)) {
+    exactStoredVoiceId = rawVoiceIdTrimmed;
+  } else if (isStoredVoiceId(rawVoiceNameTrimmed)) {
+    exactStoredVoiceId = rawVoiceNameTrimmed;
+  } else if (
+    rawIdLower === "user-replicated" ||
+    rawIdLower === "shohrux" ||
+    rawIdLower === "shokhrukh" ||
     rawKey === "user-replicated" ||
     rawKey === "shohrux" ||
-    rawKey === "shokhrukh";
+    rawKey === "shokhrukh"
+  ) {
+    exactStoredVoiceId = "voice_17raj9ewke3g";
+  }
+
+  const isStoredCustomVoice =
+    Boolean(exactStoredVoiceId) ||
+    Boolean(replicatedVoiceConfig) ||
+    voiceType === "prompted" ||
+    voiceType === "replicated";
 
   let targetVoice = CANONICAL_VOICES[rawKey];
 
@@ -868,7 +892,7 @@ export async function generateGeminiSpeechPcm({
             {
               text: ttsText,
               speechMetadata: {
-                speaker: speakerName || targetVoice,
+                ...(isStoredCustomVoice ? {} : { speaker: speakerName || targetVoice }),
                 style: effectiveStyle,
               },
             },
@@ -887,9 +911,9 @@ export async function generateGeminiSpeechPcm({
   const modelSupportsSpeechMetadata = (modelName: string) =>
     modelName === "gemini-3.8-flash-tts";
 
-  // Build candidate voiceConfigs
+  // Build candidate voiceConfigs: stored voice_... NEVER silently falls back to Charon/Kore!
   const candidateVoiceConfigs: any[] = [];
-  if (isClonedShohrux) {
+  if (isStoredCustomVoice) {
     if (
       replicatedVoiceConfig &&
       (replicatedVoiceConfig.consentAudio || replicatedVoiceConfig.voiceConsentSignature)
@@ -913,13 +937,29 @@ export async function generateGeminiSpeechPcm({
         });
       }
     }
-    if (!unsupportedCustomVoiceIds.has("voice_17raj9ewke3g")) {
-      candidateVoiceConfigs.push({ voice: "voice_17raj9ewke3g" });
+    if (exactStoredVoiceId) {
+      await validateStoredVoiceBeforeTts(ai, {
+        speakerId: "SINGLE",
+        speakerName: speakerName || exactStoredVoiceId,
+        baseVoice: targetVoice,
+        voiceId: exactStoredVoiceId,
+        voiceType:
+          voiceType ||
+          (exactStoredVoiceId.toLowerCase() === "voice_17raj9ewke3g" ? "replicated" : "prompted"),
+        isCloned: true,
+        baseSpeechStyle: "",
+      });
+      candidateVoiceConfigs.push({ voice: exactStoredVoiceId });
+    } else if (candidateVoiceConfigs.length === 0) {
+      throw new Error(
+        `Указан сохранённый голос (voiceType=${voiceType || "custom"}), но отсутствует валидный voice_... ID. Подмена на Charon/Kore запрещена.`
+      );
     }
+  } else {
+    candidateVoiceConfigs.push({
+      prebuiltVoiceConfig: { voiceName: targetVoice },
+    });
   }
-  candidateVoiceConfigs.push({
-    prebuiltVoiceConfig: { voiceName: targetVoice },
-  });
 
   for (const voiceCfg of candidateVoiceConfigs) {
     if (lastError && isApiKeyExpired(lastError)) {
@@ -1506,6 +1546,8 @@ app.use("/api", globalLimiter);
 
 const ALLOWED_PUBLIC_VOICE_PREVIEW_IDS = new Set([
   "voice_17raj9ewke3g",
+  "voice_din40bswsfcy",
+  "voice_jobdfz42xizz",
   "sardor",
   "aziza",
   "madina",
@@ -1865,8 +1907,8 @@ app.get("/api/voices/preview/:id", async (req, res) => {
 
     const previewGreeting = "Assalomu alaykum! OvozStudio'ga xush kelibsiz, o'zbekcha professional podkast yaratamiz.";
     const canonicalBase = resolveCanonicalBaseVoice(cleanId);
-    const targetVoiceConfig = cleanId === "voice_17raj9ewke3g"
-      ? { voice: "voice_17raj9ewke3g" }
+    const targetVoiceConfig = isStoredVoiceId(cleanId)
+      ? { voice: cleanId }
       : { prebuiltVoiceConfig: { voiceName: canonicalBase } };
 
     const response = await ai.models.generateContent({
@@ -5604,7 +5646,7 @@ async function mapConcurrent<T, R>(
   return results;
 }
 
-// Helper: Resolve voice configuration for any speaker (supports N speakers: HOST_1, HOST_2, HOST_3, etc. + cloned voice)
+// Helper: Resolve voice configuration for any speaker with strict voiceType / voiceId / identityVersion
 function resolveSpeakerVoiceProfile(
   speakerId: string,
   turn: any,
@@ -5613,6 +5655,8 @@ function resolveSpeakerVoiceProfile(
   speakerVoicesMap: Record<string, any> = {}
 ): {
   voiceId: string;
+  voiceType: SpeakerVoiceType;
+  identityVersion: string;
   baseVoice: string;
   speakerName: string;
   gender: "female" | "male";
@@ -5634,7 +5678,7 @@ function resolveSpeakerVoiceProfile(
 
   const isFemale = explicitGender === "female";
 
-  const rawVoiceId = String(
+  let rawVoiceId = String(
     turn?.voiceId ||
       customEntry.voiceId ||
       customEntry.id ||
@@ -5646,6 +5690,33 @@ function resolveSpeakerVoiceProfile(
           ? "Kore"
           : "Fenrir")
   ).trim();
+
+  // Map legacy Shokhrukh aliases to exact stored voice ID
+  const rawLower = rawVoiceId.toLowerCase();
+  if (rawLower === "user-replicated" || rawLower === "shohrux" || rawLower === "shokhrukh") {
+    rawVoiceId = "voice_17raj9ewke3g";
+  }
+
+  const explicitVoiceTypeRaw = String(turn?.voiceType || customEntry?.voiceType || "").trim().toLowerCase();
+  const hasReplicatedPayload = Boolean(
+    turn?.replicatedVoiceConfig?.voiceSampleAudio ||
+      customEntry?.replicatedVoiceConfig?.voiceSampleAudio
+  );
+
+  let voiceType: SpeakerVoiceType;
+  if (isStoredVoiceId(rawVoiceId)) {
+    if (explicitVoiceTypeRaw === "replicated" || hasReplicatedPayload || rawVoiceId.toLowerCase() === "voice_17raj9ewke3g") {
+      voiceType = "replicated";
+    } else {
+      voiceType = "prompted";
+    }
+  } else if (explicitVoiceTypeRaw === "prompted" || explicitVoiceTypeRaw === "replicated") {
+    voiceType = explicitVoiceTypeRaw as SpeakerVoiceType;
+  } else if (hasReplicatedPayload) {
+    voiceType = "replicated";
+  } else {
+    voiceType = "prebuilt";
+  }
 
   const rawBase = String(
     turn?.baseVoice || customEntry.baseVoice || resolveCanonicalBaseVoice(rawVoiceId)
@@ -5674,13 +5745,22 @@ function resolveSpeakerVoiceProfile(
     }
   }
 
+  const identityVersion = String(
+    turn?.identityVersion ||
+      customEntry?.identityVersion ||
+      getKnownIdentityVersionForVoice(rawVoiceId) ||
+      (voiceType === "prebuilt" ? `${baseVoice.toLowerCase()}-prebuilt-v1` : `${rawVoiceId}-v1`)
+  ).trim();
+
   const speakerName =
     turn?.speakerName ||
     customEntry.name ||
     (isFemale ? "Malika" : speakerId === "HOST_1" ? "Shohrux" : "Ekspert");
 
   return {
-    voiceId: rawVoiceId,
+    voiceId: voiceType === "prebuilt" ? baseVoice : rawVoiceId,
+    voiceType,
+    identityVersion,
     baseVoice,
     speakerName,
     gender: (isFemale ? "female" : "male") as "female" | "male",
@@ -5936,6 +6016,8 @@ app.post(
         useDeliveryEmotions = true,
         pronunciationDictionary: rawPronunciationDictionary = [],
         masterAudioMode = "time_aligned",
+        voiceLockMode = "standard",
+        regenerateSpeakerId,
         totalVideoDurationSec,
         totalTimelineSec,
       } = req.body;
@@ -5986,18 +6068,8 @@ app.post(
         }
       }
 
-      // Собираем карту спикеров (встроенные голоса + клонированный голос + базовый стиль спикера)
+      // Собираем карту спикеров со строгой типизацией (prebuilt / prompted / replicated + exact voiceId + identityVersion)
       const speakerMap = new Map<string, ResolvedBatchSpeaker>();
-      const isClonedVoiceId = (id?: string, cfg?: any): boolean => {
-        if (cfg && (cfg.voiceSampleAudio || cfg.consentAudio || cfg.voiceConsentSignature)) return true;
-        const l = String(id || "").toLowerCase();
-        return (
-          l === "voice_17raj9ewke3g" ||
-          l === "user-replicated" ||
-          l === "shohrux" ||
-          l === "shokhrukh"
-        );
-      };
 
       const batchInputTurns: BatchInputTurn[] = turns.map((turn: any, i: number) => {
         const speakerKey = turn.speakerId || "HOST_1";
@@ -6018,7 +6090,11 @@ app.post(
 
         const replicatedCfg =
           turn?.replicatedVoiceConfig || customEntry?.replicatedVoiceConfig || undefined;
-        const cloned = isClonedVoiceId(resolved.voiceId, replicatedCfg);
+        const isPersistent =
+          resolved.voiceType === "prompted" ||
+          resolved.voiceType === "replicated" ||
+          isStoredVoiceId(resolved.voiceId) ||
+          Boolean(replicatedCfg?.voiceSampleAudio);
         const speakerBaseStyle = sanitizeBaseStyle(
           customEntry?.baseStyle ?? hostFallback?.baseStyle,
           resolved.gender
@@ -6030,8 +6106,10 @@ app.post(
             speakerName: resolved.speakerName,
             baseVoice: resolved.baseVoice,
             voiceId: resolved.voiceId,
+            voiceType: resolved.voiceType,
+            identityVersion: resolved.identityVersion,
             gender: resolved.gender,
-            isCloned: cloned,
+            isCloned: isPersistent,
             replicatedVoiceConfig: replicatedCfg,
             baseSpeechStyle: speakerBaseStyle,
           });
@@ -6090,6 +6168,188 @@ app.post(
           return a.localeCompare(b);
         })
       );
+
+      if (voiceLockMode === "full_speaker_tracks") {
+        const vlResult = await synthesizeDialogueInVoiceLockMode(ai, {
+          turns: batchInputTurns,
+          speakerMap: orderedSpeakerMap,
+          strictTimeWindow: isTimeAlignedMode,
+          useDeliveryEmotions: effectiveUseDeliveryEmotions,
+          pronunciationDictionary: cleanPronunciationDict,
+          bypassCache: Boolean(req.body?.bypassCache),
+          onlySpeakerId:
+            typeof regenerateSpeakerId === "string" && regenerateSpeakerId.trim()
+              ? regenerateSpeakerId.trim()
+              : undefined,
+        });
+
+        let vlMasterAudioBase64 = "";
+        let vlTotalDuration = 0;
+        const vlSynthesizedTurns: any[] = [];
+
+        if (req.body?.skipMasterStitch || regenerateSpeakerId) {
+          vlResult.turns.forEach((r) => {
+            const orig = batchInputTurns[r.index]?.rawTurn || {};
+            const startTime = typeof orig.startSec === "number" ? orig.startSec : 0;
+            const spMeta = orderedSpeakerMap.get(r.speakerId);
+            vlSynthesizedTurns.push({
+              ...orig,
+              id: r.id,
+              speakerName: r.speakerName,
+              voiceId: spMeta?.voiceId,
+              voiceType: spMeta?.voiceType,
+              identityVersion: spMeta?.identityVersion,
+              audioBase64: r.wavBase64,
+              durationSeconds: r.dubbedDurationSec,
+              originalDurationSec: r.originalDurationSec,
+              dubbedDurationSec: r.dubbedDurationSec,
+              atempoApplied: r.atempoApplied,
+              rephraseAttempts: r.rephraseAttempts,
+              syncStatus: r.syncStatus,
+              startTime,
+              endTime: Math.round((startTime + r.dubbedDurationSec) * 100) / 100,
+              fitStepApplied: r.fitStepApplied,
+              slicingMethod: r.slicingMethod,
+              generationMode: "voice_lock",
+              lufsBefore: r.lufsBefore,
+              lufsAfter: r.lufsAfter,
+              sentStyle: r.sentStyle,
+              sentText: r.sentText,
+              qa: r.qa,
+              qaReason: r.qaReason,
+              needsShorten: r.needsShorten,
+              subBlockIndex: 0,
+              shiftedStartBySec: 0,
+              synthesisFailed: r.qa === "failed",
+            });
+          });
+        } else {
+          const assembled = await assembleStrictTimecodeMasterPcm(
+            vlResult.turns.map((r) => {
+              const orig = batchInputTurns[r.index]?.rawTurn || {};
+              const startSec = typeof orig.startSec === "number" ? orig.startSec : 0;
+              const endSec =
+                typeof orig.endSec === "number"
+                  ? orig.endSec
+                  : startSec + r.pcm.length / 48000;
+              return {
+                startSec,
+                endSec,
+                sceneTitle: orig.sceneTitle || orig.chapter || undefined,
+                pcm: r.pcm,
+                rawUnstretchedPcm: r.pcm,
+                atempoApplied: r.atempoApplied,
+                rephraseAttempts: r.rephraseAttempts,
+                needsShorten: r.needsShorten,
+              };
+            }),
+            resolvedTotalVideoDurationSec,
+            24000
+          );
+
+          const masterWavBuffer = buildWavBuffer(assembled.masterPcm, 24000, 1, 16);
+          vlMasterAudioBase64 = masterWavBuffer.toString("base64");
+          vlTotalDuration = assembled.totalDurationSec;
+
+          vlResult.turns.forEach((r, idx) => {
+            const orig = batchInputTurns[r.index]?.rawTurn || {};
+            const placement = assembled.actualPlacements[idx];
+            const finalTurnWav = buildWavBuffer(placement.pcm, 24000, 1, 16);
+            const spMeta = orderedSpeakerMap.get(r.speakerId);
+            vlSynthesizedTurns.push({
+              ...orig,
+              id: r.id,
+              speakerName: r.speakerName,
+              voiceId: spMeta?.voiceId,
+              voiceType: spMeta?.voiceType,
+              identityVersion: spMeta?.identityVersion,
+              audioBase64: finalTurnWav.toString("base64"),
+              durationSeconds: placement.dubbedDurationSec,
+              originalDurationSec: placement.originalDurationSec,
+              dubbedDurationSec: placement.dubbedDurationSec,
+              atempoApplied: placement.atempoApplied,
+              rephraseAttempts: placement.rephraseAttempts,
+              syncStatus: placement.syncStatus,
+              startTime: placement.startSec,
+              endTime: placement.endSec,
+              shiftedStartBySec: placement.shiftedStartBySec,
+              fitStepApplied: r.fitStepApplied,
+              slicingMethod: r.slicingMethod,
+              generationMode: "voice_lock",
+              lufsBefore: r.lufsBefore,
+              lufsAfter: r.lufsAfter,
+              sentStyle: r.sentStyle,
+              sentText: r.sentText,
+              qa: r.qa,
+              qaReason: r.qaReason,
+              needsShorten: Boolean(r.needsShorten || placement.needsShorten),
+              subBlockIndex: 0,
+              synthesisFailed: r.qa === "failed",
+            });
+          });
+        }
+
+        let vlCreditsRemaining = (req as any).userBalance;
+        if (
+          !req.body?.skipMasterStitch &&
+          vlSynthesizedTurns.length > 0 &&
+          typeof (req as any).deductCredits === "function"
+        ) {
+          try {
+            vlCreditsRemaining = await (req as any).deductCredits();
+          } catch {}
+        }
+
+        return res.json({
+          voiceLockMode: "full_speaker_tracks",
+          overallSuccess: vlResult.overallSuccess,
+          identityQaPassed: vlResult.identityQaPassed,
+          masterAudioBase64: vlMasterAudioBase64 || undefined,
+          totalDurationSeconds: vlTotalDuration || undefined,
+          totalVideoDurationSec: vlTotalDuration || resolvedTotalVideoDurationSec,
+          turns: vlSynthesizedTurns,
+          srtSubtitles: generateSrtFromTurns(vlSynthesizedTurns),
+          creditsRemaining: vlCreditsRemaining,
+          ttsCallsUsed: vlResult.ttsCallsUsed,
+          alignmentCallsUsed: vlResult.alignmentCallsUsed,
+          identityQaCallsUsed: vlResult.identityQaCallsUsed,
+          transcribeCallsUsed: vlResult.transcribeCallsUsed,
+          provider: vlResult.provider,
+          modeUsed: vlResult.modeUsed,
+          blocksTotal: vlResult.speakerTracks.length,
+          blocksCompleted: vlResult.speakerTracks.filter((s) => s.status === "ok").length,
+          subBlocksTotal: vlResult.speakerTracks.length,
+          subBlocksCompleted: vlResult.speakerTracks.filter((s) => s.status === "ok").length,
+          retriesUsed: 0,
+          extraTtsCallsUsed: 0,
+          extraTtsBudget: 0,
+          failedSubBlocks: [],
+          quotaPaused: false,
+          speakerTracks: vlResult.speakerTracks.map((st) => ({
+            speakerId: st.speakerId,
+            speakerName: st.speakerName,
+            gender: st.gender,
+            voiceType: st.voiceType,
+            voiceId: st.voiceId,
+            identityVersion: st.identityVersion,
+            cacheKey: st.cacheKey,
+            fromCache: st.fromCache,
+            status: st.status,
+            failureReasons: st.failureReasons,
+            turnCount: st.turnCount,
+            partsSentCount: st.partsSentCount,
+            rawDurationSec: st.rawDurationSec,
+            ttsCallsUsed: st.ttsCallsUsed,
+            alignmentCallsUsed: st.alignmentCallsUsed,
+            identityQaCallsUsed: st.identityQaCallsUsed,
+            acoustics: st.acoustics,
+            identityQa: st.identityQa,
+          })),
+          stats: vlResult.stats,
+          quotaRemaining: vlResult.quotaRemaining,
+          quotaLimit: vlResult.quotaLimit,
+        });
+      }
 
       const batchResult = await synthesizeDialogueInMacroBlocks(ai, {
         turns: batchInputTurns,
@@ -6570,11 +6830,19 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
       useDeliveryEmotions = true,
       pronunciationDictionary: rawPronunciationDictionary = [],
       masterAudioMode = "time_aligned",
+      voiceLockMode = "standard",
       totalVideoDurationSec,
       totalTimelineSec,
       forceRephraseShorter = false,
       measuredPace,
     } = req.body;
+
+    if (voiceLockMode === "full_speaker_tracks") {
+      return res.status(400).json({
+        error:
+          "В режиме Voice Lock перегенерация отдельной реплики запрещена. Используйте «Перегенерировать весь трек этого ведущего (1 запрос)».",
+      });
+    }
 
     const mergedSpeakerVoices: Record<string, any> = {
       ...(speakerVoices && typeof speakerVoices === "object" ? speakerVoices : {}),
@@ -6661,17 +6929,6 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
     rawContextList.push(workingTurn);
     if (nextTurn) rawContextList.push(nextTurn);
 
-    const isClonedVoiceId = (id?: string, cfg?: any): boolean => {
-      if (cfg && (cfg.voiceSampleAudio || cfg.consentAudio || cfg.voiceConsentSignature)) return true;
-      const l = String(id || "").toLowerCase();
-      return (
-        l === "voice_17raj9ewke3g" ||
-        l === "user-replicated" ||
-        l === "shohrux" ||
-        l === "shokhrukh"
-      );
-    };
-
     const speakerMap = new Map<string, ResolvedBatchSpeaker>();
     const addSpeakerToMap = (spId: string, sampleTurn: any) => {
       if (speakerMap.has(spId)) return;
@@ -6690,13 +6947,20 @@ app.post("/api/podcast/synthesize-single-turn", requireCreditBalance(1), async (
         spId === "HOST_1" ? host1Voice : spId === "HOST_2" ? host2Voice : null;
       const replicatedCfg =
         sampleTurn?.replicatedVoiceConfig || customEntry?.replicatedVoiceConfig || undefined;
+      const isPersistent =
+        resolved.voiceType === "prompted" ||
+        resolved.voiceType === "replicated" ||
+        isStoredVoiceId(resolved.voiceId) ||
+        Boolean(replicatedCfg?.voiceSampleAudio);
       speakerMap.set(spId, {
         speakerId: spId,
         speakerName: resolved.speakerName,
         baseVoice: resolved.baseVoice,
         voiceId: resolved.voiceId,
+        voiceType: resolved.voiceType,
+        identityVersion: resolved.identityVersion,
         gender: resolved.gender,
-        isCloned: isClonedVoiceId(resolved.voiceId, replicatedCfg),
+        isCloned: isPersistent,
         replicatedVoiceConfig: replicatedCfg,
         baseSpeechStyle: sanitizeBaseStyle(
           customEntry?.baseStyle ?? hostFallback?.baseStyle,

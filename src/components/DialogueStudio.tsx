@@ -58,7 +58,13 @@ import {
   X,
   Zap,
   Layers,
+  Lock,
 } from 'lucide-react';
+import {
+  AZIZ_VOICE_LOCK_M2,
+  VERONIKA_VOICE_LOCK_F1,
+  isStoredPersistentVoiceId,
+} from '../data/voices';
 import {
   parseReadyScript,
   exportTurnsToJson,
@@ -436,9 +442,52 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
   // Project-level dubbing style & pronunciation settings
   const [useDeliveryEmotions, setUseDeliveryEmotions] = useState<boolean>(true);
+  const [voiceLockMode, setVoiceLockMode] = useState<boolean>(false);
+  const [regeneratingSpeakerId, setRegeneratingSpeakerId] = useState<string | null>(null);
+  const [voiceLockSpeakerReports, setVoiceLockSpeakerReports] = useState<
+    Array<{
+      speakerId: string;
+      speakerName: string;
+      voiceId: string;
+      identityVersion: string;
+      status: 'ok' | 'failed';
+      error?: string;
+      ttsCalls: number;
+      turnsCount: number;
+      okTurns: number;
+      failedTurns: number;
+      cacheHit?: boolean;
+      identityQa?: {
+        sameSpeakerBeginning: boolean;
+        sameSpeakerMiddle: boolean;
+        sameSpeakerEnd: boolean;
+        driftDetected: boolean;
+        confidence: number;
+        explanationRu: string;
+        passed: boolean;
+      };
+    }>
+  >([]);
   const [pronunciationDictionary, setPronunciationDictionary] = useState<
     PronunciationDictionaryEntry[]
   >(() => DEFAULT_PRONUNCIATION_DICTIONARY.map((entry) => ({ ...entry })));
+
+  // Toggle «Voice Lock — один голос на всё видео»: auto-select Aziz M2 (male) & Veronika F1 (female)
+  const handleToggleVoiceLock = (enabled: boolean) => {
+    setVoiceLockMode(enabled);
+    if (enabled) {
+      if (speaker1Gender === 'male') {
+        setSpeaker1VoiceId(AZIZ_VOICE_LOCK_M2.id);
+      } else {
+        setSpeaker1VoiceId(VERONIKA_VOICE_LOCK_F1.id);
+      }
+      if (speaker2Gender === 'male') {
+        setSpeaker2VoiceId(AZIZ_VOICE_LOCK_M2.id);
+      } else {
+        setSpeaker2VoiceId(VERONIKA_VOICE_LOCK_F1.id);
+      }
+    }
+  };
 
   // Extra speakers (HOST_3, HOST_4...) when storyboard has >2 speakers
   const [extraSpeakers, setExtraSpeakers] = useState<
@@ -678,9 +727,19 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
           voice: speaker2Profile,
         },
       ],
-      turns
+      turns,
+      { voiceLockMode }
     );
-  }, [turns, speaker1Name, speaker1Gender, speaker1Profile, speaker2Name, speaker2Gender, speaker2Profile]);
+  }, [
+    turns,
+    speaker1Name,
+    speaker1Gender,
+    speaker1Profile,
+    speaker2Name,
+    speaker2Gender,
+    speaker2Profile,
+    voiceLockMode,
+  ]);
 
   const plannedSubBlocks = useMemo(() => {
     if (turns.length === 0) return [];
@@ -709,24 +768,35 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         transcribeCalls: 0,
         retryBufferCalls: 0,
         estimatedCalls: 0,
-        modeLabel: 'A' as 'A' | 'B',
+        modeLabel: 'A' as 'A' | 'B' | 'VL',
       };
     }
     const uniqueSpeakers = new Set(turns.map((t) => t.speakerId || 'HOST_1'));
-    const hasCloned = [speaker1Profile, speaker2Profile].some((p: any) => {
+    if (voiceLockMode) {
+      const speakerTrackCount = Math.min(2, Math.max(1, uniqueSpeakers.size));
+      return {
+        blocks: 1,
+        subBlocks: 1,
+        baseTtsCalls: speakerTrackCount,
+        transcribeCalls: speakerTrackCount,
+        retryBufferCalls: 0,
+        estimatedCalls: speakerTrackCount,
+        modeLabel: 'VL' as 'A' | 'B' | 'VL',
+      };
+    }
+    const hasPersistent = [speaker1Profile, speaker2Profile].some((p: any) => {
       if (!p) return false;
-      const id = String(p.voiceId || p.id || '').toLowerCase();
+      const id = String(p.voiceId || p.id || '');
       return (
         Boolean(p.isReplicatedVoice || p.isUserCustomVoice) ||
-        id === 'voice_17raj9ewke3g' ||
-        id === 'user-replicated' ||
-        id === 'shohrux' ||
-        id === 'shokhrukh'
+        p.voiceType === 'prompted' ||
+        p.voiceType === 'replicated' ||
+        isStoredPersistentVoiceId(id)
       );
     });
     const blocks = Math.max(1, plannedMacroBlocks.length);
     const subBlocks = Math.max(1, plannedSubBlocks.length);
-    const useModeB = hasCloned || uniqueSpeakers.size > 2;
+    const useModeB = hasPersistent || uniqueSpeakers.size > 2;
     let baseTtsCalls = 0;
     for (const sb of plannedSubBlocks) {
       const sbSpeakers = new Set(sb.turns.map((t) => t.speakerId || 'HOST_1'));
@@ -745,9 +815,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       transcribeCalls,
       retryBufferCalls,
       estimatedCalls,
-      modeLabel: (useModeB ? 'B' : 'A') as 'A' | 'B',
+      modeLabel: (useModeB ? 'B' : 'A') as 'A' | 'B' | 'VL',
     };
-  }, [turns, plannedMacroBlocks, plannedSubBlocks, speaker1Profile, speaker2Profile]);
+  }, [turns, plannedMacroBlocks, plannedSubBlocks, speaker1Profile, speaker2Profile, voiceLockMode]);
 
   // Ref to avoid overwriting user storage while hydrating on user switch
   const isHydratingUserRef = useRef<boolean>(false);
@@ -951,21 +1021,23 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     if (turn.speakerId === 'HOST_1') {
       return [
         speaker1Profile?.voiceId || speaker1Profile?.id || speaker1VoiceId,
+        speaker1Profile?.voiceType || (speaker1Profile?.isReplicatedVoice ? 'replicated' : 'prebuilt'),
+        speaker1Profile?.identityVersion || '',
         speaker1Profile?.baseVoice || '',
         speaker1Gender,
         speaker1Tempo,
         speaker1Profile?.timbre || '',
-        speaker1Profile?.isReplicatedVoice ? 'clone' : 'builtin',
       ].join('|');
     }
     if (turn.speakerId === 'HOST_2') {
       return [
         speaker2Profile?.voiceId || speaker2Profile?.id || speaker2VoiceId,
+        speaker2Profile?.voiceType || (speaker2Profile?.isReplicatedVoice ? 'replicated' : 'prebuilt'),
+        speaker2Profile?.identityVersion || '',
         speaker2Profile?.baseVoice || '',
         speaker2Gender,
         speaker2Tempo,
         speaker2Timbre || speaker2Profile?.timbre || '',
-        speaker2Profile?.isReplicatedVoice ? 'clone' : 'builtin',
       ].join('|');
     }
     const extra = extraSpeakers.find(
@@ -2449,12 +2521,197 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     }
   };
 
+  // Voice Lock: Regenerate the ENTIRE speaker track (1 continuous TTS call) & re-stitch with the other speaker's track
+  const handleRegenerateVoiceLockSpeaker = async (targetSpeakerId: string) => {
+    if (
+      !requireAuth(
+        () => {},
+        'Синтез диалога доступен только для зарегистрированных пользователей.'
+      )
+    )
+      return;
+    if (turns.length === 0) return;
+
+    const targetSpeakerLabel = targetSpeakerId === 'HOST_2' ? speaker2Name : speaker1Name;
+    setRegeneratingSpeakerId(targetSpeakerId);
+    setDialogueNotice(
+      `🔒 Voice Lock: перегенерация всего трека ведущего «${targetSpeakerLabel}» (1 запрос TTS)...`
+    );
+
+    try {
+      const effectiveVideoDurationSec = Math.max(
+        Number(totalVideoDurationSec) || 0,
+        ...turns.map((t: any) => Number(t.endSec) || 0),
+        ...noSpeechIntervals.map((n: any) => Number(n.endSec) || 0)
+      );
+      const effectiveMode =
+        studioSourceMode === 'verbatim' || turns.some((t) => typeof t.startSec === 'number')
+          ? 'time_aligned'
+          : masterAudioMode;
+
+      const host1VoicePayload = {
+        voiceId: speaker1Profile?.voiceId || speaker1Profile?.id || 'aziza',
+        voiceType: speaker1Profile?.voiceType,
+        identityVersion: speaker1Profile?.identityVersion,
+        name: speaker1Name,
+        speakerName: speaker1Name,
+        baseVoice: speaker1Profile?.baseVoice || (speaker1Gender === 'male' ? 'Charon' : 'Kore'),
+        gender: speaker1Gender,
+        baseStyle: speaker1BaseStyle,
+        tempo: speaker1Tempo,
+      };
+      const host2VoicePayload = {
+        voiceId: speaker2Profile?.voiceId || speaker2Profile?.id || 'voice_17raj9ewke3g',
+        voiceType: speaker2Profile?.voiceType,
+        identityVersion: speaker2Profile?.identityVersion,
+        name: speaker2Name,
+        speakerName: speaker2Name,
+        baseVoice: speaker2Profile?.baseVoice || (speaker2Gender === 'female' ? 'Kore' : 'Charon'),
+        gender: speaker2Gender,
+        baseStyle: speaker2BaseStyle,
+        tempo: speaker2Tempo,
+        timbre: speaker2Timbre || speaker2Profile?.timbre,
+      };
+
+      const enrichedTurns = turns.map((t, idx) => {
+        const nextStartSec =
+          idx + 1 < turns.length && typeof turns[idx + 1]?.startSec === 'number'
+            ? turns[idx + 1].startSec!
+            : effectiveVideoDurationSec > (t.endSec || 0)
+            ? effectiveVideoDurationSec
+            : t.endSec || 0;
+        const gapAfterSec =
+          typeof t.gapAfterSec === 'number' && t.gapAfterSec >= 0
+            ? t.gapAfterSec
+            : Math.max(0, Math.round((nextStartSec - (t.endSec || 0)) * 100) / 100);
+        return {
+          ...t,
+          gapAfterSec,
+          nextTurnStartSec: nextStartSec,
+        };
+      });
+
+      const res = await authFetch('/api/podcast/synthesize-dialogue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          voiceLockMode: 'full_speaker_tracks',
+          regenerateSpeakerId: targetSpeakerId,
+          bypassCache: true,
+          turns: enrichedTurns,
+          host1Voice: host1VoicePayload,
+          host2Voice: host2VoicePayload,
+          extraSpeakers,
+          masterAudioMode: effectiveMode,
+          totalVideoDurationSec: effectiveVideoDurationSec,
+          useDeliveryEmotions,
+          pronunciationDictionary,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Ошибка перегенерации трека Voice Lock');
+      }
+
+      const returnedById = new Map<string, DialogueTurn>();
+      for (const rt of Array.isArray(data.turns) ? data.turns : []) {
+        if (rt?.id) returnedById.set(rt.id, rt);
+      }
+
+      const existingById = new Map<string, DialogueTurn>();
+      for (const st of synthesizedTurns) {
+        if (st?.id) existingById.set(st.id, st);
+      }
+
+      // Merge: replace ONLY targetSpeakerId's turns; keep the other speaker's already-generated turns intact
+      const mergedTurns: DialogueTurn[] = enrichedTurns.map((t) => {
+        if ((t.speakerId || 'HOST_1') === targetSpeakerId) {
+          const updated = returnedById.get(t.id);
+          return updated ? { ...t, ...updated } : t;
+        }
+        const prev = existingById.get(t.id);
+        return prev ? { ...t, ...prev } : t;
+      });
+
+      const stitchable = mergedTurns.filter((t) => Boolean(t.audioBase64));
+      if (stitchable.length > 0) {
+        const stitchData = stitchDialogueTurnsClient({
+          turns: mergedTurns,
+          masterAudioMode: effectiveMode,
+          totalVideoDurationSec: effectiveVideoDurationSec,
+        });
+        setMasterAudioBase64(stitchData.masterAudioBase64);
+        setTotalDuration(stitchData.totalDurationSeconds || 0);
+        setSynthesizedTurns(stitchData.turns);
+        if (stitchData.srtSubtitles) setSrtSubtitles(stitchData.srtSubtitles);
+      } else {
+        setSynthesizedTurns(mergedTurns);
+      }
+
+      setTurns((prev) =>
+        prev.map((pt) => {
+          if ((pt.speakerId || 'HOST_1') !== targetSpeakerId) return pt;
+          const updated = returnedById.get(pt.id);
+          return updated
+            ? {
+                ...pt,
+                originalDurationSec: updated.originalDurationSec ?? pt.originalDurationSec,
+                dubbedDurationSec: updated.dubbedDurationSec ?? pt.dubbedDurationSec,
+                syncStatus: updated.syncStatus ?? pt.syncStatus,
+                qa: updated.qa ?? pt.qa,
+                qaReason: updated.qaReason,
+                slicingMethod: updated.slicingMethod ?? pt.slicingMethod,
+                shiftedStartBySec: updated.shiftedStartBySec ?? pt.shiftedStartBySec,
+                needsShorten: updated.needsShorten ?? pt.needsShorten,
+                generationMode: updated.generationMode ?? 'voice_lock',
+                lufsBefore: updated.lufsBefore ?? pt.lufsBefore,
+                lufsAfter: updated.lufsAfter ?? pt.lufsAfter,
+              }
+            : pt;
+        })
+      );
+
+      if (Array.isArray(data.speakerTracks)) {
+        setVoiceLockSpeakerReports((prev) => {
+          const byId = new Map(prev.map((r) => [r.speakerId, r]));
+          for (const tr of data.speakerTracks) {
+            if (tr?.speakerId) byId.set(tr.speakerId, tr);
+          }
+          return Array.from(byId.values());
+        });
+      }
+
+      const track = Array.isArray(data.speakerTracks)
+        ? data.speakerTracks.find((tr: any) => tr.speakerId === targetSpeakerId)
+        : null;
+      if (track && (track.status === 'failed' || (track.identityQa && !track.identityQa.passed))) {
+        setDialogueNotice(
+          `⚠ Voice Lock: трек «${targetSpeakerLabel}» не прошёл проверку (${track.error || track.identityQa?.explanationRu || 'см. отчёт Voice Lock'}). Автоповтор не выполнялся.`
+        );
+      } else {
+        setDialogueNotice(
+          `✅ Voice Lock: трек «${targetSpeakerLabel}» перегенерирован (1 запрос TTS) и мастер-дорожка обновлена.`
+        );
+      }
+    } catch (e: any) {
+      setDialogueNotice(`Ошибка перегенерации трека Voice Lock: ${e.message}`);
+    } finally {
+      setRegeneratingSpeakerId(null);
+    }
+  };
+
   // Re-synthesize a SINGLE turn (normal, "Быстрее" fast-pace without rewriting text, or manual "Короче") and re-stitch master audio
   const handleResynthesizeSingleTurn = async (
     turn: DialogueTurn,
     options?: { forceRephraseShorter?: boolean; forceFastPace?: boolean }
   ) => {
     if (!turn.text.trim()) return;
+    if (voiceLockMode) {
+      setDialogueNotice(
+        'В режиме Voice Lock нельзя перегенерировать одну реплику отдельно — используйте «Перегенерировать весь трек этого ведущего (1 запрос)».'
+      );
+      return;
+    }
     const isShortening = Boolean(options?.forceRephraseShorter);
     const isFastPacing = Boolean(options?.forceFastPace);
     if (isShortening) {
@@ -2467,6 +2724,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     try {
       const host1VoicePayload = {
         voiceId: speaker1Profile?.voiceId || speaker1Profile?.id || 'aziza',
+        voiceType: speaker1Profile?.voiceType,
+        identityVersion: speaker1Profile?.identityVersion,
         name: speaker1Name,
         speakerName: speaker1Name,
         baseVoice: speaker1Profile?.baseVoice || (speaker1Gender === 'male' ? 'Charon' : 'Kore'),
@@ -2476,6 +2735,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       };
       const host2VoicePayload = {
         voiceId: speaker2Profile?.voiceId || speaker2Profile?.id || 'voice_17raj9ewke3g',
+        voiceType: speaker2Profile?.voiceType,
+        identityVersion: speaker2Profile?.identityVersion,
         name: speaker2Name,
         speakerName: speaker2Name,
         baseVoice: speaker2Profile?.baseVoice || (speaker2Gender === 'female' ? 'Kore' : 'Charon'),
@@ -2642,6 +2903,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
       const host1VoicePayload = {
         voiceId: speaker1Profile?.voiceId || speaker1Profile?.id || 'aziza',
+        voiceType: speaker1Profile?.voiceType,
+        identityVersion: speaker1Profile?.identityVersion,
         name: speaker1Name,
         speakerName: speaker1Name,
         baseVoice: speaker1Profile?.baseVoice || (speaker1Gender === 'male' ? 'Charon' : 'Kore'),
@@ -2663,6 +2926,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
       };
       const host2VoicePayload = {
         voiceId: speaker2Profile?.voiceId || speaker2Profile?.id || 'voice_17raj9ewke3g',
+        voiceType: speaker2Profile?.voiceType,
+        identityVersion: speaker2Profile?.identityVersion,
         name: speaker2Name,
         speakerName: speaker2Name,
         baseVoice: speaker2Profile?.baseVoice || (speaker2Gender === 'female' ? 'Kore' : 'Charon'),
@@ -3388,6 +3653,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
 
     const host1VoicePayload = {
       voiceId: speaker1Profile?.voiceId || speaker1Profile?.id || 'aziza',
+      voiceType: speaker1Profile?.voiceType,
+      identityVersion: speaker1Profile?.identityVersion,
       name: speaker1Name,
       speakerName: speaker1Name,
       baseVoice: speaker1Profile?.baseVoice || (speaker1Gender === 'male' ? 'Charon' : 'Kore'),
@@ -3409,6 +3676,8 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
     };
     const host2VoicePayload = {
       voiceId: speaker2Profile?.voiceId || speaker2Profile?.id || 'voice_17raj9ewke3g',
+      voiceType: speaker2Profile?.voiceType,
+      identityVersion: speaker2Profile?.identityVersion,
       name: speaker2Name,
       speakerName: speaker2Name,
       baseVoice: speaker2Profile?.baseVoice || (speaker2Gender === 'female' ? 'Kore' : 'Charon'),
@@ -3447,6 +3716,110 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         nextTurnStartSec: nextStartSec,
       };
     });
+
+    // VOICE LOCK MODE ("full_speaker_tracks"):
+    // Sends ONE request with all turns; backend runs exactly 1 continuous TTS call per speaker (2 total),
+    // never mixes with sub-block cache, never splits into sub-blocks, never auto-retries on QA drift.
+    if (voiceLockMode) {
+      setVoiceLockSpeakerReports([]);
+      setBatchProgress({
+        currentBatch: 1,
+        totalBatches: 1,
+        completedTurns: 0,
+        totalTurns: enrichedTurns.length,
+        percent: 15,
+        statusText: forceFreshNoCache
+          ? '🔒 Voice Lock (без кэша): 2 запроса TTS (один непрерывный трек на каждого ведущего)...'
+          : '🔒 Voice Lock: 2 запроса TTS (один непрерывный трек на каждого ведущего)...',
+      });
+      try {
+        const res = await authFetch('/api/podcast/synthesize-dialogue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: abortControllerRef.current?.signal,
+          body: JSON.stringify({
+            voiceLockMode: 'full_speaker_tracks',
+            turns: enrichedTurns,
+            host1Voice: host1VoicePayload,
+            host2Voice: host2VoicePayload,
+            extraSpeakers,
+            masterAudioMode: effectiveMode,
+            totalVideoDurationSec: effectiveVideoDurationSec,
+            useDeliveryEmotions,
+            pronunciationDictionary,
+            bypassCache: forceFreshNoCache,
+          }),
+        });
+        const data = await res.json();
+        if (typeof data?.quotaRemaining === 'number' && typeof data?.quotaLimit === 'number') {
+          setTtsQuota({
+            used: Math.max(0, data.quotaLimit - data.quotaRemaining),
+            limit: data.quotaLimit,
+            remaining: data.quotaRemaining,
+            resetHintRu: 'после 13:00 по Ташкенту',
+          });
+        }
+        if (!res.ok) {
+          throw new Error(data.error || `Ошибка Voice Lock (${res.status})`);
+        }
+
+        const returnedTurns: DialogueTurn[] = Array.isArray(data.turns) ? data.turns : [];
+        const tracks = Array.isArray(data.speakerTracks) ? data.speakerTracks : [];
+        setVoiceLockSpeakerReports(tracks);
+
+        if (data.masterAudioBase64) {
+          setMasterAudioBase64(data.masterAudioBase64);
+          setTotalDuration(data.totalDurationSeconds || 0);
+        }
+        setSynthesizedTurns(returnedTurns);
+        setTurns((prev) =>
+          prev.map((pt, i) => {
+            const matched = returnedTurns.find((ft) => ft.id === pt.id) || returnedTurns[i];
+            return matched
+              ? {
+                  ...pt,
+                  originalDurationSec: matched.originalDurationSec,
+                  dubbedDurationSec: matched.dubbedDurationSec,
+                  syncStatus: matched.syncStatus,
+                  qa: matched.qa ?? pt.qa,
+                  qaReason: matched.qaReason,
+                  slicingMethod: matched.slicingMethod ?? pt.slicingMethod,
+                  shiftedStartBySec: matched.shiftedStartBySec ?? pt.shiftedStartBySec,
+                  needsShorten: matched.needsShorten ?? pt.needsShorten,
+                  generationMode: matched.generationMode ?? 'voice_lock',
+                  lufsBefore: matched.lufsBefore ?? pt.lufsBefore,
+                  lufsAfter: matched.lufsAfter ?? pt.lufsAfter,
+                }
+              : pt;
+          })
+        );
+        if (data.srtSubtitles) setSrtSubtitles(data.srtSubtitles);
+        setIsPlaying(false);
+        setActiveTurnIndex(-1);
+
+        const failedTracks = tracks.filter((tr: any) => tr.status === 'failed');
+        const failedQaTracks = tracks.filter(
+          (tr: any) => tr.identityQa && !tr.identityQa.passed
+        );
+        if (!data.overallSuccess || failedTracks.length > 0 || failedQaTracks.length > 0) {
+          setDialogueNotice(
+            `⚠ Voice Lock завершён с ошибками (TTS вызовов: ${data.ttsCallsUsed ?? 0}). Проблемных треков: ${failedTracks.length}, Identity QA не пройден: ${failedQaTracks.length}. Автоповтор не запускался — см. отчёт ниже.`
+          );
+        } else {
+          setDialogueNotice(
+            `✅ Voice Lock завершён: ${returnedTurns.length} реплик, TTS вызовов: ${data.ttsCallsUsed ?? 0}, Identity QA пройден для обоих ведущих.`
+          );
+        }
+      } catch (e: any) {
+        if (e?.name !== 'AbortError') {
+          setDialogueNotice(`Ошибка Voice Lock: ${e.message}`);
+        }
+      } finally {
+        setIsSynthesizing(false);
+        setBatchProgress(null);
+      }
+      return;
+    }
 
     // ALWAYS plan sub-blocks on the FULL script; resolve whole-sub-block v3 cache hits ONLY.
     // Forbidden: never cherry-pick turns from inside a sub-block or merge turns from different places!
@@ -4888,8 +5261,37 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
               </div>
             )}
 
-            {/* Delivery Emotions Toggle & Pronunciation Dictionary */}
+            {/* Voice Lock Toggle, Delivery Emotions Toggle & Pronunciation Dictionary */}
             <div className="p-4 rounded-2xl bg-white/85 border border-[rgba(22,21,17,0.12)] space-y-3">
+              <div
+                className={`p-3 rounded-xl border transition-colors ${
+                  voiceLockMode
+                    ? 'bg-[#0E7C86]/8 border-[#0E7C86]/40'
+                    : 'bg-[#FAF8F4] border-[rgba(22,21,17,0.1)]'
+                }`}
+              >
+                <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={voiceLockMode}
+                    onChange={(e) => handleToggleVoiceLock(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 accent-[#0E7C86] rounded cursor-pointer"
+                  />
+                  <span className="text-xs text-[#161511] flex-1">
+                    <span className="font-bold flex items-center gap-1.5">
+                      <Lock className="w-3.5 h-3.5 text-[#0E7C86]" />
+                      <span>Voice Lock — один голос на всё видео</span>
+                    </span>
+                    <span className="block text-[11px] text-[#0A5A62] font-medium mt-0.5">
+                      2 запроса TTS: один трек на каждого ведущего
+                    </span>
+                    <span className="block text-[10.5px] text-[#5D594E] mt-0.5">
+                      Автоматически выбирает постоянные голоса Voice Remix: Aziz Voice Lock M2 (voice_din40bswsfcy) и Veronika Voice Lock F1 (voice_jobdfz42xizz).
+                    </span>
+                  </span>
+                </label>
+              </div>
+
               <label className="flex items-start gap-2.5 cursor-pointer select-none">
                 <input
                   type="checkbox"
@@ -4900,7 +5302,9 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                 <span className="text-xs text-[#161511]">
                   <span className="font-semibold">Эмоции из колонки «Подача»</span>
                   <span className="block text-[11px] text-[#5D594E]">
-                    Добавляет до 2 эмоций к базовому стилю и тег &lt;laugh&gt; для «kulib» (когда хватает времени в окне).
+                    {voiceLockMode
+                      ? 'В режиме Voice Lock добавляет максимум 1 мягкий модификатор эмоции без перегрузки тембра.'
+                      : 'Добавляет до 2 эмоций к базовому стилю и тег <laugh> для «kulib» (когда хватает времени в окне).'}
                   </span>
                 </span>
               </label>
@@ -5261,12 +5665,28 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                                 </span>
                               )}
 
+                              {effGenerationMode === 'voice_lock' && effQa !== 'failed' && (
+                                <span
+                                  className="font-mono text-[10px] font-semibold px-2 py-0.5 rounded-lg bg-[#0E7C86]/10 text-[#0A5A62] border border-[#0E7C86]/30 inline-flex items-center gap-1"
+                                  title="Озвучено в режиме Voice Lock (единый непрерывный трек ведущего)"
+                                >
+                                  <Lock className="w-2.5 h-2.5" />
+                                  Voice Lock
+                                </span>
+                              )}
+
                               {(effQa === 'failed' || effGenerationMode === 'mode_b') && (
                                 <span
                                   className="text-[10.5px] font-semibold text-amber-900 bg-amber-50 border border-amber-300 px-2 py-0.5 rounded-lg"
-                                  title="Реплика озвучена в одиночном режиме (Mode B) или не прошла QA"
+                                  title={
+                                    effGenerationMode === 'voice_lock'
+                                      ? 'Реплика не прошла QA в треке Voice Lock'
+                                      : 'Реплика озвучена в одиночном режиме (Mode B) или не прошла QA'
+                                  }
                                 >
-                                  ⚠ одиночный режим / QA не пройден, голос может отличаться
+                                  {effGenerationMode === 'voice_lock'
+                                    ? '⚠ QA не пройден'
+                                    : '⚠ одиночный режим / QA не пройден, голос может отличаться'}
                                 </span>
                               )}
 
@@ -5373,80 +5793,110 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                           </button>
                         )}
 
-                        {/* Button: "Быстрее" (1 TTS call with fast pace hint, NO text rewrite) */}
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleResynthesizeSingleTurn(turn, { forceFastPace: true })
-                          }
-                          disabled={
-                            fastPacingTurnId === turn.id ||
-                            shorteningTurnId === turn.id ||
-                            isResynthesizingThis ||
-                            resynthesizingSubBlockIndex !== null ||
-                            isSynthesizing
-                          }
-                          className="btn-pill btn-ghost text-[10.5px] py-1 px-2.5 flex items-center gap-1 cursor-pointer border border-amber-500/45 text-amber-900 hover:bg-amber-600 hover:text-white transition-all"
-                          title="Перегенерировать эту реплику в ускоренном темпе (1 вызов TTS, текст не меняется)"
-                        >
-                          <Zap
-                            className={`w-3 h-3 ${
-                              fastPacingTurnId === turn.id ? 'animate-pulse' : ''
-                            }`}
-                          />
-                          <span>{fastPacingTurnId === turn.id ? 'Быстрее...' : 'Быстрее'}</span>
-                        </button>
-
-                        {/* Button: "Перегенерировать реплику" (1 TTS call) */}
-                        <button
-                          type="button"
-                          onClick={() => handleResynthesizeSingleTurn(turn)}
-                          disabled={
-                            isResynthesizingThis ||
-                            fastPacingTurnId === turn.id ||
-                            shorteningTurnId === turn.id ||
-                            resynthesizingSubBlockIndex !== null ||
-                            isSynthesizing
-                          }
-                          className="btn-pill btn-ghost text-[10.5px] py-1 px-2.5 flex items-center gap-1 cursor-pointer border border-[#0E7C86]/35 text-[#0A5A62] hover:bg-[#0E7C86] hover:text-white transition-all"
-                          title="Перегенерировать только эту реплику (1 вызов TTS) и пересобрать мастер-дорожку"
-                        >
-                          <RefreshCw className={`w-3 h-3 ${isResynthesizingThis ? 'animate-spin' : ''}`} />
-                          <span>{isResynthesizingThis ? 'Озвучка...' : 'Перегенерировать реплику'}</span>
-                        </button>
-
-                        {/* Button: "Перегенерировать подблок" (1 sub-block call with bypassCache: true) */}
-                        {(() => {
-                          const subBlockForTurn = plannedSubBlocks.find(
-                            (sb) => index >= sb.startTurnIndex && index <= sb.endTurnIndex
-                          );
-                          if (!subBlockForTurn) return null;
-                          const isSubBlockBusy =
-                            resynthesizingSubBlockIndex === subBlockForTurn.globalSubBlockIndex;
-                          return (
+                        {voiceLockMode ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleRegenerateVoiceLockSpeaker(turn.speakerId || 'HOST_1')
+                            }
+                            disabled={
+                              regeneratingSpeakerId !== null ||
+                              isSynthesizing
+                            }
+                            className="btn-pill btn-ghost text-[10.5px] py-1 px-2.5 flex items-center gap-1 cursor-pointer border border-[#0E7C86]/40 text-[#0A5A62] hover:bg-[#0E7C86] hover:text-white transition-all"
+                            title="В режиме Voice Lock перегенерируется весь трек этого ведущего одним запросом TTS (без смены голоса)"
+                          >
+                            <RefreshCw
+                              className={`w-3 h-3 ${
+                                regeneratingSpeakerId === (turn.speakerId || 'HOST_1')
+                                  ? 'animate-spin'
+                                  : ''
+                              }`}
+                            />
+                            <span>
+                              {regeneratingSpeakerId === (turn.speakerId || 'HOST_1')
+                                ? 'Перегенерация трека...'
+                                : 'Перегенерировать весь трек этого ведущего (1 запрос)'}
+                            </span>
+                          </button>
+                        ) : (
+                          <>
+                            {/* Button: "Быстрее" (1 TTS call with fast pace hint, NO text rewrite) */}
                             <button
                               type="button"
-                              onClick={() => handleResynthesizeSubBlock(index)}
+                              onClick={() =>
+                                handleResynthesizeSingleTurn(turn, { forceFastPace: true })
+                              }
                               disabled={
-                                isSubBlockBusy ||
+                                fastPacingTurnId === turn.id ||
+                                shorteningTurnId === turn.id ||
+                                isResynthesizingThis ||
                                 resynthesizingSubBlockIndex !== null ||
+                                isSynthesizing
+                              }
+                              className="btn-pill btn-ghost text-[10.5px] py-1 px-2.5 flex items-center gap-1 cursor-pointer border border-amber-500/45 text-amber-900 hover:bg-amber-600 hover:text-white transition-all"
+                              title="Перегенерировать эту реплику в ускоренном темпе (1 вызов TTS, текст не меняется)"
+                            >
+                              <Zap
+                                className={`w-3 h-3 ${
+                                  fastPacingTurnId === turn.id ? 'animate-pulse' : ''
+                                }`}
+                              />
+                              <span>{fastPacingTurnId === turn.id ? 'Быстрее...' : 'Быстрее'}</span>
+                            </button>
+
+                            {/* Button: "Перегенерировать реплику" (1 TTS call) */}
+                            <button
+                              type="button"
+                              onClick={() => handleResynthesizeSingleTurn(turn)}
+                              disabled={
                                 isResynthesizingThis ||
                                 fastPacingTurnId === turn.id ||
                                 shorteningTurnId === turn.id ||
+                                resynthesizingSubBlockIndex !== null ||
                                 isSynthesizing
                               }
-                              className="btn-pill btn-ghost text-[10.5px] py-1 px-2.5 flex items-center gap-1 cursor-pointer border border-[#C4552D]/40 text-[#C4552D] hover:bg-[#C4552D] hover:text-white transition-all"
-                              title={`Перегенерировать подблок #${subBlockForTurn.globalSubBlockIndex + 1} (${subBlockForTurn.startTimecode}–${subBlockForTurn.endTimecode}, ${subBlockForTurn.turns.length} репл.) без кэша`}
+                              className="btn-pill btn-ghost text-[10.5px] py-1 px-2.5 flex items-center gap-1 cursor-pointer border border-[#0E7C86]/35 text-[#0A5A62] hover:bg-[#0E7C86] hover:text-white transition-all"
+                              title="Перегенерировать только эту реплику (1 вызов TTS) и пересобрать мастер-дорожку"
                             >
-                              <Layers className={`w-3 h-3 ${isSubBlockBusy ? 'animate-spin' : ''}`} />
-                              <span>
-                                {isSubBlockBusy
-                                  ? 'Подблок...'
-                                  : `Перегенерировать подблок #${subBlockForTurn.globalSubBlockIndex + 1}`}
-                              </span>
+                              <RefreshCw className={`w-3 h-3 ${isResynthesizingThis ? 'animate-spin' : ''}`} />
+                              <span>{isResynthesizingThis ? 'Озвучка...' : 'Перегенерировать реплику'}</span>
                             </button>
-                          );
-                        })()}
+
+                            {/* Button: "Перегенерировать подблок" (1 sub-block call with bypassCache: true) */}
+                            {(() => {
+                              const subBlockForTurn = plannedSubBlocks.find(
+                                (sb) => index >= sb.startTurnIndex && index <= sb.endTurnIndex
+                              );
+                              if (!subBlockForTurn) return null;
+                              const isSubBlockBusy =
+                                resynthesizingSubBlockIndex === subBlockForTurn.globalSubBlockIndex;
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={() => handleResynthesizeSubBlock(index)}
+                                  disabled={
+                                    isSubBlockBusy ||
+                                    resynthesizingSubBlockIndex !== null ||
+                                    isResynthesizingThis ||
+                                    fastPacingTurnId === turn.id ||
+                                    shorteningTurnId === turn.id ||
+                                    isSynthesizing
+                                  }
+                                  className="btn-pill btn-ghost text-[10.5px] py-1 px-2.5 flex items-center gap-1 cursor-pointer border border-[#C4552D]/40 text-[#C4552D] hover:bg-[#C4552D] hover:text-white transition-all"
+                                  title={`Перегенерировать подблок #${subBlockForTurn.globalSubBlockIndex + 1} (${subBlockForTurn.startTimecode}–${subBlockForTurn.endTimecode}, ${subBlockForTurn.turns.length} репл.) без кэша`}
+                                >
+                                  <Layers className={`w-3 h-3 ${isSubBlockBusy ? 'animate-spin' : ''}`} />
+                                  <span>
+                                    {isSubBlockBusy
+                                      ? 'Подблок...'
+                                      : `Перегенерировать подблок #${subBlockForTurn.globalSubBlockIndex + 1}`}
+                                  </span>
+                                </button>
+                              );
+                            })()}
+                          </>
+                        )}
 
                         {/* Button: "Изменить" (focus/toggle editing for this turn) */}
                         <button
@@ -5698,6 +6148,61 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
               </div>
             )}
 
+            {voiceLockMode && voiceLockSpeakerReports.length > 0 && (
+              <div className="p-3.5 rounded-2xl bg-[#FAF8F4] border border-[rgba(22,21,17,0.14)] space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-[#161511] flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 text-[#0E7C86]" />
+                    <span>Отчёт Voice Lock (Identity QA по трекам ведущих)</span>
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {voiceLockSpeakerReports.map((tr) => {
+                    const qaOk = tr.status === 'ok' && (!tr.identityQa || tr.identityQa.passed);
+                    return (
+                      <div
+                        key={tr.speakerId}
+                        className={`p-2.5 rounded-xl border text-[11px] space-y-1 ${
+                          qaOk
+                            ? 'bg-emerald-50/70 border-emerald-300 text-emerald-950'
+                            : 'bg-rose-50/80 border-rose-300 text-rose-950'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-bold">
+                            {tr.speakerName} ({tr.identityVersion})
+                          </span>
+                          <span className="font-mono text-[10px]">{tr.voiceId}</span>
+                        </div>
+                        <div className="text-[10.5px]">
+                          Реплик: {tr.okTurns}/{tr.turnsCount} ok · TTS: {tr.ttsCalls}
+                          {tr.cacheHit ? ' (кэш)' : ''}
+                        </div>
+                        {tr.identityQa && (
+                          <div className="text-[10.5px]">
+                            Identity QA: {tr.identityQa.passed ? 'ПРОЙДЕН' : 'НЕ ПРОЙДЕН'} (
+                            {Math.round((tr.identityQa.confidence || 0) * 100)}%) —{' '}
+                            {tr.identityQa.explanationRu}
+                          </div>
+                        )}
+                        {tr.error && <div className="text-[10.5px] font-semibold">⚠ {tr.error}</div>}
+                        <button
+                          type="button"
+                          onClick={() => handleRegenerateVoiceLockSpeaker(tr.speakerId)}
+                          disabled={regeneratingSpeakerId !== null || isSynthesizing}
+                          className="mt-1 btn-pill btn-ghost text-[10px] py-0.5 px-2 border border-[#0E7C86]/35 text-[#0A5A62] hover:bg-[#0E7C86] hover:text-white cursor-pointer"
+                        >
+                          {regeneratingSpeakerId === tr.speakerId
+                            ? 'Перегенерация...'
+                            : 'Перегенерировать весь трек этого ведущего (1 запрос)'}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Add turn button & Synthesize action + Quota Forecast (Раздел 2.8) */}
             <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-3 flex-wrap">
               <button
@@ -5716,15 +6221,21 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
                         ? 'bg-amber-50 border-amber-300 text-amber-900 font-semibold'
                         : 'bg-[#FAF8F4] border-[rgba(22,21,17,0.12)] text-[#0A5A62]'
                     }`}
-                    title={`Подблоков (<=8 реплик / <=40с): ${dubbingCallsForecast.subBlocks}. Базово TTS: ${dubbingCallsForecast.baseTtsCalls} + лимит переделок ≤25% (+${dubbingCallsForecast.retryBufferCalls}) = до ${dubbingCallsForecast.estimatedCalls} выз. TTS; транскрипция: ~${dubbingCallsForecast.transcribeCalls} выз.`}
+                    title={
+                      voiceLockMode
+                        ? 'Режим Voice Lock: 2 запроса TTS (по одному непрерывному треку на каждого ведущего), без подблоков и без автопереключения голоса.'
+                        : `Подблоков (<=8 реплик / <=40с): ${dubbingCallsForecast.subBlocks}. Базово TTS: ${dubbingCallsForecast.baseTtsCalls} + лимит переделок ≤25% (+${dubbingCallsForecast.retryBufferCalls}) = до ${dubbingCallsForecast.estimatedCalls} выз. TTS; транскрипция: ~${dubbingCallsForecast.transcribeCalls} выз.`
+                    }
                   >
-                    {ttsQuota ? (
-                      dubbingCallsForecast.estimatedCalls > ttsQuota.remaining
+                    {voiceLockMode
+                      ? ttsQuota
+                        ? `🔒 2 запроса TTS: один трек на каждого ведущего · квота ${ttsQuota.remaining}/${ttsQuota.limit}`
+                        : '🔒 2 запроса TTS: один трек на каждого ведущего'
+                      : ttsQuota
+                      ? dubbingCallsForecast.estimatedCalls > ttsQuota.remaining
                         ? `⚠ ${dubbingCallsForecast.subBlocks} подбл. · ~${dubbingCallsForecast.baseTtsCalls} TTS (≤+25% = ${dubbingCallsForecast.estimatedCalls}) + ${dubbingCallsForecast.transcribeCalls} транскр. · квота ${ttsQuota.remaining}/${ttsQuota.limit}`
                         : `${dubbingCallsForecast.subBlocks} подбл. · ~${dubbingCallsForecast.baseTtsCalls} TTS (≤+25% = ${dubbingCallsForecast.estimatedCalls}) + ${dubbingCallsForecast.transcribeCalls} транскр. · квота ${ttsQuota.remaining}/${ttsQuota.limit}`
-                    ) : (
-                      `${dubbingCallsForecast.subBlocks} подбл. · ~${dubbingCallsForecast.baseTtsCalls} TTS (≤+25% = ${dubbingCallsForecast.estimatedCalls}) + ${dubbingCallsForecast.transcribeCalls} транскр.`
-                    )}
+                      : `${dubbingCallsForecast.subBlocks} подбл. · ~${dubbingCallsForecast.baseTtsCalls} TTS (≤+25% = ${dubbingCallsForecast.estimatedCalls}) + ${dubbingCallsForecast.transcribeCalls} транскр.`}
                   </span>
                 )}
 

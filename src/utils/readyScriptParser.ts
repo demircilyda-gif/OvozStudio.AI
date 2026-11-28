@@ -1685,10 +1685,12 @@ export interface SynthesisVoiceCheckSpeaker {
  */
 export function checkSynthesisVoiceWarnings(
   speakers: SynthesisVoiceCheckSpeaker[],
-  turns: Array<{ speakerId?: string }> = []
+  turns: Array<{ speakerId?: string }> = [],
+  options?: { voiceLockMode?: boolean }
 ): string[] {
   const activeSpeakerIds =
     turns.length > 0 ? new Set(turns.map((t) => t.speakerId || 'HOST_1')) : null;
+  const isVoiceLock = Boolean(options?.voiceLockMode);
 
   const warnings: string[] = [];
   for (const sp of speakers) {
@@ -1703,7 +1705,14 @@ export function checkSynthesisVoiceWarnings(
         `Спикер «${sp.name}» (${sp.gender === 'female' ? 'Ж' : 'М'}): выбран голос «${voiceLabel}» противоположного пола (${voiceGender === 'female' ? 'Ж' : 'М'}).`
       );
     }
-    if (isClonedVoiceProfile(sp.voice)) {
+    if (isVoiceLock) {
+      const id = String(sp.voice.voiceId || sp.voice.id || '');
+      if (!id.startsWith('voice_')) {
+        warnings.push(
+          `Спикер «${sp.name}»: для режима Voice Lock нужен постоянный голос (voice_...), выбран «${voiceLabel}».`
+        );
+      }
+    } else if (isClonedVoiceProfile(sp.voice)) {
       warnings.push(
         `Спикер «${sp.name}»: выбран клонированный голос («${voiceLabel}»). Озвучка пойдёт в раздельном режиме с повышенным расходом вызовов TTS.`
       );

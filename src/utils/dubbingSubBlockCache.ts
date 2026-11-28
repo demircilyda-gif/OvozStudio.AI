@@ -21,7 +21,7 @@ export interface CachedSubBlockTurnRecord {
   qa?: 'ok' | 'retried' | 'failed';
   qaReason?: string;
   slicingMethod?: string;
-  generationMode?: 'mode_a' | 'mode_b';
+  generationMode?: 'mode_a' | 'mode_b' | 'voice_lock';
   lufsBefore?: number | null;
   lufsAfter?: number | null;
   shiftedStartBySec?: number;

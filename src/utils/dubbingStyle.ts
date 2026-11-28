@@ -196,10 +196,67 @@ export function buildTurnTtsStyle(params: {
 }
 
 /**
- * Проверяет, содержит ли стиль указание `quietly` (для цели громкости -21 LUFS).
+ * Безопасные мягкие эмоции для режима Voice Lock (Gemini Voice Remix):
+ * - на нейтральных репликах style всегда "" (личность и базовый тембр уже внутри Voice Remix);
+ * - на эмоциональных репликах максимум ОДИН короткий модификатор строго из этой таблицы;
+ * - никогда не объединяет две эмоции и никогда не использует запрещённые слова
+ *   (worried, dramatic, authoritative, news presenter, high pitch, low pitch, whispering, excited, amazed).
+ */
+export const VOICE_LOCK_SAFE_EMOTION_RULES: ReadonlyArray<{
+  prefixes: string[];
+  style: string;
+}> = [
+  { prefixes: ['azart', 'hayajon'], style: 'lightly excited' },
+  { prefixes: ['kulib', 'hazil'], style: 'gently amused' },
+  { prefixes: ['tabassum', 'kulimsira'], style: 'smiling' },
+  { prefixes: ['qiziqib', 'qiziqish'], style: 'slightly curious' },
+  { prefixes: ['mamnun', 'xursand', 'zavq'], style: 'pleased' },
+  { prefixes: ['shubha'], style: 'slightly doubtful' },
+  { prefixes: ['xavotir', 'hayiq'], style: 'slightly concerned' },
+  { prefixes: ['hayrat'], style: 'pleasantly surprised' },
+  { prefixes: ['tinchlantir'], style: 'gently reassuring' },
+  { prefixes: ['iliq'], style: 'warmly' },
+  { prefixes: ['ohista', 'past ovozda'], style: 'softly' },
+];
+
+export const VOICE_LOCK_ALLOWED_STYLES: ReadonlySet<string> = new Set([
+  '',
+  ...VOICE_LOCK_SAFE_EMOTION_RULES.map((r) => r.style),
+]);
+
+/**
+ * Возвращает ровно 0 или 1 безопасный модификатор эмоции для Voice Lock из колонки «Подача».
+ * На нейтральных репликах или при useDeliveryEmotions=false всегда возвращает "".
+ */
+export function extractVoiceLockSafeEmotion(
+  intonationRu?: string | null,
+  useDeliveryEmotions = true
+): string {
+  if (useDeliveryEmotions === false) return '';
+  const normalized = normalizeForMatch(intonationRu || '');
+  if (!normalized.trim()) return '';
+
+  let bestIndex = -1;
+  let bestStyle = '';
+
+  for (const rule of VOICE_LOCK_SAFE_EMOTION_RULES) {
+    for (const prefix of rule.prefixes) {
+      const idx = findPrefixWordStartIndex(normalized, prefix);
+      if (idx >= 0 && (bestIndex < 0 || idx < bestIndex)) {
+        bestIndex = idx;
+        bestStyle = rule.style;
+      }
+    }
+  }
+
+  return VOICE_LOCK_ALLOWED_STYLES.has(bestStyle) ? bestStyle : '';
+}
+
+/**
+ * Проверяет, содержит ли стиль указание `quietly` или `softly` (для цели громкости -21 LUFS).
  */
 export function hasQuietlyStyle(style?: string | null): boolean {
-  return /\bquietly\b/i.test(String(style || ''));
+  return /\b(?:quietly|softly)\b/i.test(String(style || ''));
 }
 
 /**
